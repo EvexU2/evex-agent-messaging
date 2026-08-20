@@ -17,32 +17,32 @@ TOOLS = [
     {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation from a signed Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "required": ["parentCapability", "taskKey", "role", "mission"], "properties": {"parentCapability": {"type": "string"}, "taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair", "waiter"]}, "mission": {"type": "string"}}},
+        "inputSchema": {"type": "object", "required": ["parentCapabilityRef", "taskKey", "role", "mission"], "properties": {"parentCapabilityRef": {"type": "string", "pattern": "^evx1_"}, "taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair", "waiter"]}, "mission": {"type": "string"}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
     },
     {
         "name": "send_to_parent",
         "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
-        "inputSchema": {"type": "object", "required": ["capability", "result"], "properties": {"capability": {"type": "string"}, "result": {"type": "object"}}},
+        "inputSchema": {"type": "object", "required": ["capabilityRef", "result"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "result": {"type": "object"}}},
     },
     {
         "name": "request_user_decision",
         "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
-        "inputSchema": {"type": "object", "required": ["capability", "question", "options"], "properties": {"capability": {"type": "string"}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+        "inputSchema": {"type": "object", "required": ["capabilityRef", "question", "options"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
     },
     {
         "name": "cancel_mission",
         "description": "Interrupt the exact Child mission bound to this capability before a replacement mission starts.",
-        "inputSchema": {"type": "object", "required": ["capability", "targetId", "messageKey"], "properties": {"capability": {"type": "string"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+        "inputSchema": {"type": "object", "required": ["capabilityRef", "targetId", "messageKey"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
     },
     {
         "name": "resume_mission",
         "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
-        "inputSchema": {"type": "object", "required": ["capability", "targetId", "messageKey"], "properties": {"capability": {"type": "string"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+        "inputSchema": {"type": "object", "required": ["capabilityRef", "targetId", "messageKey"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
     },
     {
         "name": "publish_navigation_links",
         "description": "Publish bounded human navigation links to the owning Main; links are informational, never workflow authority.",
-        "inputSchema": {"type": "object", "required": ["capability", "links"], "properties": {"capability": {"type": "string"}, "links": {"type": "object", "additionalProperties": {"type": "string"}}}},
+        "inputSchema": {"type": "object", "required": ["capabilityRef", "links"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "links": {"type": "object", "additionalProperties": {"type": "string"}}}},
     },
 ]
 
@@ -69,17 +69,17 @@ class McpServer:
         args = params.get("arguments") or {}
         try:
             if name == "create_child":
-                value = self._service.create_child(args["parentCapability"], args["taskKey"], args["role"], args["mission"])
+                value = self._service.create_child(args["parentCapabilityRef"], args["taskKey"], args["role"], args["mission"], args.get("capabilities"))
             elif name == "send_to_parent":
-                value = self._service.send_to_parent(args["capability"], args["result"])
+                value = self._service.send_to_parent(args["capabilityRef"], args["result"])
             elif name == "request_user_decision":
-                value = self._service.request_user_decision(args["capability"], args["question"], args["options"])
+                value = self._service.request_user_decision(args["capabilityRef"], args["question"], args["options"])
             elif name == "cancel_mission":
-                value = self._service.cancel_mission(args["capability"], uuid.UUID(args["targetId"]), args["messageKey"])
+                value = self._service.cancel_mission(args["capabilityRef"], uuid.UUID(args["targetId"]), args["messageKey"])
             elif name == "resume_mission":
-                value = self._service.resume_mission(args["capability"], uuid.UUID(args["targetId"]), args["messageKey"])
+                value = self._service.resume_mission(args["capabilityRef"], uuid.UUID(args["targetId"]), args["messageKey"])
             elif name == "publish_navigation_links":
-                value = self._service.publish_navigation_links(args["capability"], args["links"])
+                value = self._service.publish_navigation_links(args["capabilityRef"], args["links"])
             else:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:
@@ -131,6 +131,25 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/completion-hook":
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if length < 2 or length > 4096:
+                        raise ValueError("invalid completion-hook body size")
+                    payload = json.loads(self.rfile.read(length))
+                    capability_ref = payload.get("capabilityRef") if isinstance(payload, dict) else None
+                    if not isinstance(capability_ref, str):
+                        raise ValueError("capabilityRef is required")
+                    value = server._service.terminal_wake(capability_ref)
+                    body = json.dumps(value, separators=(",", ":")).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                except Exception:
+                    self.send_error(503, "terminal wake unavailable")
+                return
             if self.path != "/mcp":
                 self.send_error(404)
                 return
@@ -170,7 +189,21 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not base_url or not api_key or not public_url:
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
-    server = McpServer(MessagingService(OpenHandsProvider(base_url, api_key, public_url), secret))
+    completion_hook_url = os.environ.get(
+        "EVEX_MESSAGING_COMPLETION_HOOK_URL",
+        "http://evex-agent-messaging.evex-agents.svc.cluster.local:3101/completion-hook",
+    )
+    server = McpServer(
+        MessagingService(
+            OpenHandsProvider(
+                base_url,
+                api_key,
+                public_url,
+                completion_hook_url=completion_hook_url,
+            ),
+            secret,
+        )
+    )
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
     else:

@@ -12,7 +12,7 @@ from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
 
 class FakeService:
     def create_child(self, *args):
-        return {"childId": "11111111-1111-4111-8111-111111111111", "capability": "opaque"}
+        return {"childId": "11111111-1111-4111-8111-111111111111", "capabilityRef": "evx1_opaque"}
 
     def send_message(self, *args):
         return {"accepted": True}
@@ -42,6 +42,31 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
         self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links"})
+        create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
+        self.assertIn("parentCapabilityRef", create["inputSchema"]["required"])
+        self.assertNotIn("parentCapability", create["inputSchema"]["properties"])
+        self.assertNotIn("terminal_wake", {tool["name"] for tool in listed["result"]["tools"]})
+        self.assertEqual(
+            create["inputSchema"]["properties"]["capabilities"]["items"]["enum"],
+            ["runtime_environment"],
+        )
+
+    def test_create_child_uses_only_opaque_reference_field(self):
+        result = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "create_child",
+                "arguments": {
+                    "parentCapabilityRef": "evx1_parent",
+                    "taskKey": "writer-1",
+                    "role": "writer",
+                    "mission": "Implement",
+                },
+            },
+        })
+        self.assertEqual(result["result"]["structuredContent"]["capabilityRef"], "evx1_opaque")
 
     def test_unknown_tool_is_a_client_error(self):
         result = self.server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "raw_openhands_api", "arguments": {}}})

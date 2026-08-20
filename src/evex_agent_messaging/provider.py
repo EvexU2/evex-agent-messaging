@@ -52,12 +52,17 @@ class OpenHandsProvider:
             if exc.status != 404:
                 raise
         try:
+            profiles = self._request("GET", "/api/agent-profiles")
+            profile_id = profiles.get("active_agent_profile_id")
+            if not isinstance(profile_id, str) or not profile_id:
+                raise ProviderError("OpenHands has no active Agent Profile")
             result = self._request(
                 "POST",
                 "/api/conversations",
                 {
                     "conversation_id": str(child_id),
-                    "agent_profile_id": "default",
+                    "agent_profile_id": profile_id,
+                    "workspace": {"working_dir": f"/home/openhands/workspace/delivery/child-{child_id}"},
                     "tags": {"project": "evex-u", "evexrole": "role-child", "evextask": task_key, "evexparent": str(parent_id), "evexchildrole": role},
                     "autotitle": False,
                     "max_iterations": 300,

@@ -34,6 +34,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "http://openhands", "key", "http://public", completion_hook_url="http://messaging/completion-hook"
         )
         provider._ensure_checkout = Mock()
+        provider._wait_for_admission = Mock()
         provider._request = Mock(side_effect=[
             ProviderError("missing", status=404),
             {"active_agent_profile_id": "acp"},
@@ -67,6 +68,9 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn("http://messaging/completion-hook", hook["command"])
         self.assertIn("evx1_opaque", hook["command"])
         self.assertIn("--retry 2", hook["command"])
+        admission = create["hook_config"]["session_start"][0]["hooks"][0]
+        self.assertIn("update-ref", admission["command"])
+        self.assertIn(str(child), admission["command"])
         self.assertEqual(
             create["mcp_config"],
             {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp"}}},
@@ -82,6 +86,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         provider._ensure_checkout = Mock()
+        provider._wait_for_admission = Mock()
         config = {
             "mcpServers": {
                 "evex_agent_messaging": {"url": "http://messaging/mcp"},
@@ -194,6 +199,49 @@ class OpenHandsProviderTest(unittest.TestCase):
                 provider._request.call_args_list[0].args,
                 ("GET", f"/api/conversations/{child}"),
             )
+
+    def test_session_start_admission_restores_runtime_clobbered_worktree_ref(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            source = workspace / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "eval@example.invalid"], cwd=source, check=True)
+            subprocess.run(["git", "config", "user.name", "Eval"], cwd=source, check=True)
+            (source / "README.md").write_text("fixture\n")
+            subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "fixture"], cwd=source, check=True, capture_output=True)
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+            mirrors = workspace / "mirrors"
+            mirrors.mkdir()
+            mirror = mirrors / "EvexU2--evex-u-core.git"
+            subprocess.run(["git", "clone", "--mirror", str(source), str(mirror)], check=True, capture_output=True)
+            subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/EvexU2/evex-u-core.git"], cwd=mirror, check=True)
+            delivery = workspace / "delivery"
+            delivery.mkdir()
+            provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=str(delivery))
+            checkout = {"repository": "EvexU2/evex-u-core", "branch": "fix/atomic", "headSha": head}
+            provider._ensure_checkout(child, checkout)
+
+            checkout_path = delivery / f"child-{child}"
+            subprocess.run(["git", "update-ref", "-d", "refs/heads/fix/atomic"], cwd=checkout_path, check=True)
+            self.assertNotEqual(
+                subprocess.run(["git", "rev-parse", "--verify", "HEAD"], cwd=checkout_path, capture_output=True).returncode,
+                0,
+            )
+
+            subprocess.run(provider._admission_hook_command(child, checkout), shell=True, check=True)
+
+            self.assertEqual(
+                subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout_path, check=True, capture_output=True, text=True).stdout.strip(),
+                head,
+            )
+            self.assertEqual(
+                subprocess.run(["git", "status", "--porcelain"], cwd=checkout_path, check=True, capture_output=True, text=True).stdout,
+                "",
+            )
+            self.assertEqual(provider._admission_marker(child).read_text(), head + "\n")
 
     def test_existing_progressed_child_is_reused_without_requiring_initial_head(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")

@@ -405,9 +405,22 @@ class OpenHandsProvider:
             f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
         )
         for event in events.get("items", []):
+            if not isinstance(event, dict):
+                continue
+            action = event.get("action")
             if (
-                not isinstance(event, dict)
-                or event.get("kind") != "MessageEvent"
+                event.get("kind") == "ActionEvent"
+                and isinstance(action, dict)
+                and action.get("kind") == "FinishAction"
+                and isinstance(action.get("message"), str)
+                and action["message"].strip()
+            ):
+                text = action["message"].strip()
+                if len(text) > 20000:
+                    raise ProviderError("OpenHands Child terminal response is too large")
+                return text
+            if (
+                event.get("kind") != "MessageEvent"
                 or event.get("source") not in {"agent", "assistant"}
             ):
                 continue

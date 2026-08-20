@@ -114,6 +114,20 @@ class OpenHandsProvider:
                     )
                 },
                 "hook_config": {
+                    "session_start": [
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": self._admission_hook_command(
+                                        child_id, mission["checkout"]
+                                    ),
+                                    "timeout": 10,
+                                }
+                            ],
+                        }
+                    ],
                     "stop": [
                         {
                             "matcher": "*",
@@ -144,11 +158,60 @@ class OpenHandsProvider:
             created = False
         if created or not existing.get("last_user_message_id"):
             self._ensure_checkout(child_id, mission.get("checkout"))
+            self._admission_marker(child_id).unlink(missing_ok=True)
             self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": mission_text}], "run": True})
+            self._wait_for_admission(child_id, mission.get("checkout"))
         return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": created}
 
     def _checkout_path(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve() / f"child-{child_id}"
+
+    def _admission_marker(self, child_id: uuid.UUID) -> Path:
+        return Path(self.workspace_root).resolve().parent / ".evex-admission" / f"{child_id}.ready"
+
+    def _admission_hook_command(self, child_id: uuid.UUID, checkout: dict) -> str:
+        path = self._checkout_path(child_id)
+        marker = self._admission_marker(child_id)
+        temporary = marker.with_suffix(".tmp")
+        head = str(checkout["headSha"])
+        ref = f"refs/heads/{checkout['branch']}"
+        quoted_path = shlex.quote(str(path))
+        quoted_head = shlex.quote(head)
+        quoted_ref = shlex.quote(ref)
+        quoted_marker_parent = shlex.quote(str(marker.parent))
+        quoted_marker = shlex.quote(str(marker))
+        quoted_temporary = shlex.quote(str(temporary))
+        return (
+            "set -eu; "
+            f"test \"$(git -C {quoted_path} rev-parse --show-toplevel)\" = {quoted_path}; "
+            f"test \"$(git -C {quoted_path} symbolic-ref HEAD)\" = {quoted_ref}; "
+            f"git -C {quoted_path} cat-file -e {quoted_head}^{{commit}}; "
+            f"git -C {quoted_path} diff --quiet {quoted_head} --; "
+            f"git -C {quoted_path} diff --cached --quiet {quoted_head} --; "
+            f"git -C {quoted_path} update-ref {quoted_ref} {quoted_head}; "
+            f"test \"$(git -C {quoted_path} rev-parse HEAD)\" = {quoted_head}; "
+            f"test -z \"$(git -C {quoted_path} status --porcelain)\"; "
+            f"mkdir -p {quoted_marker_parent}; "
+            f"printf '%s\\n' {quoted_head} > {quoted_temporary}; "
+            f"mv {quoted_temporary} {quoted_marker}"
+        )
+
+    def _wait_for_admission(self, child_id: uuid.UUID, checkout: object) -> None:
+        if not isinstance(checkout, dict):
+            raise ProviderError("Child checkout authority is missing")
+        marker = self._admission_marker(child_id)
+        expected = str(checkout.get("headSha", ""))
+        for _ in range(150):
+            try:
+                admitted = marker.read_text().strip() == expected
+            except OSError:
+                admitted = False
+            if admitted:
+                self._validate_existing_checkout(self._checkout_path(child_id), checkout, exact=True)
+                marker.unlink(missing_ok=True)
+                return
+            self.sleeper(0.1)
+        raise ProviderError("OpenHands Child runtime admission did not preserve the exact checkout")
 
     def _validate_existing_child(
         self,

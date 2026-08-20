@@ -410,6 +410,36 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertEqual(provider.wait_until_terminal(child), "finished")
 
+    def test_terminal_response_reads_latest_assistant_message(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "items": [
+                {
+                    "kind": "MessageEvent",
+                    "source": "agent",
+                    "llm_message": {
+                        "content": [{"type": "text", "text": "German PM questions"}]
+                    },
+                },
+                {
+                    "kind": "MessageEvent",
+                    "source": "user",
+                    "llm_message": {"content": [{"type": "text", "text": "MISSION"}]},
+                },
+            ]
+        })
+
+        self.assertEqual(provider.terminal_response(child), "German PM questions")
+
+    def test_terminal_response_fails_closed_without_assistant_text(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={"items": []})
+
+        with self.assertRaisesRegex(ProviderError, "terminal response"):
+            provider.terminal_response(child)
+
     def test_cancel_interrupts_then_delivers_bound_cancel_to_paused_child(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)

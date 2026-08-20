@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from unittest.mock import Mock
+from pathlib import Path
+import subprocess
+import tempfile
 import uuid
 import unittest
 
@@ -30,6 +33,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider = OpenHandsProvider(
             "http://openhands", "key", "http://public", completion_hook_url="http://messaging/completion-hook"
         )
+        provider._ensure_checkout = Mock()
         provider._request = Mock(side_effect=[
             ProviderError("missing", status=404),
             {"active_agent_profile_id": "acp"},
@@ -52,7 +56,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             child,
             "reviewer",
             "review-612",
-            "Review",
+            {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}},
             "evx1_opaque",
             frozenset(),
         )
@@ -67,11 +71,17 @@ class OpenHandsProviderTest(unittest.TestCase):
             create["mcp_config"],
             {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp"}}},
         )
+        self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
+        self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
+        self.assertIn("Never call OpenHands provider-control APIs", create["agent_launch_additions"]["system_message_suffix_append"])
+        mission_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
+        self.assertTrue(mission_event.startswith("MISSION\n{"))
 
     def test_integrated_mission_receives_runtime_mcp_explicitly(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._ensure_checkout = Mock()
         config = {
             "mcpServers": {
                 "evex_agent_messaging": {"url": "http://messaging/mcp"},
@@ -91,13 +101,139 @@ class OpenHandsProviderTest(unittest.TestCase):
             child,
             "qa",
             "qa-integrated",
-            "QA",
+            {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/qa", "headSha": "a" * 40}},
             "evx1_opaque",
             frozenset({"runtime_environment"}),
         )
 
         create = provider._request.call_args_list[3].args[2]
         self.assertEqual(create["mcp_config"], config)
+
+    def test_child_admission_validates_exact_checkout_before_conversation_mutation(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            checkout = workspace / f"child-{child}"
+            checkout.mkdir()
+            subprocess.run(["git", "init", "-b", "fix/612"], cwd=checkout, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "eval@example.invalid"], cwd=checkout, check=True)
+            subprocess.run(["git", "config", "user.name", "Eval"], cwd=checkout, check=True)
+            subprocess.run(["git", "remote", "add", "origin", "https://github.com/EvexU2/evex-u-core.git"], cwd=checkout, check=True)
+            (checkout / "README.md").write_text("fixture\n")
+            subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+            subprocess.run(["git", "commit", "-m", "fixture"], cwd=checkout, check=True, capture_output=True)
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True).stdout.strip()
+            provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=str(workspace))
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                ProviderError("stop after admission", status=500),
+            ])
+            mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": head}}
+
+            with self.assertRaises(ProviderError):
+                provider.create_child(parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
+
+            self.assertEqual(
+                provider._request.call_args_list[0].args,
+                ("GET", f"/api/conversations/{child}"),
+            )
+            self.assertEqual(provider._request.call_count, 2)
+
+    def test_child_admission_rejects_missing_or_mismatched_checkout_without_api_call(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=temporary)
+            provider._request = Mock(side_effect=ProviderError("missing", status=404))
+            mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}}
+
+            with self.assertRaisesRegex(ProviderError, "checkout"):
+                provider.create_child(parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
+
+            provider._request.assert_called_once_with("GET", f"/api/conversations/{child}")
+
+    def test_child_admission_provisions_deterministic_worktree_from_persistent_mirror(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            source = workspace / "source"
+            source.mkdir()
+            subprocess.run(["git", "init", "-b", "main"], cwd=source, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "eval@example.invalid"], cwd=source, check=True)
+            subprocess.run(["git", "config", "user.name", "Eval"], cwd=source, check=True)
+            (source / "README.md").write_text("fixture\n")
+            subprocess.run(["git", "add", "README.md"], cwd=source, check=True)
+            subprocess.run(["git", "commit", "-m", "fixture"], cwd=source, check=True, capture_output=True)
+            head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=source, check=True, capture_output=True, text=True).stdout.strip()
+            mirrors = workspace / "mirrors"
+            mirrors.mkdir()
+            mirror = mirrors / "EvexU2--evex-u-core.git"
+            subprocess.run(["git", "clone", "--mirror", str(source), str(mirror)], check=True, capture_output=True)
+            subprocess.run(["git", "remote", "set-url", "origin", "https://github.com/EvexU2/evex-u-core.git"], cwd=mirror, check=True)
+            delivery = workspace / "delivery"
+            delivery.mkdir()
+            provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=str(delivery))
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                ProviderError("stop after admission", status=500),
+            ])
+            mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": head}}
+
+            with self.assertRaises(ProviderError):
+                provider.create_child(parent, child, "writer", "writer-612", mission, "evx1_opaque", frozenset())
+
+            checkout = delivery / f"child-{child}"
+            self.assertTrue(checkout.is_dir())
+            self.assertEqual(
+                subprocess.run(["git", "branch", "--show-current"], cwd=checkout, check=True, capture_output=True, text=True).stdout.strip(),
+                "fix/612",
+            )
+            self.assertEqual(
+                provider._request.call_args_list[0].args,
+                ("GET", f"/api/conversations/{child}"),
+            )
+
+    def test_existing_progressed_child_is_reused_without_requiring_initial_head(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            checkout = workspace / f"child-{child}"
+            checkout.mkdir()
+            subprocess.run(["git", "init", "-b", "fix/612"], cwd=checkout, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "eval@example.invalid"], cwd=checkout, check=True)
+            subprocess.run(["git", "config", "user.name", "Eval"], cwd=checkout, check=True)
+            subprocess.run(["git", "remote", "add", "origin", "https://github.com/EvexU2/evex-u-core.git"], cwd=checkout, check=True)
+            (checkout / "README.md").write_text("initial\n")
+            subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=checkout, check=True, capture_output=True)
+            initial = subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout, check=True, capture_output=True, text=True).stdout.strip()
+            (checkout / "README.md").write_text("progressed\n")
+            subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
+            subprocess.run(["git", "commit", "-m", "progress"], cwd=checkout, check=True, capture_output=True)
+            provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=str(workspace))
+            provider._request = Mock(return_value={
+                "id": str(child),
+                "last_user_message_id": "event-1",
+                "workspace": {"working_dir": str(checkout)},
+                "tags": {
+                    "project": "evex-u",
+                    "evexrole": "role-child",
+                    "evextask": "writer-612",
+                    "evexparent": str(parent),
+                    "evexchildrole": "writer",
+                },
+            })
+            mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": initial}}
+
+            result = provider.create_child(
+                parent, child, "writer", "writer-612", mission, "evx1_opaque", frozenset()
+            )
+
+            self.assertFalse(result["created"])
+            provider._request.assert_called_once_with("GET", f"/api/conversations/{child}")
 
     def test_wait_until_terminal_is_bounded(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

@@ -66,22 +66,24 @@ class OpenHandsProvider:
         capabilities: frozenset[str],
     ) -> dict:
         mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
+        bootstrap_text = (
+            "PROVIDER_ADMISSION\n"
+            f"Initialize runtime for Child {child_id}. Use no tools and finish with PROVIDER_READY."
+        )
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
             self._validate_existing_child(existing, parent_id, child_id, role, task_key)
-            self._validate_existing_checkout(
-                self._checkout_path(child_id), mission.get("checkout"), exact=False
-            )
-            if not existing.get("last_user_message_id"):
-                self._ensure_checkout(child_id, mission.get("checkout"))
-                self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": mission_text}], "run": True})
-            return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
+            if self._has_user_message(child_id, mission_text):
+                self._validate_existing_checkout(
+                    self._checkout_path(child_id), mission.get("checkout"), exact=False
+                )
+                return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
+            created = False
         except ProviderError as exc:
             if exc.status != 404:
                 raise
-        self._ensure_checkout(child_id, mission.get("checkout"))
-        created = True
-        try:
+            self._ensure_checkout(child_id, mission.get("checkout"))
+            created = True
             profiles = self._request("GET", "/api/agent-profiles")
             profile_id = profiles.get("active_agent_profile_id")
             if not isinstance(profile_id, str) or not profile_id:
@@ -114,16 +116,14 @@ class OpenHandsProvider:
                     )
                 },
                 "hook_config": {
-                    "session_start": [
+                    "pre_tool_use": [
                         {
                             "matcher": "*",
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": self._admission_hook_command(
-                                        child_id, mission["checkout"]
-                                    ),
-                                    "timeout": 10,
+                                    "command": f"test -f {shlex.quote(str(self._admission_marker(child_id)))}",
+                                    "timeout": 2,
                                 }
                             ],
                         }
@@ -134,7 +134,10 @@ class OpenHandsProvider:
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": self._completion_hook_command(capability_ref),
+                                    "command": (
+                                        f"if test -f {shlex.quote(str(self._admission_marker(child_id)))}; "
+                                        f"then {self._completion_hook_command(capability_ref)}; fi"
+                                    ),
                                     "timeout": 50,
                                     "async": True,
                                 }
@@ -145,23 +148,44 @@ class OpenHandsProvider:
             }
             if mcp_config:
                 payload["mcp_config"] = mcp_config
-            result = self._request(
+            try:
+                self._request("POST", "/api/conversations", payload)
+            except ProviderError as exc:
+                if exc.status != 409:
+                    raise
+                existing = self._request("GET", f"/api/conversations/{child_id}")
+                self._validate_existing_child(
+                    existing, parent_id, child_id, role, task_key
+                )
+                created = False
+        marker = self._admission_marker(child_id)
+        marker.unlink(missing_ok=True)
+        if not self._has_user_message(child_id, bootstrap_text):
+            self._request(
                 "POST",
-                "/api/conversations",
-                payload,
+                f"/api/conversations/{child_id}/events",
+                {"role": "user", "content": [{"type": "text", "text": bootstrap_text}], "run": True},
             )
-        except ProviderError as exc:
-            if exc.status != 409:
-                raise
-            existing = self._request("GET", f"/api/conversations/{child_id}")
-            self._validate_existing_child(existing, parent_id, child_id, role, task_key)
-            created = False
-        if created or not existing.get("last_user_message_id"):
-            self._ensure_checkout(child_id, mission.get("checkout"))
-            self._admission_marker(child_id).unlink(missing_ok=True)
-            self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": mission_text}], "run": True})
-            self._wait_for_admission(child_id, mission.get("checkout"))
-        return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": created}
+        self.wait_until_terminal(child_id)
+        self._restore_checkout_after_bootstrap(child_id, mission.get("checkout"))
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        temporary = marker.with_suffix(".tmp")
+        temporary.write_text(str(mission["checkout"]["headSha"]) + "\n")
+        temporary.replace(marker)
+        self._request(
+            "POST",
+            f"/api/conversations/{child_id}/events",
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": mission_text}],
+                "run": True,
+            },
+        )
+        return {
+            "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}",
+            "provider": "openhands",
+            "created": created,
+        }
 
     def _checkout_path(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve() / f"child-{child_id}"
@@ -169,49 +193,36 @@ class OpenHandsProvider:
     def _admission_marker(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve().parent / ".evex-admission" / f"{child_id}.ready"
 
-    def _admission_hook_command(self, child_id: uuid.UUID, checkout: dict) -> str:
-        path = self._checkout_path(child_id)
-        marker = self._admission_marker(child_id)
-        temporary = marker.with_suffix(".tmp")
-        head = str(checkout["headSha"])
-        ref = f"refs/heads/{checkout['branch']}"
-        quoted_path = shlex.quote(str(path))
-        quoted_head = shlex.quote(head)
-        quoted_ref = shlex.quote(ref)
-        quoted_marker_parent = shlex.quote(str(marker.parent))
-        quoted_marker = shlex.quote(str(marker))
-        quoted_temporary = shlex.quote(str(temporary))
-        return (
-            "set -eu; "
-            f"test \"$(git -C {quoted_path} rev-parse --show-toplevel)\" = {quoted_path}; "
-            f"test \"$(git -C {quoted_path} symbolic-ref HEAD)\" = {quoted_ref}; "
-            f"git -C {quoted_path} cat-file -e {quoted_head}^{{commit}}; "
-            f"git -C {quoted_path} diff --quiet {quoted_head} --; "
-            f"git -C {quoted_path} diff --cached --quiet {quoted_head} --; "
-            f"git -C {quoted_path} update-ref {quoted_ref} {quoted_head}; "
-            f"test \"$(git -C {quoted_path} rev-parse HEAD)\" = {quoted_head}; "
-            f"test -z \"$(git -C {quoted_path} status --porcelain)\"; "
-            f"mkdir -p {quoted_marker_parent}; "
-            f"printf '%s\\n' {quoted_head} > {quoted_temporary}; "
-            f"mv {quoted_temporary} {quoted_marker}"
-        )
-
-    def _wait_for_admission(self, child_id: uuid.UUID, checkout: object) -> None:
+    def _restore_checkout_after_bootstrap(self, child_id: uuid.UUID, checkout: object) -> None:
         if not isinstance(checkout, dict):
             raise ProviderError("Child checkout authority is missing")
-        marker = self._admission_marker(child_id)
-        expected = str(checkout.get("headSha", ""))
-        for _ in range(150):
-            try:
-                admitted = marker.read_text().strip() == expected
-            except OSError:
-                admitted = False
-            if admitted:
-                self._validate_existing_checkout(self._checkout_path(child_id), checkout, exact=True)
-                marker.unlink(missing_ok=True)
-                return
-            self.sleeper(0.1)
-        raise ProviderError("OpenHands Child runtime admission did not preserve the exact checkout")
+        path = self._checkout_path(child_id)
+        head = str(checkout.get("headSha", ""))
+        ref = f"refs/heads/{checkout.get('branch', '')}"
+        if self._git(path, "symbolic-ref", "HEAD") != ref:
+            raise ProviderError("Child checkout branch changed during runtime admission")
+        self._git(path, "cat-file", "-e", f"{head}^{{commit}}")
+        self._git(path, "diff", "--quiet", head, "--")
+        self._git(path, "diff", "--cached", "--quiet", head, "--")
+        self._git(path, "update-ref", ref, head)
+        self._validate_existing_checkout(path, checkout, exact=True)
+
+    def _has_user_message(self, child_id: uuid.UUID, expected_text: str) -> bool:
+        events = self._request(
+            "GET",
+            f"/api/conversations/{child_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+        )
+        for event in events.get("items", []):
+            if not isinstance(event, dict) or event.get("kind") != "MessageEvent" or event.get("source") != "user":
+                continue
+            message = event.get("llm_message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if isinstance(content, list) and any(
+                isinstance(item, dict) and item.get("type") == "text" and item.get("text") == expected_text
+                for item in content
+            ):
+                return True
+        return False
 
     def _validate_existing_child(
         self,

@@ -7,6 +7,7 @@ import json
 import os
 import sys
 import uuid
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider
 from .service import MessagingService
@@ -118,6 +119,48 @@ def serve(server: McpServer, stdin=None, stdout=None) -> None:
             stdout.flush()
 
 
+def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> None:
+    """Small stateless Streamable-HTTP-compatible JSON-RPC endpoint for in-cluster MCP use."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/healthz":
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"ok\n")
+            else:
+                self.send_error(404)
+
+        def do_POST(self):  # noqa: N802
+            if self.path != "/mcp":
+                self.send_error(404)
+                return
+            try:
+                request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                response = server.handle(request)
+                if response is None:
+                    self.send_response(202)
+                    self.end_headers()
+                    return
+                body = json.dumps(response, separators=(",", ":")).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            except Exception as exc:  # malformed request is a JSON-RPC parse error, never a traceback
+                body = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"invalid MCP request: {exc}"}}).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        def log_message(self, *_args):
+            return
+
+    ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
 def main() -> int:
     secret = os.environ.get("EVEX_MESSAGING_SECRET", "").encode()
     if not secret:
@@ -127,7 +170,11 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not base_url or not api_key or not public_url:
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
-    serve(McpServer(MessagingService(OpenHandsProvider(base_url, api_key, public_url), secret)))
+    server = McpServer(MessagingService(OpenHandsProvider(base_url, api_key, public_url), secret))
+    if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
+        serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
+    else:
+        serve(server)
     return 0
 
 

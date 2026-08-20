@@ -45,6 +45,7 @@ class OpenHandsProvider:
         return value
 
     def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: str) -> dict:
+        created = True
         try:
             self._request("GET", f"/api/conversations/{child_id}")
             return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
@@ -75,7 +76,7 @@ class OpenHandsProvider:
             created = False
         if created:
             self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": f"MISSION\n{mission}"}], "run": True})
-        return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": bool(result)}
+        return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": created}
 
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict:
         self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": f"{kind}\n{text}"}], "run": True})

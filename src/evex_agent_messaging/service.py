@@ -22,6 +22,7 @@ class MessagingProvider(Protocol):
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
+    def terminal_response(self, target_id: uuid.UUID) -> str: ...
 
 
 class MessagingService:
@@ -153,6 +154,7 @@ class MessagingService:
             target_id=child_id,
         )
         status = self._provider.wait_until_terminal(child_id)
+        terminal_response = self._provider.terminal_response(child_id)
         message_key = f"terminal:{child_id}:{capability.task_key}"
         envelope = {
             "messageKey": message_key,
@@ -161,6 +163,7 @@ class MessagingService:
             "taskKey": capability.task_key,
             "kind": "RECOVERY_WAKE",
             "status": status,
+            "terminalResponse": terminal_response,
         }
         return self._provider.send_message(
             capability.owning_main_id,

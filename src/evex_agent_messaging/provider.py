@@ -399,6 +399,35 @@ class OpenHandsProvider:
             self.sleeper(0.1)
         raise ProviderError("OpenHands Child did not reach terminal state")
 
+    def terminal_response(self, target_id: uuid.UUID) -> str:
+        events = self._request(
+            "GET",
+            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+        )
+        for event in events.get("items", []):
+            if (
+                not isinstance(event, dict)
+                or event.get("kind") != "MessageEvent"
+                or event.get("source") not in {"agent", "assistant"}
+            ):
+                continue
+            message = event.get("llm_message")
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            text = "\n".join(
+                item["text"]
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            ).strip()
+            if text:
+                if len(text) > 20000:
+                    raise ProviderError("OpenHands Child terminal response is too large")
+                return text
+        raise ProviderError("OpenHands Child terminal response is unavailable")
+
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict:
         path = f"/api/conversations/{target_id}"
         for _ in range(300):

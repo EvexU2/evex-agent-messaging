@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import json
 import sys
 import unittest
 import uuid
@@ -36,6 +37,10 @@ class FakeProvider:
     def wait_until_terminal(self, target_id):
         self.calls.append(("wait-terminal", target_id))
         return "finished"
+
+    def terminal_response(self, target_id):
+        self.calls.append(("terminal-response", target_id))
+        return "Welche Option soll gelten?\nA ...\nB ..."
 
 
 class MessagingTest(unittest.TestCase):
@@ -108,6 +113,11 @@ class MessagingTest(unittest.TestCase):
         sends = [call for call in provider.calls if call[0] == "send"]
         self.assertEqual([call[1] for call in sends], [self.main, self.main])
         self.assertTrue(all(call[3] == "RECOVERY_WAKE" for call in sends))
+        envelope = json.loads(sends[0][4])
+        self.assertEqual(
+            envelope["terminalResponse"],
+            "Welche Option soll gelten?\nA ...\nB ...",
+        )
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()

@@ -23,9 +23,10 @@ message key and the Main deduplicates semantic replays.
 
 Each created Child receives an asynchronous native Stop hook. The hook calls the private
 `/completion-hook` endpoint with its scoped reference; the gateway waits for terminal native state
-and sends one stable `RECOVERY_WAKE` to the owning Main. This is the platform fallback when a model
-finishes without calling `send_to_parent`. Repeated hooks reuse the same semantic message key and do
-not require a database, poller, or receipt store.
+and sends one stable `RECOVERY_WAKE` containing the bounded terminal assistant response to the owning
+Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
+Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
+or receipt store.
 
 The trusted Event Gateway/host mints the short-lived Main capability with
 `main_capability_token(...)` and injects it into the Main Mission. The MCP does not expose a capability

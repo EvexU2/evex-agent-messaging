@@ -416,10 +416,18 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider._request = Mock(return_value={
             "items": [
                 {
+                    "kind": "ActionEvent",
+                    "source": "agent",
+                    "action": {
+                        "kind": "FinishAction",
+                        "message": "German PM questions",
+                    },
+                },
+                {
                     "kind": "MessageEvent",
                     "source": "agent",
                     "llm_message": {
-                        "content": [{"type": "text", "text": "German PM questions"}]
+                        "content": [{"type": "text", "text": "older assistant text"}]
                     },
                 },
                 {

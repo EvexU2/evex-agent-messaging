@@ -5,16 +5,24 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 
 ## Tools
 
-- `create_child`: create one deterministic Child Conversation from a signed Main capability.
+- `create_child`: create one deterministic Child Conversation from an opaque Main capability; source
+  work receives no Runtime MCP, while an explicit Environment/integrated-QA Mission may request
+  `capabilities: ["runtime_environment"]`.
 - `send_to_parent`: deliver a structured `RESULT`/`NEEDS_INPUT` to the capability's owning Main.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main.
 - `cancel_mission` / `resume_mission`: stop or resume the exact Child task.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 
-Capabilities are self-contained HMAC-SHA256 tokens. They bind the owning Main, Child, task key, role,
+Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,
 allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,
 tool output, or child environment variables. There is no persistent state: callers provide a stable
 message key and the Main deduplicates semantic replays.
+
+Each created Child receives an asynchronous native Stop hook. The hook calls the private
+`/completion-hook` endpoint with its scoped reference; the gateway waits for terminal native state
+and sends one stable `RECOVERY_WAKE` to the owning Main. This is the platform fallback when a model
+finishes without calling `send_to_parent`. Repeated hooks reuse the same semantic message key and do
+not require a database, poller, or receipt store.
 
 The trusted Event Gateway/host mints the short-lived Main capability with
 `main_capability_token(...)` and injects it into the Main Mission. The MCP does not expose a capability

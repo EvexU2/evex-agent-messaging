@@ -47,7 +47,9 @@ class OpenHandsProvider:
     def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: str) -> dict:
         created = True
         try:
-            self._request("GET", f"/api/conversations/{child_id}")
+            existing = self._request("GET", f"/api/conversations/{child_id}")
+            if not existing.get("last_user_message_id"):
+                self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": f"MISSION\n{mission}"}], "run": True})
             return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
         except ProviderError as exc:
             if exc.status != 404:

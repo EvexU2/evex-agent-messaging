@@ -5,9 +5,11 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 
 ## Tools
 
-- `create_child_conversation`: create one deterministic Child Conversation from a signed Parent capability.
-- `send_agent_message`: send one bounded `RESULT`, `NEEDS_INPUT`, or control message through the owning tree.
-- `cancel_agent_mission`: interrupt a Child and deliver the bound cancellation message.
+- `create_child`: create one deterministic Child Conversation from a signed Main capability.
+- `send_to_parent`: deliver a structured `RESULT`/`NEEDS_INPUT` to the capability's owning Main.
+- `request_user_decision`: deliver an A/B/C-style question to the owning Main.
+- `cancel_mission` / `resume_mission`: stop or resume the exact Child task.
+- `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 
 Capabilities are self-contained HMAC-SHA256 tokens. They bind the owning Main, Child, task key, role,
 allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,

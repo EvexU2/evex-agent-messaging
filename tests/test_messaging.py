@@ -29,6 +29,10 @@ class FakeProvider:
         self.calls.append(("cancel", target_id, message_key, task_key))
         return {"accepted": True}
 
+    def resume_mission(self, target_id, message_key, task_key):
+        self.calls.append(("resume", target_id, message_key, task_key))
+        return {"accepted": True}
+
 
 class MessagingTest(unittest.TestCase):
     def setUp(self):
@@ -60,7 +64,17 @@ class MessagingTest(unittest.TestCase):
         child = uuid.UUID(first["childId"])
         self.assertEqual(service.send_message(first["capability"], child, "result-1", "RESULT", "PASS")["accepted"], True)
         self.assertEqual(service.cancel_mission(first["capability"], child, "cancel-1")["accepted"], True)
-        self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel"])
+        self.assertEqual(service.resume_mission(first["capability"], child, "resume-1")["accepted"], True)
+        self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
+
+    def test_child_can_only_report_to_owning_main_and_request_decision(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = service.create_child(self.main_token(), "qa-604", "qa", "Run QA")
+        self.assertTrue(service.send_to_parent(child["capability"], {"messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
+        self.assertTrue(service.request_user_decision(child["capability"], "Choose rollout", ["A", "B", "C"])["accepted"])
+        self.assertTrue(service.publish_navigation_links(child["capability"], {"main": "https://openhands.local/conversations/x"})["accepted"])
+        self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main, self.main, self.main])
 
     def test_expired_or_wrong_role_capability_fails(self):
         provider = FakeProvider()

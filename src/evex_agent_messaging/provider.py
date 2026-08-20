@@ -79,3 +79,7 @@ class OpenHandsProvider:
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict:
         self._request("POST", f"/api/conversations/{target_id}/interrupt", {})
         return {"accepted": True, "messageKey": message_key, "taskKey": task_key}
+
+    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict:
+        self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + message_key}], "run": True})
+        return {"accepted": True, "messageKey": message_key, "taskKey": task_key}

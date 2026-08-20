@@ -14,19 +14,34 @@ from .service import MessagingService
 
 TOOLS = [
     {
-        "name": "create_child_conversation",
+        "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation from a signed Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
         "inputSchema": {"type": "object", "required": ["parentCapability", "taskKey", "role", "mission"], "properties": {"parentCapability": {"type": "string"}, "taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair", "waiter"]}, "mission": {"type": "string"}}},
     },
     {
-        "name": "send_agent_message",
-        "description": "Send one bounded RESULT, NEEDS_INPUT, control, or recovery message through the authorized Main/Child tree. Include a stable messageKey so the owning Main can deduplicate replays.",
-        "inputSchema": {"type": "object", "required": ["capability", "targetId", "messageKey", "kind", "text"], "properties": {"capability": {"type": "string"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}, "kind": {"type": "string", "enum": ["RESULT", "NEEDS_INPUT", "CANCEL_MISSION", "RECOVERY_WAKE"]}, "text": {"type": "string"}}},
+        "name": "send_to_parent",
+        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
+        "inputSchema": {"type": "object", "required": ["capability", "result"], "properties": {"capability": {"type": "string"}, "result": {"type": "object"}}},
     },
     {
-        "name": "cancel_agent_mission",
+        "name": "request_user_decision",
+        "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
+        "inputSchema": {"type": "object", "required": ["capability", "question", "options"], "properties": {"capability": {"type": "string"}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+    },
+    {
+        "name": "cancel_mission",
         "description": "Interrupt the exact Child mission bound to this capability before a replacement mission starts.",
         "inputSchema": {"type": "object", "required": ["capability", "targetId", "messageKey"], "properties": {"capability": {"type": "string"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+    },
+    {
+        "name": "resume_mission",
+        "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
+        "inputSchema": {"type": "object", "required": ["capability", "targetId", "messageKey"], "properties": {"capability": {"type": "string"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+    },
+    {
+        "name": "publish_navigation_links",
+        "description": "Publish bounded human navigation links to the owning Main; links are informational, never workflow authority.",
+        "inputSchema": {"type": "object", "required": ["capability", "links"], "properties": {"capability": {"type": "string"}, "links": {"type": "object", "additionalProperties": {"type": "string"}}}},
     },
 ]
 
@@ -52,12 +67,18 @@ class McpServer:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
-            if name == "create_child_conversation":
+            if name == "create_child":
                 value = self._service.create_child(args["parentCapability"], args["taskKey"], args["role"], args["mission"])
-            elif name == "send_agent_message":
-                value = self._service.send_message(args["capability"], uuid.UUID(args["targetId"]), args["messageKey"], args["kind"], args["text"])
-            elif name == "cancel_agent_mission":
+            elif name == "send_to_parent":
+                value = self._service.send_to_parent(args["capability"], args["result"])
+            elif name == "request_user_decision":
+                value = self._service.request_user_decision(args["capability"], args["question"], args["options"])
+            elif name == "cancel_mission":
                 value = self._service.cancel_mission(args["capability"], uuid.UUID(args["targetId"]), args["messageKey"])
+            elif name == "resume_mission":
+                value = self._service.resume_mission(args["capability"], uuid.UUID(args["targetId"]), args["messageKey"])
+            elif name == "publish_navigation_links":
+                value = self._service.publish_navigation_links(args["capability"], args["links"])
             else:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:

@@ -20,6 +20,18 @@ class FakeService:
     def cancel_mission(self, *args):
         return {"accepted": True}
 
+    def resume_mission(self, *args):
+        return {"accepted": True}
+
+    def send_to_parent(self, *args):
+        return {"accepted": True}
+
+    def request_user_decision(self, *args):
+        return {"accepted": True}
+
+    def publish_navigation_links(self, *args):
+        return {"accepted": True}
+
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -29,9 +41,8 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child_conversation", "send_agent_message", "cancel_agent_mission"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links"})
 
     def test_unknown_tool_is_a_client_error(self):
         result = self.server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "raw_openhands_api", "arguments": {}}})
         self.assertEqual(result["error"]["code"], -32602)
-

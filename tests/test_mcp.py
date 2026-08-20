@@ -50,6 +50,8 @@ class McpServerTest(unittest.TestCase):
             create["inputSchema"]["properties"]["capabilities"]["items"]["enum"],
             ["runtime_environment"],
         )
+        self.assertEqual(create["inputSchema"]["properties"]["mission"]["type"], "object")
+        self.assertIn("checkout", create["inputSchema"]["properties"]["mission"]["required"])
 
     def test_create_child_uses_only_opaque_reference_field(self):
         result = self.server.handle({
@@ -62,7 +64,15 @@ class McpServerTest(unittest.TestCase):
                     "parentCapabilityRef": "evx1_parent",
                     "taskKey": "writer-1",
                     "role": "writer",
-                    "mission": "Implement",
+                    "mission": {
+                        "immediateTask": "Your task now: implement.",
+                        "links": {},
+                        "checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/1", "headSha": "a" * 40},
+                        "allowedMutations": [],
+                        "prohibitions": [],
+                        "skills": ["evex-delivery-writer"],
+                        "evidence": ["tests"],
+                    },
                 },
             },
         })

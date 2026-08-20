@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+from pathlib import Path
 import shlex
+import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -19,6 +22,9 @@ class ProviderError(RuntimeError):
         self.status = status
 
 
+_CHECKOUT_LOCKS = tuple(threading.Lock() for _ in range(64))
+
+
 @dataclass
 class OpenHandsProvider:
     base_url: str
@@ -27,6 +33,7 @@ class OpenHandsProvider:
     timeout: float = 5.0
     sleeper: object = time.sleep
     completion_hook_url: str = "http://evex-agent-messaging.evex-agents.svc.cluster.local:3101/completion-hook"
+    workspace_root: str = "/home/openhands/workspace/delivery"
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         request = urllib.request.Request(
@@ -54,19 +61,26 @@ class OpenHandsProvider:
         child_id: uuid.UUID,
         role: str,
         task_key: str,
-        mission: str,
+        mission: dict,
         capability_ref: str,
         capabilities: frozenset[str],
     ) -> dict:
-        created = True
+        mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
+            self._validate_existing_child(existing, parent_id, child_id, role, task_key)
+            self._validate_existing_checkout(
+                self._checkout_path(child_id), mission.get("checkout"), exact=False
+            )
             if not existing.get("last_user_message_id"):
-                self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": f"MISSION\n{mission}"}], "run": True})
+                self._ensure_checkout(child_id, mission.get("checkout"))
+                self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": mission_text}], "run": True})
             return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
         except ProviderError as exc:
             if exc.status != 404:
                 raise
+        self._ensure_checkout(child_id, mission.get("checkout"))
+        created = True
         try:
             profiles = self._request("GET", "/api/agent-profiles")
             profile_id = profiles.get("active_agent_profile_id")
@@ -77,10 +91,28 @@ class OpenHandsProvider:
             payload = {
                 "conversation_id": str(child_id),
                 "agent_profile_id": profile_id,
-                "workspace": {"working_dir": f"/home/openhands/workspace/delivery/child-{child_id}"},
+                "workspace": {"working_dir": str(self._checkout_path(child_id))},
                 "tags": {"project": "evex-u", "evexrole": "role-child", "evextask": task_key, "evexparent": str(parent_id), "evexchildrole": role},
                 "autotitle": False,
                 "max_iterations": 300,
+                "secrets": {
+                    "EVEX_AGENT_ROLE": {"kind": "StaticSecret", "value": role},
+                    "EVEX_AGENT_INSTANCE_ID": {
+                        "kind": "StaticSecret",
+                        "value": str(child_id),
+                    },
+                    "EVEX_AGENT_SKILLS": {
+                        "kind": "StaticSecret",
+                        "value": "\n".join(mission.get("skills", [])),
+                    },
+                },
+                "agent_launch_additions": {
+                    "system_message_suffix_append": (
+                        f"EVEX role scope: {role}. Use only the Mission-authorized checkout, "
+                        "skills, GitHub mutations, Messaging MCP, and any explicitly provisioned "
+                        "Runtime MCP. Never call OpenHands provider-control APIs or inspect peers."
+                    )
+                },
                 "hook_config": {
                     "stop": [
                         {
@@ -107,11 +139,151 @@ class OpenHandsProvider:
         except ProviderError as exc:
             if exc.status != 409:
                 raise
-            result = {"created": False}
+            existing = self._request("GET", f"/api/conversations/{child_id}")
+            self._validate_existing_child(existing, parent_id, child_id, role, task_key)
             created = False
-        if created:
-            self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": f"MISSION\n{mission}"}], "run": True})
+        if created or not existing.get("last_user_message_id"):
+            self._ensure_checkout(child_id, mission.get("checkout"))
+            self._request("POST", f"/api/conversations/{child_id}/events", {"role": "user", "content": [{"type": "text", "text": mission_text}], "run": True})
         return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": created}
+
+    def _checkout_path(self, child_id: uuid.UUID) -> Path:
+        return Path(self.workspace_root).resolve() / f"child-{child_id}"
+
+    def _validate_existing_child(
+        self,
+        value: dict,
+        parent_id: uuid.UUID,
+        child_id: uuid.UUID,
+        role: str,
+        task_key: str,
+    ) -> None:
+        tags = value.get("tags")
+        workspace = value.get("workspace")
+        expected_tags = {
+            "project": "evex-u",
+            "evexrole": "role-child",
+            "evextask": task_key,
+            "evexparent": str(parent_id),
+            "evexchildrole": role,
+        }
+        working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
+        try:
+            working_dir_matches = (
+                isinstance(working_dir, str)
+                and Path(working_dir).resolve() == self._checkout_path(child_id)
+            )
+        except OSError:
+            working_dir_matches = False
+        if (
+            str(value.get("id") or value.get("conversation_id") or "") != str(child_id)
+            or not isinstance(tags, dict)
+            or any(tags.get(key) != expected for key, expected in expected_tags.items())
+            or not working_dir_matches
+        ):
+            raise ProviderError("Existing Child Conversation does not match Mission authority")
+
+    def _ensure_checkout(self, child_id: uuid.UUID, checkout: object) -> None:
+        if not isinstance(checkout, dict):
+            raise ProviderError("Child checkout authority is missing")
+        path = self._checkout_path(child_id)
+        lock = _CHECKOUT_LOCKS[child_id.int % len(_CHECKOUT_LOCKS)]
+        with lock:
+            if path.is_symlink():
+                raise ProviderError("Child checkout is not an isolated directory")
+            if not path.exists():
+                self._provision_checkout(path, checkout)
+            self._validate_existing_checkout(path, checkout, exact=True)
+
+    def _provision_checkout(self, path: Path, checkout: dict) -> None:
+        repository = str(checkout.get("repository", ""))
+        if repository.count("/") != 1:
+            raise ProviderError("Child checkout repository is invalid")
+        owner, name = repository.split("/", 1)
+        mirror = Path(self.workspace_root).resolve().parent / "mirrors" / f"{owner}--{name}.git"
+        if mirror.is_symlink() or not mirror.is_dir():
+            raise ProviderError(f"Child checkout mirror is unavailable: {mirror}")
+        if self._repository_from_remote(self._git(mirror, "remote", "get-url", "origin")).lower() != repository.lower():
+            raise ProviderError("Child checkout mirror origin does not match Mission authority")
+        head_sha = str(checkout.get("headSha", ""))
+        branch = str(checkout.get("branch", ""))
+        self._git(mirror, "check-ref-format", "--branch", branch)
+        self._git(mirror, "cat-file", "-e", f"{head_sha}^{{commit}}")
+        try:
+            subprocess.run(
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "--git-dir",
+                    str(mirror),
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    str(path),
+                    head_sha,
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=20,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProviderError("Child checkout provisioning failed") from exc
+
+    def _validate_existing_checkout(
+        self, path: Path, checkout: object, *, exact: bool
+    ) -> None:
+        if not isinstance(checkout, dict):
+            raise ProviderError("Child checkout authority is missing")
+        try:
+            if path.is_symlink() or not path.is_dir() or path.resolve() != path:
+                raise ProviderError("Child checkout is not an isolated directory")
+            top = self._git(path, "rev-parse", "--show-toplevel")
+            remote = self._git(path, "remote", "get-url", "origin")
+            branch = self._git(path, "branch", "--show-current")
+            head = self._git(path, "rev-parse", "HEAD")
+            dirty = self._git(path, "status", "--porcelain")
+        except OSError as exc:
+            raise ProviderError("Child checkout validation failed") from exc
+        if Path(top).resolve() != path.resolve():
+            raise ProviderError("Child checkout top-level does not match its isolated directory")
+        if self._repository_from_remote(remote).lower() != str(checkout.get("repository", "")).lower():
+            raise ProviderError("Child checkout origin does not match Mission authority")
+        if branch != checkout.get("branch"):
+            raise ProviderError("Child checkout branch does not match Mission authority")
+        if exact and head != checkout.get("headSha"):
+            raise ProviderError("Child checkout head does not match Mission authority")
+        if exact and dirty:
+            raise ProviderError("Child checkout must be clean before Conversation creation")
+
+    @staticmethod
+    def _git(path: Path, *arguments: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "--no-optional-locks", "-C", str(path), *arguments],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProviderError("Child checkout validation failed") from exc
+        return result.stdout.strip()
+
+    @staticmethod
+    def _repository_from_remote(remote: str) -> str:
+        value = remote.strip()
+        if value.startswith("git@github.com:"):
+            value = value.removeprefix("git@github.com:")
+        elif value.startswith("https://github.com/"):
+            value = value.removeprefix("https://github.com/")
+        else:
+            raise ProviderError("Child checkout origin must be a GitHub repository")
+        value = value.removesuffix(".git")
+        if value.count("/") != 1:
+            raise ProviderError("Child checkout origin is invalid")
+        return value
 
     def _completion_hook_command(self, capability_ref: str) -> str:
         body = json.dumps({"capabilityRef": capability_ref}, separators=(",", ":"))

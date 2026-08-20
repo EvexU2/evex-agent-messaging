@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
+import json
 import uuid
 
 from .capability import (
@@ -16,7 +17,7 @@ from .capability import (
 
 
 class MessagingProvider(Protocol):
-    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: str, capability_ref: str, capabilities: frozenset[str]) -> dict[str, Any]: ...
+    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str]) -> dict[str, Any]: ...
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict[str, Any]: ...
@@ -38,7 +39,7 @@ class MessagingService:
         parent_capability: str,
         task_key: str,
         role: str,
-        mission: str,
+        mission: dict[str, Any],
         capabilities: list[str] | None = None,
     ) -> dict[str, Any]:
         parent = verify_capability(
@@ -50,10 +51,9 @@ class MessagingService:
         )
         if parent.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may create a Child")
-        if role not in {"spec", "planner", "writer", "reviewer", "qa", "repair", "waiter"}:
+        if role not in {"spec", "planner", "writer", "reviewer", "qa", "repair"}:
             raise CapabilityError("unsupported Child role")
-        if not isinstance(mission, str) or not mission.strip() or len(mission) > 12000:
-            raise CapabilityError("mission must be a non-empty bounded string")
+        mission_payload = self._validated_mission(mission)
         requested_capabilities = capabilities or []
         if (
             not isinstance(requested_capabilities, list)
@@ -61,6 +61,8 @@ class MessagingService:
             or any(value != "runtime_environment" for value in requested_capabilities)
         ):
             raise CapabilityError("unsupported Child capability")
+        if requested_capabilities and role not in {"qa", "repair"}:
+            raise CapabilityError("runtime environment is limited to QA or repair Children")
         child_id = deterministic_child_id(parent.child_id, task_key)
         now = self._clock()
         token = capability_token(
@@ -73,16 +75,72 @@ class MessagingService:
             issued_at=now,
             expires_at=now + timedelta(days=7),
         )
+        bound_mission = {
+            **mission_payload,
+            "owningMainId": str(parent.owning_main_id),
+            "childId": str(child_id),
+            "taskKey": task_key,
+            "role": role,
+            "callback": {"tool": "send_to_parent", "capabilityRef": token},
+            "capabilities": requested_capabilities,
+        }
         result = self._provider.create_child(
             parent.child_id,
             child_id,
             role,
             task_key,
-            mission.strip(),
+            bound_mission,
             token,
             frozenset(requested_capabilities),
         )
         return {**result, "childId": str(child_id), "capabilityRef": token}
+
+    @staticmethod
+    def _validated_mission(mission: object) -> dict[str, Any]:
+        required = {
+            "immediateTask",
+            "links",
+            "checkout",
+            "allowedMutations",
+            "prohibitions",
+            "skills",
+            "evidence",
+        }
+        reserved = {"owningMainId", "childId", "taskKey", "role", "callback", "capabilities"}
+        if not isinstance(mission, dict) or not required.issubset(mission) or reserved.intersection(mission):
+            raise CapabilityError("mission is incomplete or contains provider-owned authority")
+        immediate_task = mission.get("immediateTask")
+        checkout = mission.get("checkout")
+        if not isinstance(immediate_task, str) or not immediate_task.startswith("Your task now:"):
+            raise CapabilityError("mission immediateTask must begin with 'Your task now:'")
+        if not isinstance(checkout, dict) or set(checkout) != {"repository", "branch", "headSha"}:
+            raise CapabilityError("mission checkout must contain repository, branch, and headSha")
+        repository, branch, head_sha = (checkout.get(key) for key in ("repository", "branch", "headSha"))
+        if (
+            not isinstance(repository, str)
+            or repository.count("/") != 1
+            or not all(part and part.replace("-", "").replace("_", "").isalnum() for part in repository.split("/"))
+            or not isinstance(branch, str)
+            or not branch.strip()
+            or not isinstance(head_sha, str)
+            or len(head_sha) != 40
+            or any(character not in "0123456789abcdef" for character in head_sha)
+        ):
+            raise CapabilityError("mission checkout authority is invalid")
+        for key in ("links",):
+            if not isinstance(mission.get(key), dict):
+                raise CapabilityError(f"mission {key} must be an object")
+        for key in ("allowedMutations", "prohibitions", "skills", "evidence"):
+            value = mission.get(key)
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise CapabilityError(f"mission {key} must be a string array")
+        try:
+            copied = json.loads(json.dumps(mission, separators=(",", ":")))
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("mission must be JSON-compatible") from exc
+        if len(json.dumps(copied, separators=(",", ":"))) > 12000:
+            raise CapabilityError("mission must be bounded")
+        return copied
 
     def terminal_wake(self, token: str) -> dict[str, Any]:
         """Wake the owner after a native Stop hook observes terminal Child state."""

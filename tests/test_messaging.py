@@ -47,6 +47,23 @@ class MessagingTest(unittest.TestCase):
     def main_token(self):
         return capability_token(self.secret, owning_main_id=self.main, child_id=self.main, task_key="root", role="main", allowed_actions={"create_child"}, issued_at=self.now - timedelta(minutes=1), expires_at=self.now + timedelta(hours=1))
 
+    def mission(self, *, checkout=True):
+        value = {
+            "immediateTask": "Your task now: implement the bounded fix.",
+            "links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/604"},
+            "allowedMutations": [],
+            "prohibitions": ["Do not merge"],
+            "skills": ["evex-delivery-writer"],
+            "evidence": ["run focused tests"],
+        }
+        if checkout:
+            value["checkout"] = {
+                "repository": "EvexU2/evex-u-core",
+                "branch": "fix/604",
+                "headSha": "a" * 40,
+            }
+        return value
+
     def test_capability_is_signed_and_target_bound(self):
         child = deterministic_child_id(self.main, "writer-604")
         token = capability_token(self.secret, owning_main_id=self.main, child_id=child, task_key="writer-604", role="writer", allowed_actions={"send_message"}, issued_at=self.now, expires_at=self.now + timedelta(hours=1))
@@ -69,8 +86,8 @@ class MessagingTest(unittest.TestCase):
     def test_service_creates_deterministic_child_and_sends(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        first = service.create_child(self.main_token(), "writer-604", "writer", "Implement the bounded fix")
-        second = service.create_child(self.main_token(), "writer-604", "writer", "Implement the bounded fix")
+        first = service.create_child(self.main_token(), "writer-604", "writer", self.mission())
+        second = service.create_child(self.main_token(), "writer-604", "writer", self.mission())
         self.assertEqual(first["childId"], second["childId"])
         child = uuid.UUID(first["childId"])
         self.assertEqual(service.send_message(first["capabilityRef"], child, "result-1", "RESULT", "PASS")["accepted"], True)
@@ -81,7 +98,7 @@ class MessagingTest(unittest.TestCase):
     def test_terminal_hook_wakes_parent_with_stable_semantic_key(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = service.create_child(self.main_token(), "review-612", "reviewer", "Review exact head")
+        child = service.create_child(self.main_token(), "review-612", "reviewer", self.mission())
 
         first = service.terminal_wake(child["capabilityRef"])
         second = service.terminal_wake(child["capabilityRef"])
@@ -96,12 +113,12 @@ class MessagingTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
 
-        service.create_child(self.main_token(), "writer-source", "writer", "Write source")
+        service.create_child(self.main_token(), "writer-source", "writer", self.mission())
         service.create_child(
             self.main_token(),
             "qa-integrated",
             "qa",
-            "Run integrated QA",
+            self.mission(),
             capabilities=["runtime_environment"],
         )
 
@@ -110,13 +127,21 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(creates[1][-1], frozenset({"runtime_environment"}))
         with self.assertRaises(CapabilityError):
             service.create_child(
-                self.main_token(), "writer-broad", "writer", "Write", capabilities=["all_tools"]
+                self.main_token(), "writer-broad", "writer", self.mission(), capabilities=["all_tools"]
+            )
+        with self.assertRaisesRegex(CapabilityError, "limited to QA or repair"):
+            service.create_child(
+                self.main_token(),
+                "writer-runtime",
+                "writer",
+                self.mission(),
+                capabilities=["runtime_environment"],
             )
 
     def test_child_can_only_report_to_owning_main_and_request_decision(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = service.create_child(self.main_token(), "qa-604", "qa", "Run QA")
+        child = service.create_child(self.main_token(), "qa-604", "qa", self.mission())
         self.assertTrue(service.send_to_parent(child["capabilityRef"], {"messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
         self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
@@ -127,4 +152,27 @@ class MessagingTest(unittest.TestCase):
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         bad = capability_token(self.secret, owning_main_id=self.main, child_id=self.main, task_key="root", role="writer", allowed_actions={"create_child"}, issued_at=self.now - timedelta(hours=2), expires_at=self.now - timedelta(hours=1))
         with self.assertRaises(CapabilityError):
-            service.create_child(bad, "writer", "writer", "x")
+            service.create_child(bad, "writer", "writer", self.mission())
+
+    def test_create_child_builds_bound_mission_before_provider_call(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        result = service.create_child(self.main_token(), "writer-bound", "writer", self.mission())
+
+        mission = provider.calls[0][5]
+        self.assertEqual(mission["owningMainId"], str(self.main))
+        self.assertEqual(mission["childId"], result["childId"])
+        self.assertEqual(mission["taskKey"], "writer-bound")
+        self.assertEqual(mission["role"], "writer")
+        self.assertEqual(mission["callback"]["tool"], "send_to_parent")
+        self.assertEqual(mission["callback"]["capabilityRef"], result["capabilityRef"])
+
+    def test_create_child_rejects_incomplete_mission_before_provider_call(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        for mission in ({}, {"immediateTask": "Implement"}, {**self.mission(), "checkout": None}):
+            with self.subTest(mission=mission), self.assertRaises(CapabilityError):
+                service.create_child(self.main_token(), "writer-invalid", "writer", mission)
+        self.assertEqual(provider.calls, [])

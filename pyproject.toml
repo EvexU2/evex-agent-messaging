@@ -1,0 +1,8 @@
+[project]
+name = "evex-agent-messaging"
+version = "0.1.0"
+description = "Provider-neutral MCP messaging gateway for EVEX coding agents"
+requires-python = ">=3.11"
+
+[project.scripts]
+evex-agent-messaging = "evex_agent_messaging.mcp_server:main"

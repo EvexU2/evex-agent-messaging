@@ -6,9 +6,9 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 ## Tools
 
 - `create_child`: validate the complete structured Mission and the clean deterministic Git checkout,
-  bind Child identity plus callback capability, then create one deterministic Conversation. A
-  provider-owned session-start hook restores and revalidates the exact branch/head after ACP
-  bootstrap, and the MCP does not report success until that proof is observed. No
+  bind Child identity plus callback capability, then create one deterministic Conversation. The
+  provider runs one tool-free admission turn, restores and revalidates the exact branch/head after
+  ACP bootstrap, and only then admits tools and delivers the Mission. No
   Conversation API call occurs when checkout authority is missing or mismatched. Source roles receive
   only Messaging; only explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`.
 - `send_to_parent`: deliver a structured `RESULT`/`NEEDS_INPUT` to the capability's owning Main.

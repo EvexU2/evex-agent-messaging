@@ -30,37 +30,45 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_child_creation_installs_async_terminal_recovery_hook(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
-        provider = OpenHandsProvider(
-            "http://openhands", "key", "http://public", completion_hook_url="http://messaging/completion-hook"
-        )
-        provider._ensure_checkout = Mock()
-        provider._wait_for_admission = Mock()
-        provider._request = Mock(side_effect=[
-            ProviderError("missing", status=404),
-            {"active_agent_profile_id": "acp"},
-            {
-                "agent_settings": {
-                    "mcp_config": {
-                        "mcpServers": {
-                            "evex_agent_messaging": {"url": "http://messaging/mcp"},
-                            "evex_runtime": {"url": "http://runtime/mcp"},
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = OpenHandsProvider(
+                "http://openhands",
+                "key",
+                "http://public",
+                completion_hook_url="http://messaging/completion-hook",
+                workspace_root=temporary,
+            )
+            provider._ensure_checkout = Mock()
+            provider._has_user_message = Mock(return_value=False)
+            provider.wait_until_terminal = Mock(return_value="finished")
+            provider._restore_checkout_after_bootstrap = Mock()
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {
+                    "agent_settings": {
+                        "mcp_config": {
+                            "mcpServers": {
+                                "evex_agent_messaging": {"url": "http://messaging/mcp"},
+                                "evex_runtime": {"url": "http://runtime/mcp"},
+                            }
                         }
                     }
-                }
-            },
-            {"id": str(child)},
-            {},
-        ])
+                },
+                {"id": str(child)},
+                {},
+                {},
+            ])
 
-        provider.create_child(
-            parent,
-            child,
-            "reviewer",
-            "review-612",
-            {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}},
-            "evx1_opaque",
-            frozenset(),
-        )
+            provider.create_child(
+                parent,
+                child,
+                "reviewer",
+                "review-612",
+                {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}},
+                "evx1_opaque",
+                frozenset(),
+            )
 
         create = provider._request.call_args_list[3].args[2]
         hook = create["hook_config"]["stop"][0]["hooks"][0]
@@ -68,9 +76,10 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn("http://messaging/completion-hook", hook["command"])
         self.assertIn("evx1_opaque", hook["command"])
         self.assertIn("--retry 2", hook["command"])
-        admission = create["hook_config"]["session_start"][0]["hooks"][0]
-        self.assertIn("update-ref", admission["command"])
+        admission = create["hook_config"]["pre_tool_use"][0]["hooks"][0]
+        self.assertIn(".evex-admission", admission["command"])
         self.assertIn(str(child), admission["command"])
+        self.assertIn("if test -f", hook["command"])
         self.assertEqual(
             create["mcp_config"],
             {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp"}}},
@@ -78,41 +87,149 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
         self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
         self.assertIn("Never call OpenHands provider-control APIs", create["agent_launch_additions"]["system_message_suffix_append"])
-        mission_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
+        bootstrap_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
+        self.assertTrue(bootstrap_event.startswith("PROVIDER_ADMISSION\n"))
+        mission_event = provider._request.call_args_list[5].args[2]["content"][0]["text"]
         self.assertTrue(mission_event.startswith("MISSION\n{"))
+        provider.wait_until_terminal.assert_called_once_with(child)
+        provider._restore_checkout_after_bootstrap.assert_called_once()
 
     def test_integrated_mission_receives_runtime_mcp_explicitly(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
-        provider = OpenHandsProvider("http://openhands", "key", "http://public")
-        provider._ensure_checkout = Mock()
-        provider._wait_for_admission = Mock()
-        config = {
-            "mcpServers": {
-                "evex_agent_messaging": {"url": "http://messaging/mcp"},
-                "evex_runtime": {"url": "http://runtime/mcp"},
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = OpenHandsProvider(
+                "http://openhands", "key", "http://public", workspace_root=temporary
+            )
+            provider._ensure_checkout = Mock()
+            provider._has_user_message = Mock(return_value=False)
+            provider.wait_until_terminal = Mock(return_value="finished")
+            provider._restore_checkout_after_bootstrap = Mock()
+            config = {
+                "mcpServers": {
+                    "evex_agent_messaging": {"url": "http://messaging/mcp"},
+                    "evex_runtime": {"url": "http://runtime/mcp"},
+                }
             }
-        }
-        provider._request = Mock(side_effect=[
-            ProviderError("missing", status=404),
-            {"active_agent_profile_id": "acp"},
-            {"agent_settings": {"mcp_config": config}},
-            {"id": str(child)},
-            {},
-        ])
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {"agent_settings": {"mcp_config": config}},
+                {"id": str(child)},
+                {},
+                {},
+            ])
 
-        provider.create_child(
-            parent,
-            child,
-            "qa",
-            "qa-integrated",
-            {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/qa", "headSha": "a" * 40}},
-            "evx1_opaque",
-            frozenset({"runtime_environment"}),
-        )
+            provider.create_child(
+                parent,
+                child,
+                "qa",
+                "qa-integrated",
+                {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/qa", "headSha": "a" * 40}},
+                "evx1_opaque",
+                frozenset({"runtime_environment"}),
+            )
 
         create = provider._request.call_args_list[3].args[2]
         self.assertEqual(create["mcp_config"], config)
+
+    def test_child_mission_is_not_sent_when_post_bootstrap_admission_fails(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            provider = OpenHandsProvider(
+                "http://openhands", "key", "http://public", workspace_root=temporary
+            )
+            provider._ensure_checkout = Mock()
+            provider._has_user_message = Mock(return_value=False)
+            provider.wait_until_terminal = Mock(return_value="finished")
+            provider._restore_checkout_after_bootstrap = Mock(
+                side_effect=ProviderError("Child checkout validation failed")
+            )
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {"agent_settings": {"mcp_config": {}}},
+                {"id": str(child)},
+                {},
+            ])
+
+            with self.assertRaisesRegex(ProviderError, "checkout validation"):
+                provider.create_child(
+                    parent,
+                    child,
+                    "writer",
+                    "writer-612",
+                    {
+                        "checkout": {
+                            "repository": "EvexU2/evex-u-core",
+                            "branch": "fix/612",
+                            "headSha": "a" * 40,
+                        }
+                    },
+                    "evx1_opaque",
+                    frozenset(),
+                )
+
+        delivered = [
+            call.args[2]["content"][0]["text"]
+            for call in provider._request.call_args_list
+            if len(call.args) == 3 and call.args[0] == "POST" and call.args[1].endswith("/events")
+        ]
+        self.assertEqual(len(delivered), 1)
+        self.assertTrue(delivered[0].startswith("PROVIDER_ADMISSION\n"))
+
+    def test_concurrent_create_reuses_matching_child_and_continues_admission(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        with tempfile.TemporaryDirectory() as temporary:
+            checkout_path = str(Path(temporary) / f"child-{child}")
+            provider = OpenHandsProvider(
+                "http://openhands", "key", "http://public", workspace_root=temporary
+            )
+            provider._ensure_checkout = Mock()
+            provider._has_user_message = Mock(return_value=False)
+            provider.wait_until_terminal = Mock(return_value="finished")
+            provider._restore_checkout_after_bootstrap = Mock()
+            existing = {
+                "id": str(child),
+                "workspace": {"working_dir": checkout_path},
+                "tags": {
+                    "project": "evex-u",
+                    "evexrole": "role-child",
+                    "evextask": "writer-612",
+                    "evexparent": str(parent),
+                    "evexchildrole": "writer",
+                },
+            }
+            provider._request = Mock(side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {"agent_settings": {"mcp_config": {}}},
+                ProviderError("conflict", status=409),
+                existing,
+                {},
+                {},
+            ])
+
+            result = provider.create_child(
+                parent,
+                child,
+                "writer",
+                "writer-612",
+                {
+                    "checkout": {
+                        "repository": "EvexU2/evex-u-core",
+                        "branch": "fix/612",
+                        "headSha": "a" * 40,
+                    }
+                },
+                "evx1_opaque",
+                frozenset(),
+            )
+
+        self.assertFalse(result["created"])
+        provider._restore_checkout_after_bootstrap.assert_called_once()
 
     def test_child_admission_validates_exact_checkout_before_conversation_mutation(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -200,7 +317,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 ("GET", f"/api/conversations/{child}"),
             )
 
-    def test_session_start_admission_restores_runtime_clobbered_worktree_ref(self) -> None:
+    def test_post_bootstrap_admission_restores_runtime_clobbered_worktree_ref(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         with tempfile.TemporaryDirectory() as temporary:
             workspace = Path(temporary)
@@ -231,7 +348,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 0,
             )
 
-            subprocess.run(provider._admission_hook_command(child, checkout), shell=True, check=True)
+            provider._restore_checkout_after_bootstrap(child, checkout)
 
             self.assertEqual(
                 subprocess.run(["git", "rev-parse", "HEAD"], cwd=checkout_path, check=True, capture_output=True, text=True).stdout.strip(),
@@ -241,7 +358,6 @@ class OpenHandsProviderTest(unittest.TestCase):
                 subprocess.run(["git", "status", "--porcelain"], cwd=checkout_path, check=True, capture_output=True, text=True).stdout,
                 "",
             )
-            self.assertEqual(provider._admission_marker(child).read_text(), head + "\n")
 
     def test_existing_progressed_child_is_reused_without_requiring_initial_head(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -262,6 +378,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             subprocess.run(["git", "add", "README.md"], cwd=checkout, check=True)
             subprocess.run(["git", "commit", "-m", "progress"], cwd=checkout, check=True, capture_output=True)
             provider = OpenHandsProvider("http://openhands", "key", "http://public", workspace_root=str(workspace))
+            provider._has_user_message = Mock(return_value=True)
             provider._request = Mock(return_value={
                 "id": str(child),
                 "last_user_message_id": "event-1",

@@ -68,7 +68,7 @@ class MessagingService:
         now = self._clock()
         token = capability_token(
             self._secret,
-            owning_main_id=parent.owning_main_id,
+            owning_main_id=parent.child_id,
             child_id=child_id,
             task_key=task_key,
             role=role,
@@ -78,7 +78,7 @@ class MessagingService:
         )
         bound_mission = {
             **mission_payload,
-            "owningMainId": str(parent.owning_main_id),
+            "owningMainId": str(parent.child_id),
             "childId": str(child_id),
             "taskKey": task_key,
             "role": role,

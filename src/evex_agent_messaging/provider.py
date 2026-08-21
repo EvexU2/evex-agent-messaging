@@ -89,7 +89,7 @@ class OpenHandsProvider:
             if not isinstance(profile_id, str) or not profile_id:
                 raise ProviderError("OpenHands has no active Agent Profile")
             settings = self._request("GET", "/api/settings")
-            mcp_config = self._mission_mcp_config(settings, capabilities)
+            mcp_config = self._mission_mcp_config(settings, capabilities, capability_ref)
             payload = {
                 "conversation_id": str(child_id),
                 "agent_profile_id": profile_id,
@@ -368,7 +368,9 @@ class OpenHandsProvider:
         )
 
     @staticmethod
-    def _mission_mcp_config(settings: dict, capabilities: frozenset[str]) -> dict:
+    def _mission_mcp_config(
+        settings: dict, capabilities: frozenset[str], capability_ref: str
+    ) -> dict:
         agent_settings = settings.get("agent_settings") if isinstance(settings, dict) else None
         value = agent_settings.get("mcp_config") if isinstance(agent_settings, dict) else None
         if not isinstance(value, dict):
@@ -379,13 +381,27 @@ class OpenHandsProvider:
         servers = value.get("mcpServers")
         if isinstance(servers, dict):
             selected = {
-                name: server
+                name: (
+                    {
+                        **server,
+                        "auth": {"strategy": "bearer", "value": capability_ref},
+                    }
+                    if name == "evex_agent_messaging"
+                    else server
+                )
                 for name, server in servers.items()
                 if name in requested and isinstance(server, dict)
             }
             return {"mcpServers": selected} if selected else {}
         return {
-            name: server
+            name: (
+                {
+                    **server,
+                    "auth": {"strategy": "bearer", "value": capability_ref},
+                }
+                if name == "evex_agent_messaging"
+                else server
+            )
             for name, server in value.items()
             if name in requested and isinstance(server, dict)
         }

@@ -16,33 +16,33 @@ from .service import MessagingService
 TOOLS = [
     {
         "name": "create_child",
-        "description": "Create or recover one deterministic Child Conversation from a signed Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["parentCapabilityRef", "taskKey", "role", "mission"], "properties": {"parentCapabilityRef": {"type": "string", "pattern": "^evx1_"}, "taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+        "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
     },
     {
         "name": "send_to_parent",
         "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
-        "inputSchema": {"type": "object", "required": ["capabilityRef", "result"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "result": {"type": "object"}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
     },
     {
         "name": "request_user_decision",
         "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
-        "inputSchema": {"type": "object", "required": ["capabilityRef", "question", "options"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
     },
     {
         "name": "cancel_mission",
         "description": "Interrupt the exact Child mission bound to this capability before a replacement mission starts.",
-        "inputSchema": {"type": "object", "required": ["capabilityRef", "targetId", "messageKey"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}}},
     },
     {
         "name": "resume_mission",
         "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
-        "inputSchema": {"type": "object", "required": ["capabilityRef", "targetId", "messageKey"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "targetId": {"type": "string", "format": "uuid"}, "messageKey": {"type": "string"}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}}},
     },
     {
         "name": "publish_navigation_links",
         "description": "Publish bounded human navigation links to the owning Main; links are informational, never workflow authority.",
-        "inputSchema": {"type": "object", "required": ["capabilityRef", "links"], "properties": {"capabilityRef": {"type": "string", "pattern": "^evx1_"}, "links": {"type": "object", "additionalProperties": {"type": "string"}}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["links"], "properties": {"links": {"type": "object", "additionalProperties": {"type": "string"}}}},
     },
 ]
 
@@ -51,7 +51,7 @@ class McpServer:
     def __init__(self, service: MessagingService) -> None:
         self._service = service
 
-    def handle(self, request: dict) -> dict | None:
+    def handle(self, request: dict, *, capability_ref: str | None = None) -> dict | None:
         method = request.get("method")
         request_id = request.get("id")
         if method == "notifications/initialized":
@@ -61,25 +61,28 @@ class McpServer:
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
         if method == "tools/call":
-            return self._call(request_id, request.get("params") or {})
+            return self._call(request_id, request.get("params") or {}, capability_ref)
         return self._error(request_id, -32601, "method not found")
 
-    def _call(self, request_id: object, params: dict) -> dict:
+    def _call(self, request_id: object, params: dict, capability_ref: str | None) -> dict:
         name = params.get("name")
         args = params.get("arguments") or {}
         try:
+            if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
+                raise ValueError("transport capability is required")
             if name == "create_child":
-                value = self._service.create_child(args["parentCapabilityRef"], args["taskKey"], args["role"], args["mission"], args.get("capabilities"))
+                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"))
+                value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":
-                value = self._service.send_to_parent(args["capabilityRef"], args["result"])
+                value = self._service.send_to_parent(capability_ref, args["result"])
             elif name == "request_user_decision":
-                value = self._service.request_user_decision(args["capabilityRef"], args["question"], args["options"])
+                value = self._service.request_user_decision(capability_ref, args["question"], args["options"])
             elif name == "cancel_mission":
-                value = self._service.cancel_mission(args["capabilityRef"], uuid.UUID(args["targetId"]), args["messageKey"])
+                value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "resume_mission":
-                value = self._service.resume_mission(args["capabilityRef"], uuid.UUID(args["targetId"]), args["messageKey"])
+                value = self._service.resume_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "publish_navigation_links":
-                value = self._service.publish_navigation_links(args["capabilityRef"], args["links"])
+                value = self._service.publish_navigation_links(capability_ref, args["links"])
             else:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:
@@ -155,7 +158,10 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
                 return
             try:
                 request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                response = server.handle(request)
+                response = server.handle(
+                    request,
+                    capability_ref=bearer_capability(self.headers.get("Authorization")),
+                )
                 if response is None:
                     self.send_response(202)
                     self.end_headers()
@@ -178,6 +184,14 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
             return
 
     ThreadingHTTPServer((host, port), Handler).serve_forever()
+
+
+def bearer_capability(value: str | None) -> str | None:
+    """Return one transport-bound EVEX capability from an HTTP Bearer header."""
+    if not isinstance(value, str) or not value.startswith("Bearer evx1_"):
+        return None
+    token = value.removeprefix("Bearer ")
+    return token if " " not in token else None
 
 
 def main() -> int:

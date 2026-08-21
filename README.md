@@ -29,8 +29,9 @@ Repeated hooks reuse the same semantic message key and do not require a database
 or receipt store.
 
 The trusted Event Gateway/host mints the short-lived Main capability with
-`main_capability_token(...)` and injects it into the Main Mission. The MCP does not expose a capability
-minting tool to agents.
+`main_capability_token(...)` and binds it to that Conversation's MCP transport as Bearer auth. Child
+capabilities are bound the same way during provider admission. Agents never read, copy, or supply a
+capability in tool arguments, and the MCP exposes no capability-minting tool.
 
 The Parent creates or fetches only the persistent bare mirror at
 `/home/openhands/workspace/mirrors/<owner>--<repository>.git`. `create_child` derives
@@ -40,18 +41,21 @@ It never clones/fetches remotely, deletes, resets, or repurposes an existing wor
 
 ## Run
 
-The server uses MCP stdio framing (`Content-Length` headers):
+The in-cluster server uses Streamable HTTP; the trusted host supplies the per-Conversation Bearer
+capability in MCP configuration:
 
 ```sh
 export EVEX_MESSAGING_SECRET='long-random-secret'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_API_KEY='server-only-key'
 export OPENHANDS_PUBLIC_URL='http://openhands.example/canvas'
+export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```
 
 Only the adapter reads the OpenHands variables. A fake provider can be injected in tests or by a host
-embedding the service, so skills and Missions remain runtime-neutral.
+embedding the service, so skills and Missions remain runtime-neutral. The stdio framing helper is for
+protocol tests only; capability-bound tool execution uses authenticated HTTP.
 
 ## Validation
 

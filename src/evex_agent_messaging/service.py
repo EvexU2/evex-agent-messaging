@@ -82,7 +82,7 @@ class MessagingService:
             "childId": str(child_id),
             "taskKey": task_key,
             "role": role,
-            "callback": {"tool": "send_to_parent", "capabilityRef": token},
+            "callback": {"tool": "send_to_parent"},
             "capabilities": requested_capabilities,
         }
         result = self._provider.create_child(
@@ -192,15 +192,39 @@ class MessagingService:
         }
         return self._provider.send_message(target_id, message_key, kind, _compact(envelope))
 
-    def cancel_mission(self, token: str, target_id: uuid.UUID, message_key: str) -> dict[str, Any]:
-        capability = verify_capability(token, self._secret, now=self._clock(), action="cancel_mission", target_id=target_id)
+    def cancel_mission(
+        self, token: str, target_id: uuid.UUID, task_key: str, message_key: str
+    ) -> dict[str, Any]:
+        capability = self._main_child_control_capability(
+            token, target_id, task_key, "cancel_mission"
+        )
         return self._provider.cancel_mission(
-            target_id, message_key, capability.task_key, capability.owning_main_id
+            target_id, message_key, task_key, capability.owning_main_id
         )
 
-    def resume_mission(self, token: str, target_id: uuid.UUID, message_key: str) -> dict[str, Any]:
-        capability = verify_capability(token, self._secret, now=self._clock(), action="resume_mission", target_id=target_id)
-        return self._provider.resume_mission(target_id, message_key, capability.task_key)
+    def resume_mission(
+        self, token: str, target_id: uuid.UUID, task_key: str, message_key: str
+    ) -> dict[str, Any]:
+        self._main_child_control_capability(
+            token, target_id, task_key, "resume_mission"
+        )
+        return self._provider.resume_mission(target_id, message_key, task_key)
+
+    def _main_child_control_capability(
+        self, token: str, target_id: uuid.UUID, task_key: str, action: str
+    ):
+        capability = verify_capability(
+            token,
+            self._secret,
+            now=self._clock(),
+            action=action,
+            target_id=self._capability_target(token),
+        )
+        if capability.role not in {"main", "deputy"}:
+            raise CapabilityError("only a Main may control a Child")
+        if deterministic_child_id(capability.child_id, task_key) != target_id:
+            raise CapabilityError("target is not the Main's deterministic Child")
+        return capability
 
     def send_to_parent(self, token: str, result: dict[str, Any]) -> dict[str, Any]:
         """Send a typed result to the owning Main; the caller cannot choose a peer target."""

@@ -186,6 +186,34 @@ class MessagingTest(unittest.TestCase):
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
         self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main, self.main, self.main])
 
+    def test_deputy_uses_standard_result_to_report_to_parent(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        deputy = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        deputy_token = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=deputy,
+            task_key="issue-626",
+            role="deputy",
+            allowed_actions={"create_child", "send_message", "cancel_mission", "resume_mission"},
+            issued_at=self.now,
+            expires_at=self.now + timedelta(hours=24),
+        )
+
+        result = service.send_to_parent(
+            deputy_token,
+            {
+                "messageKey": "deputy-result:626:candidate-passed:abc",
+                "kind": "RESULT",
+                "outcome": "candidate-passed",
+            },
+        )
+
+        self.assertTrue(result["accepted"])
+        self.assertEqual(provider.calls[-1][1], self.main)
+        self.assertEqual(provider.calls[-1][3], "RESULT")
+
     def test_expired_or_wrong_role_capability_fails(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

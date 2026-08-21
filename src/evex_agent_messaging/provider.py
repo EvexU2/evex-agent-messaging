@@ -88,8 +88,6 @@ class OpenHandsProvider:
             profile_id = profiles.get("active_agent_profile_id")
             if not isinstance(profile_id, str) or not profile_id:
                 raise ProviderError("OpenHands has no active Agent Profile")
-            settings = self._request("GET", "/api/settings")
-            mcp_config = self._mission_mcp_config(settings, capabilities, capability_ref)
             payload = {
                 "conversation_id": str(child_id),
                 "agent_profile_id": profile_id,
@@ -106,6 +104,10 @@ class OpenHandsProvider:
                     "EVEX_AGENT_SKILLS": {
                         "kind": "StaticSecret",
                         "value": "\n".join(mission.get("skills", [])),
+                    },
+                    "EVEX_AGENT_MESSAGING_CAPABILITY": {
+                        "kind": "StaticSecret",
+                        "value": capability_ref,
                     },
                 },
                 "agent_launch_additions": {
@@ -136,7 +138,7 @@ class OpenHandsProvider:
                                     "type": "command",
                                     "command": (
                                         f"if test -f {shlex.quote(str(self._admission_marker(child_id)))}; "
-                                        f"then {self._completion_hook_command(capability_ref)}; fi"
+                                        f"then {self._completion_hook_command()}; fi"
                                     ),
                                     "timeout": 50,
                                     "async": True,
@@ -146,8 +148,6 @@ class OpenHandsProvider:
                     ]
                 },
             }
-            if mcp_config:
-                payload["mcp_config"] = mcp_config
             try:
                 self._request("POST", "/api/conversations", payload)
             except ProviderError as exc:
@@ -359,52 +359,14 @@ class OpenHandsProvider:
             raise ProviderError("Child checkout origin is invalid")
         return value
 
-    def _completion_hook_command(self, capability_ref: str) -> str:
-        body = json.dumps({"capabilityRef": capability_ref}, separators=(",", ":"))
+    def _completion_hook_command(self) -> str:
+        body = '{"capabilityRef":"$EVEX_AGENT_MESSAGING_CAPABILITY"}'
         return (
             "curl --fail --silent --show-error --retry 2 --retry-delay 2 "
             "--retry-all-errors --max-time 45 --header 'Content-Type: application/json' "
-            f"--data {shlex.quote(body)} {shlex.quote(self.completion_hook_url)}"
+            f"--data \"{body.replace(chr(34), chr(92) + chr(34))}\" "
+            f"{shlex.quote(self.completion_hook_url)}"
         )
-
-    @staticmethod
-    def _mission_mcp_config(
-        settings: dict, capabilities: frozenset[str], capability_ref: str
-    ) -> dict:
-        agent_settings = settings.get("agent_settings") if isinstance(settings, dict) else None
-        value = agent_settings.get("mcp_config") if isinstance(agent_settings, dict) else None
-        if not isinstance(value, dict):
-            return {}
-        requested = {"evex_agent_messaging"}
-        if "runtime_environment" in capabilities:
-            requested.add("evex_runtime")
-        servers = value.get("mcpServers")
-        if isinstance(servers, dict):
-            selected = {
-                name: (
-                    {
-                        **server,
-                        "auth": {"strategy": "bearer", "value": capability_ref},
-                    }
-                    if name == "evex_agent_messaging"
-                    else server
-                )
-                for name, server in servers.items()
-                if name in requested and isinstance(server, dict)
-            }
-            return {"mcpServers": selected} if selected else {}
-        return {
-            name: (
-                {
-                    **server,
-                    "auth": {"strategy": "bearer", "value": capability_ref},
-                }
-                if name == "evex_agent_messaging"
-                else server
-            )
-            for name, server in value.items()
-            if name in requested and isinstance(server, dict)
-        }
 
     def wait_until_terminal(self, target_id: uuid.UUID) -> str:
         path = f"/api/conversations/{target_id}"

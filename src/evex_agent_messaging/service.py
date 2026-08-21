@@ -74,7 +74,7 @@ class MessagingService:
             role=role,
             allowed_actions={"send_message", "cancel_mission", "resume_mission"},
             issued_at=now,
-            expires_at=now + timedelta(days=7),
+            expires_at=now + timedelta(hours=24),
         )
         bound_mission = {
             **mission_payload,

@@ -17,10 +17,10 @@ from .capability import (
 
 
 class MessagingProvider(Protocol):
-    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str]) -> dict[str, Any]: ...
+    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str], model: str, reasoning_effort: str) -> dict[str, Any]: ...
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
-    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict[str, Any]: ...
+    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def terminal_response(self, target_id: uuid.UUID) -> str: ...
 
@@ -42,6 +42,8 @@ class MessagingService:
         role: str,
         mission: dict[str, Any],
         capabilities: list[str] | None = None,
+        model: str | None = None,
+        reasoning_effort: str | None = None,
     ) -> dict[str, Any]:
         parent = verify_capability(
             parent_capability,
@@ -52,9 +54,18 @@ class MessagingService:
         )
         if parent.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may create a Child")
-        if role not in {"spec", "planner", "writer", "reviewer", "qa", "repair"}:
+        if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair", "waiter"}:
             raise CapabilityError("unsupported Child role")
+        if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
+            raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
+        mutations = mission_payload["allowedMutations"]
+        if role in {"reviewer", "qa", "waiter"} and mutations:
+            raise CapabilityError("reviewer, QA, and waiter missions are read-only")
+        if role == "waiter" and "evex-delivery-waiter" not in mission_payload["skills"]:
+            raise CapabilityError("waiter missions require an exact observation skill")
+        if role in {"spec", "plan-author", "writer", "repair"} and not mutations:
+            raise CapabilityError("write-authorized missions require exact allowedMutations")
         requested_capabilities = capabilities or []
         if (
             not isinstance(requested_capabilities, list)
@@ -93,6 +104,8 @@ class MessagingService:
             bound_mission,
             token,
             frozenset(requested_capabilities),
+            model,
+            reasoning_effort,
         )
         return {**result, "childId": str(child_id), "capabilityRef": token}
 
@@ -133,7 +146,9 @@ class MessagingService:
                 raise CapabilityError(f"mission {key} must be an object")
         for key in ("allowedMutations", "prohibitions", "skills", "evidence"):
             value = mission.get(key)
-            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            if not isinstance(value, list) or any(
+                not isinstance(item, str) or not item.strip() for item in value
+            ):
                 raise CapabilityError(f"mission {key} must be a string array")
         try:
             copied = json.loads(json.dumps(mission, separators=(",", ":")))
@@ -203,12 +218,23 @@ class MessagingService:
         )
 
     def resume_mission(
-        self, token: str, target_id: uuid.UUID, task_key: str, message_key: str
+        self,
+        token: str,
+        target_id: uuid.UUID,
+        task_key: str,
+        message_key: str,
+        context: dict[str, Any],
     ) -> dict[str, Any]:
         self._main_child_control_capability(
             token, target_id, task_key, "resume_mission"
         )
-        return self._provider.resume_mission(target_id, message_key, task_key)
+        if not isinstance(context, dict) or not context:
+            raise CapabilityError("resume context must contain verified facts")
+        try:
+            copied_context = json.loads(json.dumps(context, separators=(",", ":")))
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("resume context must be JSON") from exc
+        return self._provider.resume_mission(target_id, message_key, task_key, copied_context)
 
     def _main_child_control_capability(
         self, token: str, target_id: uuid.UUID, task_key: str, action: str

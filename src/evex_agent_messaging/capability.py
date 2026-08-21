@@ -21,7 +21,7 @@ _ROLE_IDS = {
     "main": 1,
     "deputy": 2,
     "spec": 3,
-    "planner": 4,
+    "plan-author": 4,
     "writer": 5,
     "reviewer": 6,
     "qa": 7,

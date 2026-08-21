@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import Mock
+from unittest.mock import ANY, Mock, patch
 from pathlib import Path
 import subprocess
 import tempfile
@@ -11,6 +11,37 @@ from evex_agent_messaging.provider import OpenHandsProvider, ProviderError
 
 
 class OpenHandsProviderTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self._original_model_method = OpenHandsProvider._switch_and_verify_model
+        self._model_patch = patch.object(
+            OpenHandsProvider, "_switch_and_verify_model", autospec=True
+        )
+        self._model_patch.start()
+
+    def tearDown(self) -> None:
+        self._model_patch.stop()
+
+    def create_provider_child(self, provider, *args, **kwargs):
+        kwargs.setdefault("model", "gpt-5.6-sol")
+        kwargs.setdefault("reasoning_effort", "medium")
+        return provider.create_child(*args, **kwargs)
+
+    def test_child_model_is_switched_and_verified_before_mission(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[{}, {"current_model_id": "gpt-5.6-sol"}])
+
+        self._original_model_method(provider, child, "gpt-5.6-sol")
+
+        self.assertEqual(
+            provider._request.call_args_list[0].args,
+            (
+                "POST",
+                f"/api/conversations/{child}/switch_acp_model",
+                {"model": "gpt-5.6-sol"},
+            ),
+        )
+
     def test_callback_waits_for_busy_main_before_delivery(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)
@@ -26,6 +57,27 @@ class OpenHandsProviderTest(unittest.TestCase):
         event = provider._request.call_args_list[2].args
         self.assertEqual(event[0:2], ("POST", f"/api/conversations/{main}/events"))
         self.assertTrue(event[2]["run"])
+
+    def test_resume_mission_carries_verified_context_as_canonical_json(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={})
+
+        provider.resume_mission(
+            child,
+            "resume:plan-reviewed",
+            "spec-author-604",
+            {"reviewOutcome": "PASS", "planCommit": "a" * 40},
+        )
+
+        body = provider._request.call_args.args[2]
+        text = body["content"][0]["text"]
+        self.assertEqual(
+            text,
+            'RESUME_MISSION\n{"context":{"planCommit":"'
+            + "a" * 40
+            + '","reviewOutcome":"PASS"},"messageKey":"resume:plan-reviewed","taskKey":"spec-author-604"}',
+        )
 
     def test_child_creation_installs_async_terminal_recovery_hook(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -51,7 +103,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 {},
             ])
 
-            provider.create_child(
+            self.create_provider_child(provider,
                 parent,
                 child,
                 "reviewer",
@@ -79,6 +131,11 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
         self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
+        self.assertEqual(create["secrets"]["EVEX_REASONING_EFFORT"]["value"], "medium")
+        self.assertEqual(create["secrets"]["EVEX_AGENT_CAPABILITIES"]["value"], "")
+        OpenHandsProvider._switch_and_verify_model.assert_called_with(
+            ANY, child, "gpt-5.6-sol"
+        )
         self.assertIn("Never call OpenHands provider-control APIs", create["agent_launch_additions"]["system_message_suffix_append"])
         self.assertEqual(
             provider._request.call_args_list[3].args,
@@ -115,7 +172,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 {},
             ])
 
-            provider.create_child(
+            self.create_provider_child(provider,
                 parent,
                 child,
                 "qa",
@@ -127,6 +184,11 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         create = provider._request.call_args_list[2].args[2]
         self.assertNotIn("mcp_config", create)
+        self.assertEqual(
+            create["secrets"]["EVEX_AGENT_CAPABILITIES"]["value"],
+            "runtime_environment",
+        )
+        self.assertEqual(create["tags"]["evexcaps"], "runtime_environment")
 
     def test_child_mission_is_not_sent_when_post_bootstrap_admission_fails(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -150,7 +212,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             ])
 
             with self.assertRaisesRegex(ProviderError, "checkout validation"):
-                provider.create_child(
+                self.create_provider_child(provider,
                     parent,
                     child,
                     "writer",
@@ -195,6 +257,9 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "evextask": "writer-612",
                     "evexparent": str(parent),
                     "evexchildrole": "writer",
+                    "evexmodel": "gpt-5.6-sol",
+                    "evexreasoning": "medium",
+                    "evexcaps": "none",
                 },
             }
             provider._request = Mock(side_effect=[
@@ -206,7 +271,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 {},
             ])
 
-            result = provider.create_child(
+            result = self.create_provider_child(provider,
                 parent,
                 child,
                 "writer",
@@ -248,7 +313,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": head}}
 
             with self.assertRaises(ProviderError):
-                provider.create_child(parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
+                self.create_provider_child(provider, parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
 
             self.assertEqual(
                 provider._request.call_args_list[0].args,
@@ -265,7 +330,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}}
 
             with self.assertRaisesRegex(ProviderError, "checkout"):
-                provider.create_child(parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
+                self.create_provider_child(provider, parent, child, "reviewer", "review-612", mission, "evx1_opaque", frozenset())
 
             provider._request.assert_called_once_with("GET", f"/api/conversations/{child}")
 
@@ -298,7 +363,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": head}}
 
             with self.assertRaises(ProviderError):
-                provider.create_child(parent, child, "writer", "writer-612", mission, "evx1_opaque", frozenset())
+                self.create_provider_child(provider, parent, child, "writer", "writer-612", mission, "evx1_opaque", frozenset())
 
             checkout = delivery / f"child-{child}"
             self.assertTrue(checkout.is_dir())
@@ -383,11 +448,14 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "evextask": "writer-612",
                     "evexparent": str(parent),
                     "evexchildrole": "writer",
+                    "evexmodel": "gpt-5.6-sol",
+                    "evexreasoning": "medium",
+                    "evexcaps": "none",
                 },
             })
             mission = {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": initial}}
 
-            result = provider.create_child(
+            result = self.create_provider_child(provider,
                 parent, child, "writer", "writer-612", mission, "evx1_opaque", frozenset()
             )
 

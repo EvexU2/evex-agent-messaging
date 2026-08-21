@@ -5,15 +5,22 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 
 ## Tools
 
-- `create_child`: validate the complete structured Mission and the clean deterministic Git checkout,
+- `create_child`: validate the exact role, model, `medium|high` reasoning effort, complete structured
+  Mission, role-compatible mutation envelope, and clean deterministic Git checkout,
   bind Child identity plus callback capability, then create one deterministic Conversation. The
   provider runs one tool-free admission turn, restores and revalidates the exact branch/head after
   ACP bootstrap, and only then admits tools and delivers the Mission. No
-  Conversation API call occurs when checkout authority is missing or mismatched. Source roles receive
-  only Messaging; only explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`.
+  Conversation API call occurs when checkout authority is missing or mismatched. The provider switches
+  and verifies the requested model before Mission delivery. Read-only Review/QA require no mutations;
+  Spec/Plan Author/Writer/Repair require exact mutations; Review/QA/Waiter are read-only. Source roles receive only Messaging; only
+  explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`; the provider
+  binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
+  for that Child.
 - `send_to_parent`: deliver a structured `RESULT`/`NEEDS_INPUT` to the capability's owning Main.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main.
-- `cancel_mission` / `resume_mission`: stop or resume the exact Child task.
+- `cancel_mission`: stop the exact Child task.
+- `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
+  context cannot expand its immutable Mission authority.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 
 Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,

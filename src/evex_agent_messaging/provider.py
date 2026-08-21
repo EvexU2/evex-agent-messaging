@@ -158,6 +158,13 @@ class OpenHandsProvider:
                     existing, parent_id, child_id, role, task_key
                 )
                 created = False
+            if created:
+                role_title = role.replace("-", " ").replace("_", " ").title()
+                self._request(
+                    "PATCH",
+                    f"/api/conversations/{child_id}",
+                    {"title": f"EVEX | {role_title} | {task_key}"},
+                )
         marker = self._admission_marker(child_id)
         marker.unlink(missing_ok=True)
         if not self._has_user_message(child_id, bootstrap_text):

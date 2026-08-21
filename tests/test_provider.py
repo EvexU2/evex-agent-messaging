@@ -48,6 +48,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 {"id": str(child)},
                 {},
                 {},
+                {},
             ])
 
             provider.create_child(
@@ -79,9 +80,17 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
         self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
         self.assertIn("Never call OpenHands provider-control APIs", create["agent_launch_additions"]["system_message_suffix_append"])
-        bootstrap_event = provider._request.call_args_list[3].args[2]["content"][0]["text"]
+        self.assertEqual(
+            provider._request.call_args_list[3].args,
+            (
+                "PATCH",
+                f"/api/conversations/{child}",
+                {"title": "EVEX | Reviewer | review-612"},
+            ),
+        )
+        bootstrap_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
         self.assertTrue(bootstrap_event.startswith("PROVIDER_ADMISSION\n"))
-        mission_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
+        mission_event = provider._request.call_args_list[5].args[2]["content"][0]["text"]
         self.assertTrue(mission_event.startswith("MISSION\n{"))
         provider.wait_until_terminal.assert_called_once_with(child)
         provider._restore_checkout_after_bootstrap.assert_called_once()
@@ -101,6 +110,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
                 {"id": str(child)},
+                {},
                 {},
                 {},
             ])
@@ -135,6 +145,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
                 {"id": str(child)},
+                {},
                 {},
             ])
 

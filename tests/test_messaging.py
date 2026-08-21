@@ -105,6 +105,22 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(service.resume_mission(self.main_token(), child, "writer-604", "resume-1")["accepted"], True)
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
 
+    def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+
+        child = service.create_child(
+            self.main_token(), "writer-24h", "writer", self.mission()
+        )
+        verified = verify_capability(
+            child["capabilityRef"],
+            self.secret,
+            now=self.now,
+            action="send_message",
+            target_id=uuid.UUID(child["childId"]),
+        )
+
+        self.assertEqual(verified.expires_at - verified.issued_at, timedelta(hours=24))
+
     def test_main_cannot_cancel_child_outside_its_deterministic_task(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
         foreign_child = uuid.uuid4()

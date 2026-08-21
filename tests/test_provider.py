@@ -82,7 +82,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn("if test -f", hook["command"])
         self.assertEqual(
             create["mcp_config"],
-            {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp"}}},
+            {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp", "auth": {"strategy": "bearer", "value": "evx1_opaque"}}}},
         )
         self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
         self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
@@ -131,7 +131,18 @@ class OpenHandsProviderTest(unittest.TestCase):
             )
 
         create = provider._request.call_args_list[3].args[2]
-        self.assertEqual(create["mcp_config"], config)
+        self.assertEqual(
+            create["mcp_config"],
+            {
+                "mcpServers": {
+                    "evex_agent_messaging": {
+                        "url": "http://messaging/mcp",
+                        "auth": {"strategy": "bearer", "value": "evx1_opaque"},
+                    },
+                    "evex_runtime": {"url": "http://runtime/mcp"},
+                }
+            },
+        )
 
     def test_child_mission_is_not_sent_when_post_bootstrap_admission_fails(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")

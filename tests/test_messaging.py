@@ -50,7 +50,12 @@ class MessagingTest(unittest.TestCase):
         self.main = uuid.UUID("11111111-1111-4111-8111-111111111111")
 
     def main_token(self):
-        return capability_token(self.secret, owning_main_id=self.main, child_id=self.main, task_key="root", role="main", allowed_actions={"create_child"}, issued_at=self.now - timedelta(minutes=1), expires_at=self.now + timedelta(hours=1))
+        return main_capability_token(
+            self.secret,
+            self.main,
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=self.now + timedelta(hours=1),
+        )
 
     def mission(self, *, checkout=True):
         value = {
@@ -96,9 +101,17 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(first["childId"], second["childId"])
         child = uuid.UUID(first["childId"])
         self.assertEqual(service.send_message(first["capabilityRef"], child, "result-1", "RESULT", "PASS")["accepted"], True)
-        self.assertEqual(service.cancel_mission(first["capabilityRef"], child, "cancel-1")["accepted"], True)
-        self.assertEqual(service.resume_mission(first["capabilityRef"], child, "resume-1")["accepted"], True)
+        self.assertEqual(service.cancel_mission(self.main_token(), child, "writer-604", "cancel-1")["accepted"], True)
+        self.assertEqual(service.resume_mission(self.main_token(), child, "writer-604", "resume-1")["accepted"], True)
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
+
+    def test_main_cannot_cancel_child_outside_its_deterministic_task(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        foreign_child = uuid.uuid4()
+        with self.assertRaisesRegex(CapabilityError, "deterministic Child"):
+            service.cancel_mission(
+                self.main_token(), foreign_child, "writer-604", "cancel-foreign"
+            )
 
     def test_terminal_hook_wakes_parent_with_stable_semantic_key(self):
         provider = FakeProvider()
@@ -176,7 +189,7 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(mission["taskKey"], "writer-bound")
         self.assertEqual(mission["role"], "writer")
         self.assertEqual(mission["callback"]["tool"], "send_to_parent")
-        self.assertEqual(mission["callback"]["capabilityRef"], result["capabilityRef"])
+        self.assertNotIn("capabilityRef", mission["callback"])
 
     def test_create_child_rejects_incomplete_mission_before_provider_call(self):
         provider = FakeProvider()

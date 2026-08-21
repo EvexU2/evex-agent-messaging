@@ -18,8 +18,8 @@ class FakeProvider:
     def __init__(self):
         self.calls = []
 
-    def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities):
-        self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities))
+    def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort):
+        self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort))
         return {"created": True}
 
     def send_message(self, target_id, message_key, kind, text):
@@ -30,8 +30,8 @@ class FakeProvider:
         self.calls.append(("cancel", target_id, message_key, task_key, owning_main_id))
         return {"accepted": True}
 
-    def resume_mission(self, target_id, message_key, task_key):
-        self.calls.append(("resume", target_id, message_key, task_key))
+    def resume_mission(self, target_id, message_key, task_key, context):
+        self.calls.append(("resume", target_id, message_key, task_key, context))
         return {"accepted": True}
 
     def wait_until_terminal(self, target_id):
@@ -61,7 +61,7 @@ class MessagingTest(unittest.TestCase):
         value = {
             "immediateTask": "Your task now: implement the bounded fix.",
             "links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/604"},
-            "allowedMutations": [],
+            "allowedMutations": ["write the assigned branch"],
             "prohibitions": ["Do not merge"],
             "skills": ["evex-delivery-writer"],
             "evidence": ["run focused tests"],
@@ -73,6 +73,16 @@ class MessagingTest(unittest.TestCase):
                 "headSha": "a" * 40,
             }
         return value
+
+    def read_only_mission(self):
+        value = self.mission()
+        value["allowedMutations"] = []
+        return value
+
+    def create(self, service, *args, **kwargs):
+        kwargs.setdefault("model", "gpt-5.6-luna")
+        kwargs.setdefault("reasoning_effort", "medium")
+        return service.create_child(*args, **kwargs)
 
     def test_capability_is_signed_and_target_bound(self):
         child = deterministic_child_id(self.main, "writer-604")
@@ -96,19 +106,23 @@ class MessagingTest(unittest.TestCase):
     def test_service_creates_deterministic_child_and_sends(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        first = service.create_child(self.main_token(), "writer-604", "writer", self.mission())
-        second = service.create_child(self.main_token(), "writer-604", "writer", self.mission())
+        first = self.create(service, self.main_token(), "writer-604", "writer", self.mission())
+        second = self.create(service, self.main_token(), "writer-604", "writer", self.mission())
         self.assertEqual(first["childId"], second["childId"])
         child = uuid.UUID(first["childId"])
         self.assertEqual(service.send_message(first["capabilityRef"], child, "result-1", "RESULT", "PASS")["accepted"], True)
         self.assertEqual(service.cancel_mission(self.main_token(), child, "writer-604", "cancel-1")["accepted"], True)
-        self.assertEqual(service.resume_mission(self.main_token(), child, "writer-604", "resume-1")["accepted"], True)
+        self.assertEqual(service.resume_mission(self.main_token(), child, "writer-604", "resume-1", {"dependency": "cleared"})["accepted"], True)
+        with self.assertRaisesRegex(CapabilityError, "verified facts"):
+            service.resume_mission(
+                self.main_token(), child, "writer-604", "resume-empty", {}
+            )
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
 
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
 
-        child = service.create_child(
+        child = self.create(service,
             self.main_token(), "writer-24h", "writer", self.mission()
         )
         verified = verify_capability(
@@ -132,7 +146,7 @@ class MessagingTest(unittest.TestCase):
     def test_terminal_hook_wakes_parent_with_stable_semantic_key(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = service.create_child(self.main_token(), "review-612", "reviewer", self.mission())
+        child = self.create(service, self.main_token(), "review-612", "reviewer", self.read_only_mission())
 
         first = service.terminal_wake(child["capabilityRef"])
         second = service.terminal_wake(child["capabilityRef"])
@@ -152,24 +166,24 @@ class MessagingTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
 
-        service.create_child(self.main_token(), "writer-source", "writer", self.mission())
-        service.create_child(
+        self.create(service, self.main_token(), "writer-source", "writer", self.mission())
+        self.create(service,
             self.main_token(),
             "qa-integrated",
             "qa",
-            self.mission(),
+            self.read_only_mission(),
             capabilities=["runtime_environment"],
         )
 
         creates = [call for call in provider.calls if call[0] == "create"]
-        self.assertEqual(creates[0][-1], frozenset())
-        self.assertEqual(creates[1][-1], frozenset({"runtime_environment"}))
+        self.assertEqual(creates[0][-3], frozenset())
+        self.assertEqual(creates[1][-3], frozenset({"runtime_environment"}))
         with self.assertRaises(CapabilityError):
-            service.create_child(
+            self.create(service,
                 self.main_token(), "writer-broad", "writer", self.mission(), capabilities=["all_tools"]
             )
         with self.assertRaisesRegex(CapabilityError, "limited to QA or repair"):
-            service.create_child(
+            self.create(service,
                 self.main_token(),
                 "writer-runtime",
                 "writer",
@@ -180,7 +194,7 @@ class MessagingTest(unittest.TestCase):
     def test_child_can_only_report_to_owning_main_and_request_decision(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = service.create_child(self.main_token(), "qa-604", "qa", self.mission())
+        child = self.create(service, self.main_token(), "qa-604", "qa", self.read_only_mission())
         self.assertTrue(service.send_to_parent(child["capabilityRef"], {"messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
         self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
@@ -229,11 +243,11 @@ class MessagingTest(unittest.TestCase):
             expires_at=self.now + timedelta(hours=24),
         )
 
-        reviewer = service.create_child(
+        reviewer = self.create(service,
             deputy_token,
             "review-f8bb35f",
             "reviewer",
-            self.mission(),
+            self.read_only_mission(),
         )
         reviewer_capability = verify_capability(
             reviewer["capabilityRef"],
@@ -257,13 +271,13 @@ class MessagingTest(unittest.TestCase):
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         bad = capability_token(self.secret, owning_main_id=self.main, child_id=self.main, task_key="root", role="writer", allowed_actions={"create_child"}, issued_at=self.now - timedelta(hours=2), expires_at=self.now - timedelta(hours=1))
         with self.assertRaises(CapabilityError):
-            service.create_child(bad, "writer", "writer", self.mission())
+            self.create(service, bad, "writer", "writer", self.mission())
 
     def test_create_child_builds_bound_mission_before_provider_call(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
 
-        result = service.create_child(self.main_token(), "writer-bound", "writer", self.mission())
+        result = self.create(service, self.main_token(), "writer-bound", "writer", self.mission())
 
         mission = provider.calls[0][5]
         self.assertEqual(mission["owningMainId"], str(self.main))
@@ -279,5 +293,108 @@ class MessagingTest(unittest.TestCase):
 
         for mission in ({}, {"immediateTask": "Implement"}, {**self.mission(), "checkout": None}):
             with self.subTest(mission=mission), self.assertRaises(CapabilityError):
-                service.create_child(self.main_token(), "writer-invalid", "writer", mission)
+                self.create(service, self.main_token(), "writer-invalid", "writer", mission)
         self.assertEqual(provider.calls, [])
+
+    def test_role_model_reasoning_and_mutation_envelope_fail_closed(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        writable = self.mission()
+        writable["allowedMutations"] = ["commit and push only the assigned branch"]
+
+        with self.assertRaisesRegex(CapabilityError, "model or reasoning"):
+            service.create_child(
+                self.main_token(), "missing-profile-604", "writer", writable
+            )
+
+        self.create(service,
+            self.main_token(),
+            "plan-author-604",
+            "plan-author",
+            writable,
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+        )
+        created = provider.calls[-1]
+        self.assertEqual(created[-2:], ("gpt-5.6-sol", "high"))
+
+        with self.assertRaisesRegex(CapabilityError, "read-only"):
+            self.create(service,
+                self.main_token(),
+                "review-604",
+                "reviewer",
+                writable,
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+            )
+        waiter_mission = self.read_only_mission()
+        waiter_mission["skills"] = ["evex-delivery-waiter"]
+        waiter = self.create(service,
+            self.main_token(),
+            "wait-ci-604",
+            "waiter",
+            waiter_mission,
+            model="gpt-5.6-luna",
+            reasoning_effort="medium",
+        )
+        self.assertTrue(waiter["childId"])
+        waiter_without_observer = self.read_only_mission()
+        waiter_without_observer["skills"] = [
+            "evex-delivery-protocol",
+            "evex-delivery-specialist",
+        ]
+        with self.assertRaisesRegex(CapabilityError, "observation skill"):
+            self.create(
+                service,
+                self.main_token(),
+                "wait-ci-unconfigured-604",
+                "waiter",
+                waiter_without_observer,
+            )
+        with self.assertRaisesRegex(CapabilityError, "read-only"):
+            self.create(service,
+                self.main_token(),
+                "wait-ci-write-604",
+                "waiter",
+                writable,
+                model="gpt-5.6-luna",
+                reasoning_effort="medium",
+            )
+        with self.assertRaisesRegex(CapabilityError, "write-authorized"):
+            self.create(service,
+                self.main_token(),
+                "writer-empty-604",
+                "writer",
+                self.read_only_mission(),
+                model="gpt-5.6-terra",
+                reasoning_effort="medium",
+            )
+        with self.assertRaisesRegex(CapabilityError, "unsupported Child role"):
+            self.create(service,
+                self.main_token(),
+                "legacy-planner-604",
+                "planner",
+                writable,
+                model="gpt-5.6-sol",
+                reasoning_effort="medium",
+            )
+        with self.assertRaisesRegex(CapabilityError, "model or reasoning"):
+            self.create(service,
+                self.main_token(),
+                "bad-profile-604",
+                "writer",
+                writable,
+                model="gpt-5.6-sol",
+                reasoning_effort="low",
+            )
+        invalid_mutation = self.mission()
+        invalid_mutation["allowedMutations"] = [""]
+        with self.assertRaisesRegex(CapabilityError, "string array"):
+            self.create(service,
+                self.main_token(),
+                "blank-mutation-604",
+                "writer",
+                invalid_mutation,
+                model="gpt-5.6-sol",
+                reasoning_effort="medium",
+            )

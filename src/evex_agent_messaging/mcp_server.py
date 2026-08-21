@@ -17,7 +17,7 @@ TOOLS = [
     {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "planner", "writer", "reviewer", "qa", "repair"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair", "waiter"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
     },
     {
         "name": "send_to_parent",
@@ -37,7 +37,7 @@ TOOLS = [
     {
         "name": "resume_mission",
         "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey", "context"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}, "context": {"type": "object", "minProperties": 1}}},
     },
     {
         "name": "publish_navigation_links",
@@ -71,7 +71,7 @@ class McpServer:
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
             if name == "create_child":
-                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"))
+                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"])
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
@@ -80,7 +80,7 @@ class McpServer:
             elif name == "cancel_mission":
                 value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "resume_mission":
-                value = self._service.resume_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
+                value = self._service.resume_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"], args["context"])
             elif name == "publish_navigation_links":
                 value = self._service.publish_navigation_links(capability_ref, args["links"])
             else:

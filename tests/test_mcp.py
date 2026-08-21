@@ -14,8 +14,8 @@ class FakeService:
     def __init__(self):
         self.calls = []
 
-    def create_child(self, *args):
-        self.calls.append(("create_child", args))
+    def create_child(self, *args, **kwargs):
+        self.calls.append(("create_child", args, kwargs))
         return {"childId": "11111111-1111-4111-8111-111111111111", "capabilityRef": "evx1_opaque"}
 
     def send_message(self, *args):
@@ -58,6 +58,26 @@ class McpServerTest(unittest.TestCase):
         )
         self.assertEqual(create["inputSchema"]["properties"]["mission"]["type"], "object")
         self.assertIn("checkout", create["inputSchema"]["properties"]["mission"]["required"])
+        self.assertIn("model", create["inputSchema"]["required"])
+        self.assertIn("reasoningEffort", create["inputSchema"]["required"])
+        self.assertEqual(
+            create["inputSchema"]["properties"]["role"]["enum"],
+            ["spec", "plan-author", "writer", "reviewer", "qa", "repair", "waiter"],
+        )
+        self.assertEqual(
+            create["inputSchema"]["properties"]["model"]["enum"],
+            ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"],
+        )
+        self.assertEqual(
+            create["inputSchema"]["properties"]["reasoningEffort"]["enum"],
+            ["medium", "high"],
+        )
+        self.assertEqual(
+            create["inputSchema"]["properties"]["mission"]["properties"]["skills"]["minItems"],
+            1,
+        )
+        resume = next(tool for tool in listed["result"]["tools"] if tool["name"] == "resume_mission")
+        self.assertIn("context", resume["inputSchema"]["required"])
         for tool in listed["result"]["tools"]:
             self.assertNotIn("capabilityRef", tool["inputSchema"].get("properties", {}))
 
@@ -71,6 +91,8 @@ class McpServerTest(unittest.TestCase):
                 "arguments": {
                     "taskKey": "writer-1",
                     "role": "writer",
+                    "model": "gpt-5.6-terra",
+                    "reasoningEffort": "medium",
                     "mission": {
                         "immediateTask": "Your task now: implement.",
                         "links": {},
@@ -96,6 +118,8 @@ class McpServerTest(unittest.TestCase):
                 "arguments": {
                     "taskKey": "writer-1",
                     "role": "writer",
+                    "model": "gpt-5.6-terra",
+                    "reasoningEffort": "medium",
                     "mission": {
                         "immediateTask": "Your task now: implement.",
                         "links": {},

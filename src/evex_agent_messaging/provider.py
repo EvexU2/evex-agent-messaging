@@ -64,6 +64,8 @@ class OpenHandsProvider:
         mission: dict,
         capability_ref: str,
         capabilities: frozenset[str],
+        model: str,
+        reasoning_effort: str,
     ) -> dict:
         mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
         bootstrap_text = (
@@ -72,8 +74,9 @@ class OpenHandsProvider:
         )
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
-            self._validate_existing_child(existing, parent_id, child_id, role, task_key)
+            self._validate_existing_child(existing, parent_id, child_id, role, task_key, model, reasoning_effort, capabilities)
             if self._has_user_message(child_id, mission_text):
+                self._switch_and_verify_model(child_id, model)
                 self._validate_existing_checkout(
                     self._checkout_path(child_id), mission.get("checkout"), exact=False
                 )
@@ -92,7 +95,7 @@ class OpenHandsProvider:
                 "conversation_id": str(child_id),
                 "agent_profile_id": profile_id,
                 "workspace": {"working_dir": str(self._checkout_path(child_id))},
-                "tags": {"project": "evex-u", "evexrole": "role-child", "evextask": task_key, "evexparent": str(parent_id), "evexchildrole": role},
+                "tags": {"project": "evex-u", "evexrole": "role-child", "evextask": task_key, "evexparent": str(parent_id), "evexchildrole": role, "evexmodel": model, "evexreasoning": reasoning_effort, "evexcaps": ",".join(sorted(capabilities)) or "none"},
                 "autotitle": False,
                 "max_iterations": 300,
                 "secrets": {
@@ -108,6 +111,14 @@ class OpenHandsProvider:
                     "EVEX_AGENT_MESSAGING_CAPABILITY": {
                         "kind": "StaticSecret",
                         "value": capability_ref,
+                    },
+                    "EVEX_REASONING_EFFORT": {
+                        "kind": "StaticSecret",
+                        "value": reasoning_effort,
+                    },
+                    "EVEX_AGENT_CAPABILITIES": {
+                        "kind": "StaticSecret",
+                        "value": ",".join(sorted(capabilities)),
                     },
                 },
                 "agent_launch_additions": {
@@ -155,7 +166,7 @@ class OpenHandsProvider:
                     raise
                 existing = self._request("GET", f"/api/conversations/{child_id}")
                 self._validate_existing_child(
-                    existing, parent_id, child_id, role, task_key
+                    existing, parent_id, child_id, role, task_key, model, reasoning_effort, capabilities
                 )
                 created = False
             if created:
@@ -165,6 +176,7 @@ class OpenHandsProvider:
                     f"/api/conversations/{child_id}",
                     {"title": f"EVEX | {role_title} | {task_key}"},
                 )
+        self._switch_and_verify_model(child_id, model)
         marker = self._admission_marker(child_id)
         marker.unlink(missing_ok=True)
         if not self._has_user_message(child_id, bootstrap_text):
@@ -193,6 +205,14 @@ class OpenHandsProvider:
             "provider": "openhands",
             "created": created,
         }
+
+    def _switch_and_verify_model(self, child_id: uuid.UUID, model: str) -> None:
+        self._request(
+            "POST", f"/api/conversations/{child_id}/switch_acp_model", {"model": model}
+        )
+        current = self._request("GET", f"/api/conversations/{child_id}")
+        if current.get("current_model_id") != model:
+            raise ProviderError("OpenHands Child model verification failed")
 
     def _checkout_path(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve() / f"child-{child_id}"
@@ -238,6 +258,9 @@ class OpenHandsProvider:
         child_id: uuid.UUID,
         role: str,
         task_key: str,
+        model: str,
+        reasoning_effort: str,
+        capabilities: frozenset[str],
     ) -> None:
         tags = value.get("tags")
         workspace = value.get("workspace")
@@ -247,6 +270,9 @@ class OpenHandsProvider:
             "evextask": task_key,
             "evexparent": str(parent_id),
             "evexchildrole": role,
+            "evexmodel": model,
+            "evexreasoning": reasoning_effort,
+            "evexcaps": ",".join(sorted(capabilities)) or "none",
         }
         working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
         try:
@@ -485,6 +511,7 @@ class OpenHandsProvider:
             self.sleeper(0.1)
         raise ProviderError("OpenHands Child did not become cancellation-wakeable")
 
-    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str) -> dict:
-        self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + message_key}], "run": True})
+    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict) -> dict:
+        envelope = {"messageKey": message_key, "taskKey": task_key, "context": context}
+        self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
         return {"accepted": True, "messageKey": message_key, "taskKey": task_key}

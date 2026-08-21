@@ -45,16 +45,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._request = Mock(side_effect=[
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
-                {
-                    "agent_settings": {
-                        "mcp_config": {
-                            "mcpServers": {
-                                "evex_agent_messaging": {"url": "http://messaging/mcp"},
-                                "evex_runtime": {"url": "http://runtime/mcp"},
-                            }
-                        }
-                    }
-                },
                 {"id": str(child)},
                 {},
                 {},
@@ -70,31 +60,33 @@ class OpenHandsProviderTest(unittest.TestCase):
                 frozenset(),
             )
 
-        create = provider._request.call_args_list[3].args[2]
+        create = provider._request.call_args_list[2].args[2]
         hook = create["hook_config"]["stop"][0]["hooks"][0]
         self.assertTrue(hook["async"])
         self.assertIn("http://messaging/completion-hook", hook["command"])
-        self.assertIn("evx1_opaque", hook["command"])
+        self.assertNotIn("evx1_opaque", hook["command"])
+        self.assertIn("EVEX_AGENT_MESSAGING_CAPABILITY", hook["command"])
         self.assertIn("--retry 2", hook["command"])
         admission = create["hook_config"]["pre_tool_use"][0]["hooks"][0]
         self.assertIn(".evex-admission", admission["command"])
         self.assertIn(str(child), admission["command"])
         self.assertIn("if test -f", hook["command"])
+        self.assertNotIn("mcp_config", create)
         self.assertEqual(
-            create["mcp_config"],
-            {"mcpServers": {"evex_agent_messaging": {"url": "http://messaging/mcp", "auth": {"strategy": "bearer", "value": "evx1_opaque"}}}},
+            create["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"],
+            {"kind": "StaticSecret", "value": "evx1_opaque"},
         )
         self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "reviewer")
         self.assertEqual(create["secrets"]["EVEX_AGENT_INSTANCE_ID"]["value"], str(child))
         self.assertIn("Never call OpenHands provider-control APIs", create["agent_launch_additions"]["system_message_suffix_append"])
-        bootstrap_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
+        bootstrap_event = provider._request.call_args_list[3].args[2]["content"][0]["text"]
         self.assertTrue(bootstrap_event.startswith("PROVIDER_ADMISSION\n"))
-        mission_event = provider._request.call_args_list[5].args[2]["content"][0]["text"]
+        mission_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
         self.assertTrue(mission_event.startswith("MISSION\n{"))
         provider.wait_until_terminal.assert_called_once_with(child)
         provider._restore_checkout_after_bootstrap.assert_called_once()
 
-    def test_integrated_mission_receives_runtime_mcp_explicitly(self) -> None:
+    def test_integrated_mission_does_not_send_unsupported_mcp_override(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         with tempfile.TemporaryDirectory() as temporary:
@@ -105,16 +97,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._has_user_message = Mock(return_value=False)
             provider.wait_until_terminal = Mock(return_value="finished")
             provider._restore_checkout_after_bootstrap = Mock()
-            config = {
-                "mcpServers": {
-                    "evex_agent_messaging": {"url": "http://messaging/mcp"},
-                    "evex_runtime": {"url": "http://runtime/mcp"},
-                }
-            }
             provider._request = Mock(side_effect=[
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
-                {"agent_settings": {"mcp_config": config}},
                 {"id": str(child)},
                 {},
                 {},
@@ -130,19 +115,8 @@ class OpenHandsProviderTest(unittest.TestCase):
                 frozenset({"runtime_environment"}),
             )
 
-        create = provider._request.call_args_list[3].args[2]
-        self.assertEqual(
-            create["mcp_config"],
-            {
-                "mcpServers": {
-                    "evex_agent_messaging": {
-                        "url": "http://messaging/mcp",
-                        "auth": {"strategy": "bearer", "value": "evx1_opaque"},
-                    },
-                    "evex_runtime": {"url": "http://runtime/mcp"},
-                }
-            },
-        )
+        create = provider._request.call_args_list[2].args[2]
+        self.assertNotIn("mcp_config", create)
 
     def test_child_mission_is_not_sent_when_post_bootstrap_admission_fails(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -160,7 +134,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._request = Mock(side_effect=[
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
-                {"agent_settings": {"mcp_config": {}}},
                 {"id": str(child)},
                 {},
             ])
@@ -216,7 +189,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._request = Mock(side_effect=[
                 ProviderError("missing", status=404),
                 {"active_agent_profile_id": "acp"},
-                {"agent_settings": {"mcp_config": {}}},
                 ProviderError("conflict", status=409),
                 existing,
                 {},

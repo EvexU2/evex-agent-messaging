@@ -214,6 +214,44 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(provider.calls[-1][1], self.main)
         self.assertEqual(provider.calls[-1][3], "RESULT")
 
+    def test_deputy_specialist_reports_to_the_creating_deputy(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        deputy = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        deputy_token = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=deputy,
+            task_key="issue-626",
+            role="deputy",
+            allowed_actions={"create_child", "send_message", "cancel_mission", "resume_mission"},
+            issued_at=self.now,
+            expires_at=self.now + timedelta(hours=24),
+        )
+
+        reviewer = service.create_child(
+            deputy_token,
+            "review-f8bb35f",
+            "reviewer",
+            self.mission(),
+        )
+        reviewer_capability = verify_capability(
+            reviewer["capabilityRef"],
+            self.secret,
+            now=self.now,
+            action="send_message",
+            target_id=uuid.UUID(reviewer["childId"]),
+        )
+        sent = service.send_to_parent(
+            reviewer["capabilityRef"],
+            {"messageKey": "review:f8bb35f:pass", "kind": "RESULT", "outcome": "PASS"},
+        )
+
+        self.assertEqual(reviewer_capability.owning_main_id, deputy)
+        self.assertEqual(provider.calls[0][5]["owningMainId"], str(deputy))
+        self.assertTrue(sent["accepted"])
+        self.assertEqual(provider.calls[-1][1], deputy)
+
     def test_expired_or_wrong_role_capability_fails(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

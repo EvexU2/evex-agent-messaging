@@ -12,7 +12,7 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   ACP bootstrap, and only then admits tools and delivers the Mission. No
   Conversation API call occurs when checkout authority is missing or mismatched. The provider switches
   and verifies the requested model before Mission delivery. Read-only Review/QA require no mutations;
-  Spec/Plan Author/Writer/Repair require exact mutations; Review/QA/Waiter are read-only. Source roles receive only Messaging; only
+  Spec/Plan Author/Writer/Repair require exact mutations; Review/QA are read-only. Source roles receive only Messaging; only
   explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`; the provider
   binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
   for that Child.

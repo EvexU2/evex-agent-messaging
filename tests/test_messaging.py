@@ -327,36 +327,12 @@ class MessagingTest(unittest.TestCase):
                 model="gpt-5.6-terra",
                 reasoning_effort="medium",
             )
-        waiter_mission = self.read_only_mission()
-        waiter_mission["skills"] = ["evex-delivery-waiter"]
-        waiter = self.create(service,
-            self.main_token(),
-            "wait-ci-604",
-            "waiter",
-            waiter_mission,
-            model="gpt-5.6-luna",
-            reasoning_effort="medium",
-        )
-        self.assertTrue(waiter["childId"])
-        waiter_without_observer = self.read_only_mission()
-        waiter_without_observer["skills"] = [
-            "evex-delivery-protocol",
-            "evex-delivery-specialist",
-        ]
-        with self.assertRaisesRegex(CapabilityError, "observation skill"):
-            self.create(
-                service,
-                self.main_token(),
-                "wait-ci-unconfigured-604",
-                "waiter",
-                waiter_without_observer,
-            )
-        with self.assertRaisesRegex(CapabilityError, "read-only"):
+        with self.assertRaisesRegex(CapabilityError, "unsupported Child role"):
             self.create(service,
                 self.main_token(),
-                "wait-ci-write-604",
+                "wait-ci-604",
                 "waiter",
-                writable,
+                self.read_only_mission(),
                 model="gpt-5.6-luna",
                 reasoning_effort="medium",
             )

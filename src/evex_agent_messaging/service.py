@@ -54,16 +54,14 @@ class MessagingService:
         )
         if parent.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may create a Child")
-        if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair", "waiter"}:
+        if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair"}:
             raise CapabilityError("unsupported Child role")
         if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
         mutations = mission_payload["allowedMutations"]
-        if role in {"reviewer", "qa", "waiter"} and mutations:
-            raise CapabilityError("reviewer, QA, and waiter missions are read-only")
-        if role == "waiter" and "evex-delivery-waiter" not in mission_payload["skills"]:
-            raise CapabilityError("waiter missions require an exact observation skill")
+        if role in {"reviewer", "qa"} and mutations:
+            raise CapabilityError("reviewer and QA missions are read-only")
         if role in {"spec", "plan-author", "writer", "repair"} and not mutations:
             raise CapabilityError("write-authorized missions require exact allowedMutations")
         requested_capabilities = capabilities or []

@@ -26,7 +26,6 @@ _ROLE_IDS = {
     "reviewer": 6,
     "qa": 7,
     "repair": 8,
-    "waiter": 9,
 }
 _ROLES = {value: key for key, value in _ROLE_IDS.items()}
 _ACTION_BITS = {

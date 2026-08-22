@@ -62,7 +62,7 @@ class McpServerTest(unittest.TestCase):
         self.assertIn("reasoningEffort", create["inputSchema"]["required"])
         self.assertEqual(
             create["inputSchema"]["properties"]["role"]["enum"],
-            ["spec", "plan-author", "writer", "reviewer", "qa", "repair", "waiter"],
+            ["spec", "plan-author", "writer", "reviewer", "qa", "repair"],
         )
         self.assertEqual(
             create["inputSchema"]["properties"]["model"]["enum"],

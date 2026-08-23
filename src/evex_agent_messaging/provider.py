@@ -463,6 +463,35 @@ class OpenHandsProvider:
                 return text
         raise ProviderError("OpenHands Child terminal response is unavailable")
 
+    def terminal_recovery(self, target_id: uuid.UUID) -> dict:
+        """Return only terminal evidence suitable for one fallback callback."""
+        status = self._request(
+            "GET", f"/api/conversations/{target_id}"
+        ).get("execution_status")
+        if status == "finished":
+            return {"status": status, "terminalResponse": self.terminal_response(target_id)}
+        if status not in {"error", "stuck"}:
+            raise ProviderError("OpenHands Child is not terminal")
+        events = self._request(
+            "GET",
+            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+        )
+        terminal_error = {"kind": "terminal-status", "status": status}
+        for event in events.get("items", []):
+            if not isinstance(event, dict) or event.get("kind") != "ConversationErrorEvent":
+                continue
+            error = event.get("error")
+            terminal_error = {"kind": "conversation-error", "status": status}
+            if isinstance(error, dict):
+                for key, limit in (("code", 200), ("message", 2000)):
+                    value = error.get(key)
+                    if isinstance(value, str) and value.strip():
+                        terminal_error[key] = value.strip()[:limit]
+            elif isinstance(error, str) and error.strip():
+                terminal_error["message"] = error.strip()[:2000]
+            break
+        return {"status": status, "terminalError": terminal_error}
+
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:
         """Use provider event evidence to suppress a redundant Stop-hook recovery wake."""
         for attempt in range(3):

@@ -480,6 +480,85 @@ class OpenHandsProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "terminal response"):
             provider.terminal_response(child)
 
+    def test_terminal_recovery_refuses_running_assistant_message(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={"execution_status": "running"})
+
+        with self.assertRaisesRegex(ProviderError, "not terminal"):
+            provider.terminal_recovery(child)
+
+    def test_terminal_recovery_requires_finish_action_when_finished(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "finished"},
+            {"items": [{"kind": "ActionEvent", "action": {"kind": "FinishAction", "message": "Done"}}]},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {"status": "finished", "terminalResponse": "Done"},
+        )
+
+    def test_terminal_recovery_refuses_finished_ordinary_assistant_message(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "finished"},
+            {"items": [{"kind": "MessageEvent", "source": "agent", "llm_message": {"content": [{"type": "text", "text": "Done"}]}}]},
+        ])
+
+        with self.assertRaisesRegex(ProviderError, "terminal response"):
+            provider.terminal_recovery(child)
+
+    def test_terminal_recovery_reports_canonical_error_event(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "error"},
+            {"items": [{"kind": "ConversationErrorEvent", "error": {"code": "TIMEOUT", "message": "Child timed out."}}]},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {
+                "status": "error",
+                "terminalError": {
+                    "kind": "conversation-error",
+                    "status": "error",
+                    "code": "TIMEOUT",
+                    "message": "Child timed out.",
+                },
+            },
+        )
+
+    def test_terminal_recovery_reports_terminal_status_for_timeout_message(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "error"},
+            {"items": [{"kind": "MessageEvent", "source": "agent", "llm_message": {"content": [{"type": "text", "text": "timed out"}]}}]},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {"status": "error", "terminalError": {"kind": "terminal-status", "status": "error"}},
+        )
+
+    def test_terminal_recovery_reports_stuck_status_without_message_fallback(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "stuck"},
+            {"items": []},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {"status": "stuck", "terminalError": {"kind": "terminal-status", "status": "stuck"}},
+        )
+
     def test_parent_callback_succeeded_uses_live_child_event_evidence(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")

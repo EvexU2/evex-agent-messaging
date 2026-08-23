@@ -23,7 +23,7 @@ class MessagingProvider(Protocol):
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
-    def terminal_response(self, target_id: uuid.UUID) -> str: ...
+    def terminal_recovery(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
 
@@ -171,7 +171,7 @@ class MessagingService:
         )
         if self._provider.parent_callback_succeeded(child_id):
             return {"accepted": True, "alreadyReported": True}
-        terminal_response = self._provider.terminal_response(child_id)
+        terminal_recovery = self._provider.terminal_recovery(child_id)
         message_key = f"terminal:{child_id}:{capability.task_key}"
         envelope = {
             "messageKey": message_key,
@@ -179,8 +179,7 @@ class MessagingService:
             "childId": str(child_id),
             "taskKey": capability.task_key,
             "kind": "RECOVERY_WAKE",
-            "status": "finished",
-            "terminalResponse": terminal_response,
+            **terminal_recovery,
         }
         return self._provider.send_message(
             capability.owning_main_id,

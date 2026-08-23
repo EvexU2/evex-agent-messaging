@@ -39,9 +39,12 @@ class FakeProvider:
         self.calls.append(("wait-terminal", target_id))
         return "finished"
 
-    def terminal_response(self, target_id):
-        self.calls.append(("terminal-response", target_id))
-        return "Welche Option soll gelten?\nA ...\nB ..."
+    def terminal_recovery(self, target_id):
+        self.calls.append(("terminal-recovery", target_id))
+        return {
+            "status": "finished",
+            "terminalResponse": "Welche Option soll gelten?\nA ...\nB ...",
+        }
 
     def parent_callback_succeeded(self, target_id):
         self.calls.append(("callback-succeeded", target_id))
@@ -187,6 +190,7 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual([call[1] for call in sends], [self.main, self.main])
         self.assertTrue(all(call[3] == "RECOVERY_WAKE" for call in sends))
         envelope = json.loads(sends[0][4])
+        self.assertEqual(envelope["status"], "finished")
         self.assertEqual(
             envelope["terminalResponse"],
             "Welche Option soll gelten?\nA ...\nB ...",
@@ -203,8 +207,32 @@ class MessagingTest(unittest.TestCase):
         result = service.terminal_wake(child["capabilityRef"])
 
         self.assertEqual(result, {"accepted": True, "alreadyReported": True})
-        self.assertNotIn("terminal-response", [call[0] for call in provider.calls])
+        self.assertNotIn("terminal-recovery", [call[0] for call in provider.calls])
         self.assertNotIn("send", [call[0] for call in provider.calls])
+
+    def test_terminal_hook_reports_typed_error_recovery(self):
+        provider = FakeProvider()
+        provider.terminal_recovery = lambda target_id: {
+            "status": "error",
+            "terminalError": {
+                "kind": "conversation-error",
+                "status": "error",
+                "message": "Child timed out.",
+            },
+        }
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(service, self.main_token(), "plan-error", "plan-author", self.mission())
+
+        first = service.terminal_wake(child["capabilityRef"])
+        second = service.terminal_wake(child["capabilityRef"])
+
+        self.assertTrue(first["accepted"])
+        self.assertEqual(first["messageKey"], second["messageKey"])
+        sends = [call for call in provider.calls if call[0] == "send"]
+        self.assertEqual(len(sends), 2)
+        envelope = json.loads(sends[0][4])
+        self.assertEqual(envelope["status"], "error")
+        self.assertEqual(envelope["terminalError"]["kind"], "conversation-error")
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()

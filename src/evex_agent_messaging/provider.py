@@ -461,26 +461,6 @@ class OpenHandsProvider:
                 if len(text) > 20000:
                     raise ProviderError("OpenHands Child terminal response is too large")
                 return text
-            if (
-                event.get("kind") != "MessageEvent"
-                or event.get("source") not in {"agent", "assistant"}
-            ):
-                continue
-            message = event.get("llm_message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                continue
-            text = "\n".join(
-                item["text"]
-                for item in content
-                if isinstance(item, dict)
-                and item.get("type") == "text"
-                and isinstance(item.get("text"), str)
-            ).strip()
-            if text:
-                if len(text) > 20000:
-                    raise ProviderError("OpenHands Child terminal response is too large")
-                return text
         raise ProviderError("OpenHands Child terminal response is unavailable")
 
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:

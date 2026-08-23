@@ -462,6 +462,24 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertEqual(provider.terminal_response(child), "German PM questions")
 
+    def test_terminal_response_refuses_nonterminal_assistant_message(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "items": [
+                {
+                    "kind": "MessageEvent",
+                    "source": "agent",
+                    "llm_message": {
+                        "content": [{"type": "text", "text": "I am still working."}]
+                    },
+                }
+            ]
+        })
+
+        with self.assertRaisesRegex(ProviderError, "terminal response"):
+            provider.terminal_response(child)
+
     def test_parent_callback_succeeded_uses_live_child_event_evidence(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")

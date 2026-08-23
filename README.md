@@ -36,7 +36,9 @@ message key and the Main deduplicates semantic replays.
 Each created Child receives a synchronous native Stop hook. The hook calls the private
 `/completion-hook` endpoint with its scoped reference. Live Child event evidence makes it a successful
 no-op after an accepted `send_to_parent`; otherwise it sends one stable `RECOVERY_WAKE` containing the
-bounded terminal assistant response to the owning Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
+bounded terminal `FinishAction` response to the owning Main. Ordinary assistant text is not terminal
+evidence, so a nonterminal Child cannot trigger a recovery wake. This is the provider-neutral fallback
+when a model finishes without calling `send_to_parent`.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.
 

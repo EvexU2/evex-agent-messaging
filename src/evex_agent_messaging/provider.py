@@ -364,6 +364,10 @@ class OpenHandsProvider:
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise ProviderError("Child checkout provisioning failed") from exc
+        # `git clone --mirror` sets this on the shared remote. Once the mirror
+        # backs writable worktrees, keeping it true breaks ordinary explicit
+        # branch pushes and makes bounded fetches include mirror refspecs.
+        self._git(path, "config", "remote.origin.mirror", "false")
 
     def _validate_existing_checkout(
         self, path: Path, checkout: object, *, exact: bool

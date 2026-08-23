@@ -98,6 +98,9 @@ class OpenHandsProvider:
                 "tags": {"project": "evex-u", "evexrole": "role-child", "evextask": task_key, "evexparent": str(parent_id), "evexchildrole": role, "evexmodel": model, "evexreasoning": reasoning_effort, "evexcaps": ",".join(sorted(capabilities)) or "none"},
                 "autotitle": False,
                 "max_iterations": 300,
+                # Role MCPs are materialized by the isolated Codex wrapper. An empty
+                # override prevents broad profile-level MCPs leaking into this Child.
+                "mcp_config": {},
                 "secrets": {
                     "EVEX_AGENT_ROLE": {"kind": "StaticSecret", "value": role},
                     "EVEX_AGENT_INSTANCE_ID": {
@@ -152,7 +155,7 @@ class OpenHandsProvider:
                                         f"then {self._completion_hook_command()}; fi"
                                     ),
                                     "timeout": 50,
-                                    "async": True,
+                                    "async": False,
                                 }
                             ],
                         }

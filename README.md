@@ -16,7 +16,8 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`; the provider
   binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
   for that Child.
-- `send_to_parent`: deliver a structured `RESULT`/`NEEDS_INPUT` to the capability's owning Main.
+- `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives
+  identity, kind, and replay key.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main.
 - `cancel_mission`: stop the exact Child task.
 - `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
@@ -28,9 +29,8 @@ allowed action, and expiry. The server holds the OpenHands credential; it never 
 tool output, or child environment variables. There is no persistent state: callers provide a stable
 message key and the Main deduplicates semantic replays.
 
-Each created Child receives an asynchronous native Stop hook. The hook calls the private
-`/completion-hook` endpoint with its scoped reference; the gateway waits for terminal native state
-and sends one stable `RECOVERY_WAKE` containing the bounded terminal assistant response to the owning
+Each created Child receives a synchronous native Stop hook. The hook calls the private
+`/completion-hook` endpoint with its scoped reference and sends one stable `RECOVERY_WAKE` containing the bounded terminal assistant response to the owning
 Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.

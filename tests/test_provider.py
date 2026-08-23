@@ -79,7 +79,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             + '","reviewOutcome":"PASS"},"messageKey":"resume:plan-reviewed","taskKey":"spec-author-604"}',
         )
 
-    def test_child_creation_installs_async_terminal_recovery_hook(self) -> None:
+    def test_child_creation_installs_synchronous_terminal_recovery_hook(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         with tempfile.TemporaryDirectory() as temporary:
@@ -115,7 +115,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         create = provider._request.call_args_list[2].args[2]
         hook = create["hook_config"]["stop"][0]["hooks"][0]
-        self.assertTrue(hook["async"])
+        self.assertFalse(hook["async"])
         self.assertIn("http://messaging/completion-hook", hook["command"])
         self.assertNotIn("evx1_opaque", hook["command"])
         self.assertIn("EVEX_AGENT_MESSAGING_CAPABILITY", hook["command"])
@@ -124,7 +124,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn(".evex-admission", admission["command"])
         self.assertIn(str(child), admission["command"])
         self.assertIn("if test -f", hook["command"])
-        self.assertNotIn("mcp_config", create)
+        self.assertEqual(create["mcp_config"], {})
         self.assertEqual(
             create["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"],
             {"kind": "StaticSecret", "value": "evx1_opaque"},
@@ -152,7 +152,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider.wait_until_terminal.assert_called_once_with(child)
         provider._restore_checkout_after_bootstrap.assert_called_once()
 
-    def test_integrated_mission_does_not_send_unsupported_mcp_override(self) -> None:
+    def test_integrated_mission_starts_with_empty_profile_mcp_override(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         with tempfile.TemporaryDirectory() as temporary:
@@ -183,7 +183,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             )
 
         create = provider._request.call_args_list[2].args[2]
-        self.assertNotIn("mcp_config", create)
+        self.assertEqual(create["mcp_config"], {})
         self.assertEqual(
             create["secrets"]["EVEX_AGENT_CAPABILITIES"]["value"],
             "runtime_environment",

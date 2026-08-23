@@ -36,6 +36,10 @@ class FakeService:
     def publish_navigation_links(self, *args):
         return {"accepted": True}
 
+    def get_usage(self, *args):
+        self.calls.append(("get_usage", args, {}))
+        return {"cacheHitRate": 0.9}
+
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -46,7 +50,7 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -138,6 +142,25 @@ class McpServerTest(unittest.TestCase):
     def test_unknown_tool_is_a_client_error(self):
         result = self.server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "raw_openhands_api", "arguments": {}}})
         self.assertEqual(result["error"]["code"], -32602)
+
+    def test_get_usage_uses_transport_bound_main_capability(self):
+        target = "22222222-2222-4222-8222-222222222222"
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_usage",
+                    "arguments": {"targetId": target, "taskKey": "writer-604"},
+                },
+            },
+            capability_ref="evx1_parent",
+        )
+
+        self.assertEqual(result["result"]["structuredContent"]["cacheHitRate"], 0.9)
+        self.assertEqual(self.service.calls[-1][0], "get_usage")
+        self.assertEqual(self.service.calls[-1][1][0], "evx1_parent")
 
     def test_http_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_opaque"), "evx1_opaque")

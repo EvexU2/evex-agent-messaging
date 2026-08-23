@@ -44,6 +44,11 @@ TOOLS = [
         "description": "Publish bounded human navigation links to the owning Main; links are informational, never workflow authority.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["links"], "properties": {"links": {"type": "object", "additionalProperties": {"type": "string"}}}},
     },
+    {
+        "name": "get_usage",
+        "description": "Read live token usage, cache hit rate, model, reasoning effort, and official Standard API-equivalent cost for this Main or one deterministic Child. This is observability, never workflow authority or a subscription invoice.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}}},
+    },
 ]
 
 
@@ -83,6 +88,10 @@ class McpServer:
                 value = self._service.resume_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"], args["context"])
             elif name == "publish_navigation_links":
                 value = self._service.publish_navigation_links(capability_ref, args["links"])
+            elif name == "get_usage":
+                value = self._service.get_usage(
+                    capability_ref, uuid.UUID(args["targetId"]), args["taskKey"]
+                )
             else:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:

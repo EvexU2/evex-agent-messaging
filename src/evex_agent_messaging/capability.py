@@ -33,6 +33,7 @@ _ACTION_BITS = {
     "send_message": 2,
     "cancel_mission": 4,
     "resume_mission": 8,
+    "read_usage": 16,
 }
 
 
@@ -118,7 +119,7 @@ def main_capability_token(secret: bytes, main_id: uuid.UUID, *, issued_at: datet
         child_id=main_id,
         task_key="root",
         role="main",
-        allowed_actions={"create_child", "cancel_mission", "resume_mission"},
+        allowed_actions={"create_child", "cancel_mission", "resume_mission", "read_usage"},
         issued_at=issued_at,
         expires_at=expires_at,
     )

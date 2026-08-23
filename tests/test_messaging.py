@@ -47,6 +47,10 @@ class FakeProvider:
         self.calls.append(("callback-succeeded", target_id))
         return self.callback_succeeded
 
+    def usage(self, target_id):
+        self.calls.append(("usage", target_id))
+        return {"conversationId": str(target_id), "cacheHitRate": 0.9}
+
 
 class MessagingTest(unittest.TestCase):
     def setUp(self):
@@ -123,6 +127,26 @@ class MessagingTest(unittest.TestCase):
                 self.main_token(), child, "writer-604", "resume-empty", {}
             )
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
+
+    def test_main_reads_own_and_deterministic_child_usage_only(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = deterministic_child_id(self.main, "writer-604")
+
+        self.assertEqual(
+            service.get_usage(self.main_token(), self.main, "root")["conversationId"],
+            str(self.main),
+        )
+        self.assertEqual(
+            service.get_usage(self.main_token(), child, "writer-604")["conversationId"],
+            str(child),
+        )
+        with self.assertRaisesRegex(CapabilityError, "not the Main or its deterministic Child"):
+            service.get_usage(
+                self.main_token(),
+                uuid.UUID("33333333-3333-4333-8333-333333333333"),
+                "writer-604",
+            )
 
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)

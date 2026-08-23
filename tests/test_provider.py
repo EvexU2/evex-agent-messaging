@@ -489,6 +489,217 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertFalse(provider.parent_callback_succeeded(child))
 
+    def test_parent_callback_succeeded_retries_eventual_event_visibility(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public", sleeper=lambda _seconds: None
+        )
+        provider._request = Mock(
+            side_effect=[
+                {"items": []},
+                {"items": []},
+                {
+                    "items": [
+                        {
+                            "kind": "ACPToolCallEvent",
+                            "title": "mcp.evex_agent_messaging.send_to_parent",
+                            "status": "completed",
+                            "raw_output": {
+                                "result": {
+                                    "structuredContent": {"accepted": True}
+                                },
+                                "error": None,
+                            },
+                        }
+                    ]
+                },
+            ]
+        )
+
+        self.assertTrue(provider.parent_callback_succeeded(child))
+        self.assertEqual(provider._request.call_count, 3)
+
+    def test_usage_reports_tokens_cache_hit_rate_and_official_standard_estimate(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(
+            return_value={
+                "current_model_id": "gpt-5.6-sol",
+                "tags": {
+                    "evexmodel": "gpt-5.6-sol",
+                    "evexreasoning": "high",
+                },
+                "stats": {
+                    "usage_to_metrics": {
+                        "default": {
+                            "accumulated_token_usage": {
+                                "prompt_tokens": 1_000,
+                                "cache_read_tokens": 9_000,
+                                "cache_write_tokens": 500,
+                                "completion_tokens": 200,
+                                "reasoning_tokens": 50,
+                            },
+                            "token_usages": [
+                                {
+                                    "prompt_tokens": 1_000,
+                                    "cache_read_tokens": 9_000,
+                                    "cache_write_tokens": 500,
+                                    "completion_tokens": 200,
+                                    "reasoning_tokens": 50,
+                                }
+                            ],
+                        }
+                    }
+                },
+            }
+        )
+
+        value = provider.usage(child)
+
+        self.assertEqual(value["model"], "gpt-5.6-sol")
+        self.assertEqual(value["reasoningEffort"], "high")
+        self.assertEqual(
+            value["tokens"],
+            {
+                "uncachedInput": 1_000,
+                "cachedInput": 9_000,
+                "cacheWrite": 500,
+                "output": 200,
+                "reasoning": 50,
+            },
+        )
+        self.assertEqual(value["cacheHitRate"], 0.9)
+        self.assertEqual(value["officialApiEquivalentUsd"], 0.0141)
+        self.assertEqual(value["pricing"]["serviceTier"], "standard")
+        self.assertIn("developers.openai.com", value["pricing"]["source"])
+        self.assertIn("not a subscription invoice", value["disclaimer"])
+
+    def test_usage_aggregates_every_openhands_metrics_bucket(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "tags": {"evexmodel": "gpt-5.6-terra", "evexreasoning": "medium"},
+            "stats": {
+                "usage_to_metrics": {
+                    "default": {
+                        "accumulated_token_usage": {
+                            "prompt_tokens": 1_000,
+                            "cache_read_tokens": 9_000,
+                            "cache_write_tokens": 0,
+                            "completion_tokens": 100,
+                            "reasoning_tokens": 20,
+                        },
+                        "token_usages": [{
+                            "prompt_tokens": 1_000,
+                            "cache_read_tokens": 9_000,
+                            "cache_write_tokens": 0,
+                            "completion_tokens": 100,
+                            "reasoning_tokens": 20,
+                        }],
+                    },
+                    "runtime": {
+                        "accumulated_token_usage": {
+                            "prompt_tokens": 500,
+                            "cache_read_tokens": 500,
+                            "cache_write_tokens": 200,
+                            "completion_tokens": 50,
+                            "reasoning_tokens": 10,
+                        },
+                        "token_usages": [{
+                            "prompt_tokens": 500,
+                            "cache_read_tokens": 500,
+                            "cache_write_tokens": 200,
+                            "completion_tokens": 50,
+                            "reasoning_tokens": 10,
+                        }],
+                    },
+                }
+            },
+        })
+
+        value = provider.usage(child)
+
+        self.assertEqual(value["tokens"], {
+            "uncachedInput": 1_500,
+            "cachedInput": 9_500,
+            "cacheWrite": 200,
+            "output": 150,
+            "reasoning": 30,
+        })
+        self.assertEqual(value["cacheHitRate"], round(9_500 / 11_000, 6))
+        self.assertEqual(value["officialApiEquivalentUsd"], 0.0072)
+
+    def test_usage_applies_long_context_standard_rates_per_turn(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "tags": {"evexmodel": "gpt-5.6-sol", "evexreasoning": "high"},
+            "stats": {
+                "usage_to_metrics": {
+                    "default": {
+                        "accumulated_token_usage": {
+                            "prompt_tokens": 10_000,
+                            "cache_read_tokens": 270_000,
+                            "cache_write_tokens": 0,
+                            "completion_tokens": 2_000,
+                            "reasoning_tokens": 500,
+                        },
+                        "token_usages": [{
+                            "prompt_tokens": 10_000,
+                            "cache_read_tokens": 270_000,
+                            "cache_write_tokens": 0,
+                            "completion_tokens": 2_000,
+                            "reasoning_tokens": 500,
+                        }],
+                    }
+                }
+            },
+        })
+
+        value = provider.usage(child)
+
+        self.assertEqual(value["longContextTurns"], 1)
+        self.assertAlmostEqual(value["officialApiEquivalentUsd"], 0.356, places=8)
+
+    def test_usage_fails_closed_without_reasoning_effort(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "current_model_id": "gpt-5.6-sol",
+            "stats": {
+                "usage_to_metrics": {
+                    "default": {
+                        "accumulated_token_usage": {},
+                        "token_usages": [],
+                    }
+                }
+            },
+        })
+
+        with self.assertRaisesRegex(ProviderError, "reasoning effort"):
+            provider.usage(child)
+
+    def test_usage_rejects_reasoning_tokens_above_output_tokens(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "tags": {"evexmodel": "gpt-5.6-sol", "evexreasoning": "high"},
+            "stats": {
+                "usage_to_metrics": {
+                    "default": {
+                        "accumulated_token_usage": {
+                            "completion_tokens": 10,
+                            "reasoning_tokens": 11,
+                        },
+                        "token_usages": [{"completion_tokens": 10, "reasoning_tokens": 11}],
+                    }
+                }
+            },
+        })
+
+        with self.assertRaisesRegex(ProviderError, "reasoning tokens"):
+            provider.usage(child)
+
     def test_terminal_response_fails_closed_without_assistant_text(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")

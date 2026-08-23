@@ -24,6 +24,7 @@ class MessagingProvider(Protocol):
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def terminal_response(self, target_id: uuid.UUID) -> str: ...
+    def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool: ...
 
 
 class MessagingService:
@@ -141,11 +142,11 @@ class MessagingService:
         ):
             raise CapabilityError("mission checkout authority is invalid")
         for key in ("links",):
-            if not isinstance(mission.get(key), dict):
+            if not isinstance(mission.get(key), dict) or len(mission[key]) > 10:
                 raise CapabilityError(f"mission {key} must be an object")
         for key in ("allowedMutations", "prohibitions", "skills", "evidence"):
             value = mission.get(key)
-            if not isinstance(value, list) or any(
+            if not isinstance(value, list) or len(value) > 10 or any(
                 not isinstance(item, str) or not item.strip() for item in value
             ):
                 raise CapabilityError(f"mission {key} must be a string array")
@@ -153,7 +154,7 @@ class MessagingService:
             copied = json.loads(json.dumps(mission, separators=(",", ":")))
         except (TypeError, ValueError) as exc:
             raise CapabilityError("mission must be JSON-compatible") from exc
-        if len(json.dumps(copied, separators=(",", ":"))) > 12000:
+        if len(json.dumps(copied, separators=(",", ":"))) > 6000:
             raise CapabilityError("mission must be bounded")
         return copied
 
@@ -167,6 +168,8 @@ class MessagingService:
             action="send_message",
             target_id=child_id,
         )
+        if self._provider.parent_callback_succeeded(child_id):
+            return {"accepted": True, "alreadyReported": True}
         terminal_response = self._provider.terminal_response(child_id)
         message_key = f"terminal:{child_id}:{capability.task_key}"
         envelope = {

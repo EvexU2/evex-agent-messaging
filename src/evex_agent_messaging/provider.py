@@ -22,7 +22,7 @@ class ProviderError(RuntimeError):
         self.status = status
 
 
-_CHECKOUT_LOCKS = tuple(threading.Lock() for _ in range(64))
+_CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 
 
 @dataclass
@@ -67,11 +67,33 @@ class OpenHandsProvider:
         model: str,
         reasoning_effort: str,
     ) -> dict:
+        lock = _CHECKOUT_LOCKS[child_id.int % len(_CHECKOUT_LOCKS)]
+        with lock:
+            return self._create_child_locked(
+                parent_id,
+                child_id,
+                role,
+                task_key,
+                mission,
+                capability_ref,
+                capabilities,
+                model,
+                reasoning_effort,
+            )
+
+    def _create_child_locked(
+        self,
+        parent_id: uuid.UUID,
+        child_id: uuid.UUID,
+        role: str,
+        task_key: str,
+        mission: dict,
+        capability_ref: str,
+        capabilities: frozenset[str],
+        model: str,
+        reasoning_effort: str,
+    ) -> dict:
         mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
-        bootstrap_text = (
-            "PROVIDER_ADMISSION\n"
-            f"Initialize runtime for Child {child_id}. Use no tools and finish with PROVIDER_READY."
-        )
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
             self._validate_existing_child(existing, parent_id, child_id, role, task_key, model, reasoning_effort, capabilities)
@@ -180,16 +202,10 @@ class OpenHandsProvider:
                     {"title": f"EVEX | {role_title} | {task_key}"},
                 )
         self._switch_and_verify_model(child_id, model)
+        self._validate_existing_checkout(
+            self._checkout_path(child_id), mission.get("checkout"), exact=True
+        )
         marker = self._admission_marker(child_id)
-        marker.unlink(missing_ok=True)
-        if not self._has_user_message(child_id, bootstrap_text):
-            self._request(
-                "POST",
-                f"/api/conversations/{child_id}/events",
-                {"role": "user", "content": [{"type": "text", "text": bootstrap_text}], "run": True},
-            )
-        self.wait_until_terminal(child_id)
-        self._restore_checkout_after_bootstrap(child_id, mission.get("checkout"))
         marker.parent.mkdir(parents=True, exist_ok=True)
         temporary = marker.with_suffix(".tmp")
         temporary.write_text(str(mission["checkout"]["headSha"]) + "\n")
@@ -222,20 +238,6 @@ class OpenHandsProvider:
 
     def _admission_marker(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve().parent / ".evex-admission" / f"{child_id}.ready"
-
-    def _restore_checkout_after_bootstrap(self, child_id: uuid.UUID, checkout: object) -> None:
-        if not isinstance(checkout, dict):
-            raise ProviderError("Child checkout authority is missing")
-        path = self._checkout_path(child_id)
-        head = str(checkout.get("headSha", ""))
-        ref = f"refs/heads/{checkout.get('branch', '')}"
-        if self._git(path, "symbolic-ref", "HEAD") != ref:
-            raise ProviderError("Child checkout branch changed during runtime admission")
-        self._git(path, "cat-file", "-e", f"{head}^{{commit}}")
-        self._git(path, "diff", "--quiet", head, "--")
-        self._git(path, "diff", "--cached", "--quiet", head, "--")
-        self._git(path, "update-ref", ref, head)
-        self._validate_existing_checkout(path, checkout, exact=True)
 
     def _has_user_message(self, child_id: uuid.UUID, expected_text: str) -> bool:
         events = self._request(
@@ -454,6 +456,30 @@ class OpenHandsProvider:
                     raise ProviderError("OpenHands Child terminal response is too large")
                 return text
         raise ProviderError("OpenHands Child terminal response is unavailable")
+
+    def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:
+        """Use provider event evidence to suppress a redundant Stop-hook recovery wake."""
+        events = self._request(
+            "GET",
+            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+        )
+        for event in events.get("items", []):
+            if not isinstance(event, dict):
+                continue
+            if (
+                event.get("kind") != "ACPToolCallEvent"
+                or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"
+                or event.get("status") != "completed"
+            ):
+                continue
+            output = event.get("raw_output")
+            if not isinstance(output, dict) or output.get("error") is not None:
+                continue
+            result = output.get("result")
+            structured = result.get("structuredContent") if isinstance(result, dict) else None
+            if isinstance(structured, dict) and structured.get("accepted") is True:
+                return True
+        return False
 
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict:
         path = f"/api/conversations/{target_id}"

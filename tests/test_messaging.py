@@ -17,6 +17,7 @@ from evex_agent_messaging.service import MessagingService  # noqa: E402
 class FakeProvider:
     def __init__(self):
         self.calls = []
+        self.callback_succeeded = False
 
     def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort):
         self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort))
@@ -41,6 +42,10 @@ class FakeProvider:
     def terminal_response(self, target_id):
         self.calls.append(("terminal-response", target_id))
         return "Welche Option soll gelten?\nA ...\nB ..."
+
+    def parent_callback_succeeded(self, target_id):
+        self.calls.append(("callback-succeeded", target_id))
+        return self.callback_succeeded
 
 
 class MessagingTest(unittest.TestCase):
@@ -162,6 +167,20 @@ class MessagingTest(unittest.TestCase):
             envelope["terminalResponse"],
             "Welche Option soll gelten?\nA ...\nB ...",
         )
+
+    def test_terminal_hook_is_noop_after_successful_explicit_callback(self):
+        provider = FakeProvider()
+        provider.callback_succeeded = True
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(
+            service, self.main_token(), "review-noop", "reviewer", self.read_only_mission()
+        )
+
+        result = service.terminal_wake(child["capabilityRef"])
+
+        self.assertEqual(result, {"accepted": True, "alreadyReported": True})
+        self.assertNotIn("terminal-response", [call[0] for call in provider.calls])
+        self.assertNotIn("send", [call[0] for call in provider.calls])
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()
@@ -315,6 +334,17 @@ class MessagingTest(unittest.TestCase):
         for mission in ({}, {"immediateTask": "Implement"}, {**self.mission(), "checkout": None}):
             with self.subTest(mission=mission), self.assertRaises(CapabilityError):
                 self.create(service, self.main_token(), "writer-invalid", "writer", mission)
+        self.assertEqual(provider.calls, [])
+
+    def test_create_child_rejects_restatement_sized_mission(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        mission = self.mission()
+        mission["evidence"] = ["x" * 6000]
+
+        with self.assertRaisesRegex(CapabilityError, "bounded"):
+            self.create(service, self.main_token(), "writer-huge", "writer", mission)
+
         self.assertEqual(provider.calls, [])
 
     def test_role_model_reasoning_and_mutation_envelope_fail_closed(self):

@@ -8,8 +8,8 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 - `create_child`: validate the exact role, model, `medium|high` reasoning effort, complete structured
   Mission, role-compatible mutation envelope, and clean deterministic Git checkout,
   bind Child identity plus callback capability, then create one deterministic Conversation. The
-  provider runs one tool-free admission turn, restores and revalidates the exact branch/head after
-  ACP bootstrap, and only then admits tools and delivers the Mission. No
+  provider verifies the exact branch/head, switches and verifies the requested model, atomically
+  admits tools, starts the Mission, and returns without waiting for the Child turn. No
   Conversation API call occurs when checkout authority is missing or mismatched. The provider switches
   and verifies the requested model before Mission delivery. Read-only Review/QA require no mutations;
   Spec/Plan Author/Writer/Repair require exact mutations; Review/QA are read-only. Source roles receive only Messaging; only
@@ -30,8 +30,9 @@ tool output, or child environment variables. There is no persistent state: calle
 message key and the Main deduplicates semantic replays.
 
 Each created Child receives a synchronous native Stop hook. The hook calls the private
-`/completion-hook` endpoint with its scoped reference and sends one stable `RECOVERY_WAKE` containing the bounded terminal assistant response to the owning
-Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
+`/completion-hook` endpoint with its scoped reference. Live Child event evidence makes it a successful
+no-op after an accepted `send_to_parent`; otherwise it sends one stable `RECOVERY_WAKE` containing the
+bounded terminal assistant response to the owning Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.
 

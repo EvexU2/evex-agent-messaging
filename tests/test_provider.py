@@ -364,6 +364,16 @@ class OpenHandsProviderTest(unittest.TestCase):
                 "fix/612",
             )
             self.assertEqual(
+                subprocess.run(
+                    ["git", "config", "--bool", "remote.origin.mirror"],
+                    cwd=checkout,
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.strip(),
+                "false",
+            )
+            self.assertEqual(
                 provider._request.call_args_list[0].args,
                 ("GET", f"/api/conversations/{child}"),
             )

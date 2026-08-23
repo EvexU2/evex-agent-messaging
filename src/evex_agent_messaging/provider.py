@@ -24,6 +24,28 @@ class ProviderError(RuntimeError):
 
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 
+_STANDARD_PRICES_PER_MILLION = {
+    "gpt-5.6-sol": {
+        "uncached_input": 4.0,
+        "cached_input": 0.4,
+        "cache_write": 5.0,
+        "output": 20.0,
+    },
+    "gpt-5.6-terra": {
+        "uncached_input": 2.0,
+        "cached_input": 0.2,
+        "cache_write": 2.5,
+        "output": 12.0,
+    },
+    "gpt-5.6-luna": {
+        "uncached_input": 0.2,
+        "cached_input": 0.02,
+        "cache_write": 0.25,
+        "output": 1.2,
+    },
+}
+_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+
 
 @dataclass
 class OpenHandsProvider:
@@ -459,27 +481,115 @@ class OpenHandsProvider:
 
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:
         """Use provider event evidence to suppress a redundant Stop-hook recovery wake."""
-        events = self._request(
-            "GET",
-            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
-        )
-        for event in events.get("items", []):
-            if not isinstance(event, dict):
-                continue
-            if (
-                event.get("kind") != "ACPToolCallEvent"
-                or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"
-                or event.get("status") != "completed"
-            ):
-                continue
-            output = event.get("raw_output")
-            if not isinstance(output, dict) or output.get("error") is not None:
-                continue
-            result = output.get("result")
-            structured = result.get("structuredContent") if isinstance(result, dict) else None
-            if isinstance(structured, dict) and structured.get("accepted") is True:
-                return True
+        for attempt in range(3):
+            events = self._request(
+                "GET",
+                f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+            )
+            for event in events.get("items", []):
+                if not isinstance(event, dict):
+                    continue
+                if (
+                    event.get("kind") != "ACPToolCallEvent"
+                    or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"
+                    or event.get("status") != "completed"
+                ):
+                    continue
+                output = event.get("raw_output")
+                if not isinstance(output, dict) or output.get("error") is not None:
+                    continue
+                result = output.get("result")
+                structured = result.get("structuredContent") if isinstance(result, dict) else None
+                if isinstance(structured, dict) and structured.get("accepted") is True:
+                    return True
+            if attempt < 2:
+                self.sleeper(0.2)
         return False
+
+    def usage(self, target_id: uuid.UUID) -> dict:
+        """Return stateless token and official Standard API-equivalent cost evidence."""
+        conversation = self._request("GET", f"/api/conversations/{target_id}")
+        tags = conversation.get("tags")
+        model = tags.get("evexmodel") if isinstance(tags, dict) else None
+        model = model or conversation.get("current_model_id")
+        reasoning_effort = tags.get("evexreasoning") if isinstance(tags, dict) else None
+        if model not in _STANDARD_PRICES_PER_MILLION:
+            raise ProviderError("OpenHands usage model is unsupported")
+        if not isinstance(reasoning_effort, str) or not reasoning_effort:
+            agent = conversation.get("agent")
+            llm = agent.get("llm") if isinstance(agent, dict) else None
+            reasoning_effort = llm.get("reasoning_effort") if isinstance(llm, dict) else None
+        if not isinstance(reasoning_effort, str) or not reasoning_effort:
+            raise ProviderError("OpenHands usage reasoning effort is unavailable")
+        stats = conversation.get("stats")
+        usage_to_metrics = stats.get("usage_to_metrics") if isinstance(stats, dict) else None
+        if not isinstance(usage_to_metrics, dict) or not usage_to_metrics:
+            raise ProviderError("OpenHands usage statistics are unavailable")
+
+        def token(value: dict, key: str) -> int:
+            raw = value.get(key, 0)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise ProviderError("OpenHands usage statistics are invalid")
+            return raw
+
+        tokens = {
+            "uncachedInput": 0,
+            "cachedInput": 0,
+            "cacheWrite": 0,
+            "output": 0,
+            "reasoning": 0,
+        }
+        prices = _STANDARD_PRICES_PER_MILLION[model]
+        estimate = 0.0
+        long_context_turns = 0
+        for metrics in usage_to_metrics.values():
+            accumulated = metrics.get("accumulated_token_usage") if isinstance(metrics, dict) else None
+            turns = metrics.get("token_usages") if isinstance(metrics, dict) else None
+            if not isinstance(accumulated, dict) or not isinstance(turns, list):
+                raise ProviderError("OpenHands usage statistics are invalid")
+            tokens["uncachedInput"] += token(accumulated, "prompt_tokens")
+            tokens["cachedInput"] += token(accumulated, "cache_read_tokens")
+            tokens["cacheWrite"] += token(accumulated, "cache_write_tokens")
+            tokens["output"] += token(accumulated, "completion_tokens")
+            tokens["reasoning"] += token(accumulated, "reasoning_tokens")
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    raise ProviderError("OpenHands usage statistics are invalid")
+                uncached = token(turn, "prompt_tokens")
+                cached = token(turn, "cache_read_tokens")
+                cache_write = token(turn, "cache_write_tokens")
+                output = token(turn, "completion_tokens")
+                is_long = uncached + cached + cache_write > _LONG_CONTEXT_INPUT_THRESHOLD
+                if is_long:
+                    long_context_turns += 1
+                input_multiplier = 2.0 if is_long else 1.0
+                output_multiplier = 1.5 if is_long else 1.0
+                estimate += (
+                    uncached * prices["uncached_input"] * input_multiplier
+                    + cached * prices["cached_input"] * input_multiplier
+                    + cache_write * prices["cache_write"] * input_multiplier
+                    + output * prices["output"] * output_multiplier
+                ) / 1_000_000
+        denominator = tokens["uncachedInput"] + tokens["cachedInput"]
+        if tokens["reasoning"] > tokens["output"]:
+            raise ProviderError("OpenHands usage reasoning tokens exceed output tokens")
+        cache_hit_rate = tokens["cachedInput"] / denominator if denominator else 0.0
+        return {
+            "conversationId": str(target_id),
+            "model": model,
+            "reasoningEffort": reasoning_effort,
+            "tokens": tokens,
+            "cacheHitRate": round(cache_hit_rate, 6),
+            "officialApiEquivalentUsd": round(estimate, 8),
+            "longContextTurns": long_context_turns,
+            "pricing": {
+                "serviceTier": "standard",
+                "asOf": "2026-08-23",
+                "source": "https://developers.openai.com/api/docs/pricing",
+                "perMillionTokensUsd": prices,
+            },
+            "disclaimer": "Official Standard API-equivalent estimate; not a subscription invoice.",
+        }
 
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict:
         path = f"/api/conversations/{target_id}"

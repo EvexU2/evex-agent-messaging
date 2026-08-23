@@ -25,6 +25,7 @@ class MessagingProvider(Protocol):
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def terminal_response(self, target_id: uuid.UUID) -> str: ...
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool: ...
+    def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
 
 
 class MessagingService:
@@ -236,6 +237,25 @@ class MessagingService:
         except (TypeError, ValueError) as exc:
             raise CapabilityError("resume context must be JSON") from exc
         return self._provider.resume_mission(target_id, message_key, task_key, copied_context)
+
+    def get_usage(
+        self, token: str, target_id: uuid.UUID, task_key: str
+    ) -> dict[str, Any]:
+        """Return live provider usage for this Main or one deterministic Child."""
+        capability = verify_capability(
+            token,
+            self._secret,
+            now=self._clock(),
+            action="read_usage",
+            target_id=self._capability_target(token),
+        )
+        if capability.role not in {"main", "deputy"}:
+            raise CapabilityError("only a Main may read delivery usage")
+        owns_target = target_id == capability.child_id and task_key == "root"
+        owns_child = deterministic_child_id(capability.child_id, task_key) == target_id
+        if not (owns_target or owns_child):
+            raise CapabilityError("target is not the Main or its deterministic Child")
+        return self._provider.usage(target_id)
 
     def _main_child_control_capability(
         self, token: str, target_id: uuid.UUID, task_key: str, action: str

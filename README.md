@@ -23,6 +23,10 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 - `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
   context cannot expand its immutable Mission authority.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
+- `get_usage`: read live per-Conversation model, reasoning effort, uncached/cached/cache-write input,
+  output with reasoning as a subset, cache-hit rate, long-context turns, and a versioned official
+  Standard API-equivalent USD estimate. Main may read itself or a deterministic Child of its task;
+  this is stateless observability, never workflow authority or a ChatGPT subscription invoice.
 
 Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,
 allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,

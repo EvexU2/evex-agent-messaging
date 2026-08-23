@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-from typing import Any, Protocol
+import hashlib
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Protocol
 
 from .capability import (
     CapabilityError,
@@ -166,7 +167,6 @@ class MessagingService:
             action="send_message",
             target_id=child_id,
         )
-        status = self._provider.wait_until_terminal(child_id)
         terminal_response = self._provider.terminal_response(child_id)
         message_key = f"terminal:{child_id}:{capability.task_key}"
         envelope = {
@@ -175,7 +175,7 @@ class MessagingService:
             "childId": str(child_id),
             "taskKey": capability.task_key,
             "kind": "RECOVERY_WAKE",
-            "status": status,
+            "status": "finished",
             "terminalResponse": terminal_response,
         }
         return self._provider.send_message(
@@ -254,12 +254,17 @@ class MessagingService:
         """Send a typed result to the owning Main; the caller cannot choose a peer target."""
         if not isinstance(result, dict):
             raise CapabilityError("result must be an object")
-        message_key = result.get("messageKey")
         kind = result.get("kind", "RESULT")
-        text = _compact(result)
+        if kind not in {"RESULT", "NEEDS_INPUT"}:
+            raise CapabilityError("result kind must be RESULT or NEEDS_INPUT")
+        canonical_result = {key: value for key, value in result.items() if key != "messageKey"}
+        text = _compact(canonical_result)
+        message_key = result.get("messageKey")
+        if message_key is None:
+            message_key = "result:" + hashlib.sha256(text.encode()).hexdigest()[:24]
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
-        if kind not in {"RESULT", "NEEDS_INPUT"} or not isinstance(message_key, str) or not message_key:
-            raise CapabilityError("result requires a messageKey and RESULT/NEEDS_INPUT kind")
+        if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
+            raise CapabilityError("result messageKey must be bounded and non-empty")
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
         return self._provider.send_message(capability.owning_main_id, message_key, kind, _compact(envelope))
 

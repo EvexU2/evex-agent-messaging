@@ -153,6 +153,7 @@ class MessagingTest(unittest.TestCase):
 
         self.assertTrue(first["accepted"])
         self.assertEqual(first["messageKey"], second["messageKey"])
+        self.assertNotIn("wait-terminal", [call[0] for call in provider.calls])
         sends = [call for call in provider.calls if call[0] == "send"]
         self.assertEqual([call[1] for call in sends], [self.main, self.main])
         self.assertTrue(all(call[3] == "RECOVERY_WAKE" for call in sends))
@@ -199,6 +200,26 @@ class MessagingTest(unittest.TestCase):
         self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
         self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main, self.main, self.main])
+
+    def test_send_to_parent_derives_transport_fields_from_bound_result(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(service, self.main_token(), "qa-lean", "qa", self.read_only_mission())
+
+        first = service.send_to_parent(
+            child["capabilityRef"], {"outcome": "PASS", "summary": "Focused QA passed"}
+        )
+        second = service.send_to_parent(
+            child["capabilityRef"], {"summary": "Focused QA passed", "outcome": "PASS"}
+        )
+
+        self.assertTrue(first["accepted"])
+        self.assertEqual(first["messageKey"], second["messageKey"])
+        sent = [call for call in provider.calls if call[0] == "send"]
+        self.assertEqual(sent[-1][3], "RESULT")
+        envelope = json.loads(sent[-1][4])
+        self.assertEqual(envelope["kind"], "RESULT")
+        self.assertEqual(json.loads(envelope["text"])["outcome"], "PASS")
 
     def test_deputy_uses_standard_result_to_report_to_parent(self):
         provider = FakeProvider()

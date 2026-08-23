@@ -257,6 +257,19 @@ class MessagingService:
             raise CapabilityError("target is not the Main or its deterministic Child")
         return self._provider.usage(target_id)
 
+    def inspect_authority(self, token: str) -> dict[str, Any]:
+        """Return the authenticated transport capability's bounded authority summary."""
+        capability = inspect_capability(token, self._secret)
+        now = self._clock().astimezone(timezone.utc)
+        if capability.issued_at > now or capability.expires_at <= now:
+            raise CapabilityError("capability reference is expired or out of scope")
+        return {
+            "role": capability.role,
+            "taskKey": capability.task_key,
+            "allowedActions": sorted(capability.allowed_actions),
+            "expiresAt": capability.expires_at.isoformat().replace("+00:00", "Z"),
+        }
+
     def _main_child_control_capability(
         self, token: str, target_id: uuid.UUID, task_key: str, action: str
     ):

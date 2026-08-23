@@ -49,6 +49,11 @@ TOOLS = [
         "description": "Read live token usage, cache hit rate, model, reasoning effort, and official Standard API-equivalent cost for this Main or one deterministic Child. This is observability, never workflow authority or a subscription invoice.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}}},
     },
+    {
+        "name": "inspect_authority",
+        "description": "Read the role, task key, allowed actions, and expiry bound to this transport capability. The capability itself is never returned.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
+    },
 ]
 
 
@@ -92,6 +97,8 @@ class McpServer:
                 value = self._service.get_usage(
                     capability_ref, uuid.UUID(args["targetId"]), args["taskKey"]
                 )
+            elif name == "inspect_authority":
+                value = self._service.inspect_authority(capability_ref)
             else:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:

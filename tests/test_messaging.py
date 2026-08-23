@@ -148,6 +148,62 @@ class MessagingTest(unittest.TestCase):
                 "writer-604",
             )
 
+    def test_inspect_authority_returns_only_valid_transport_authority_without_provider_calls(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        cases = [
+            ("main", self.main, "root", {"create_child", "read_usage"}),
+            ("deputy", uuid.UUID("22222222-2222-4222-8222-222222222222"), "issue-653", {"create_child", "send_message"}),
+            ("writer", uuid.UUID("33333333-3333-4333-8333-333333333333"), "writer-653", {"send_message", "cancel_mission"}),
+        ]
+
+        for role, child_id, task_key, actions in cases:
+            with self.subTest(role=role):
+                token = capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=child_id,
+                    task_key=task_key,
+                    role=role,
+                    allowed_actions=actions,
+                    issued_at=self.now - timedelta(minutes=1),
+                    expires_at=self.now + timedelta(hours=1),
+                )
+                authority = service.inspect_authority(token)
+                self.assertEqual(
+                    authority,
+                    {
+                        "role": role,
+                        "taskKey": task_key,
+                        "allowedActions": sorted(actions),
+                        "expiresAt": "2026-08-20T01:00:00Z",
+                    },
+                )
+                self.assertNotIn(token, str(authority))
+
+        self.assertEqual(provider.calls, [])
+
+    def test_inspect_authority_fails_closed_and_redacts_missing_invalid_forged_and_expired_capabilities(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        valid = self.main_token()
+        forged = valid[:-1] + ("A" if valid[-1] != "A" else "B")
+        expired = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=self.main,
+            task_key="root",
+            role="main",
+            allowed_actions={"create_child"},
+            issued_at=self.now - timedelta(hours=2),
+            expires_at=self.now - timedelta(hours=1),
+        )
+
+        for capability in (None, "", "not-a-capability", forged, expired):
+            with self.subTest(capability_type=type(capability).__name__), self.assertRaises(CapabilityError) as error:
+                service.inspect_authority(capability)
+            if isinstance(capability, str) and capability:
+                self.assertNotIn(capability, str(error.exception))
+
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
 

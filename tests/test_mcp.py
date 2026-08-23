@@ -40,6 +40,15 @@ class FakeService:
         self.calls.append(("get_usage", args, {}))
         return {"cacheHitRate": 0.9}
 
+    def inspect_authority(self, *args):
+        self.calls.append(("inspect_authority", args, {}))
+        return {
+            "role": "writer",
+            "taskKey": "writer-653",
+            "allowedActions": ["cancel_mission", "send_message"],
+            "expiresAt": "2026-08-20T01:00:00Z",
+        }
+
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -50,7 +59,7 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage", "inspect_authority"})
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -82,6 +91,11 @@ class McpServerTest(unittest.TestCase):
         )
         resume = next(tool for tool in listed["result"]["tools"] if tool["name"] == "resume_mission")
         self.assertIn("context", resume["inputSchema"]["required"])
+        inspect = next(tool for tool in listed["result"]["tools"] if tool["name"] == "inspect_authority")
+        self.assertEqual(
+            inspect["inputSchema"],
+            {"type": "object", "additionalProperties": False, "properties": {}},
+        )
         for tool in listed["result"]["tools"]:
             self.assertNotIn("capabilityRef", tool["inputSchema"].get("properties", {}))
 
@@ -161,6 +175,24 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(result["result"]["structuredContent"]["cacheHitRate"], 0.9)
         self.assertEqual(self.service.calls[-1][0], "get_usage")
         self.assertEqual(self.service.calls[-1][1][0], "evx1_parent")
+
+    def test_inspect_authority_uses_only_transport_capability_and_redacts_it(self):
+        transport_capability = "evx1_transport_bound_only"
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref=transport_capability,
+        )
+
+        content = result["result"]["structuredContent"]
+        self.assertEqual(set(content), {"role", "taskKey", "allowedActions", "expiresAt"})
+        self.assertEqual(content["role"], "writer")
+        self.assertEqual(self.service.calls[-1], ("inspect_authority", (transport_capability,), {}))
+        self.assertNotIn(transport_capability, str(result))
 
     def test_http_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_opaque"), "evx1_opaque")

@@ -27,6 +27,9 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   output with reasoning as a subset, cache-hit rate, long-context turns, and a versioned official
   Standard API-equivalent USD estimate. Main may read itself or a deterministic Child of its task;
   this is stateless observability, never workflow authority or a ChatGPT subscription invoice.
+- `inspect_authority`: parameterless, read-only inspection of the transport-bound capability. It
+  returns only `role`, `taskKey`, sorted `allowedActions`, and UTC `expiresAt`; missing, invalid,
+  forged, or expired capabilities fail closed, and the capability is never exposed.
 
 Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,
 allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,

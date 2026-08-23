@@ -148,6 +148,99 @@ class MessagingTest(unittest.TestCase):
                 "writer-604",
             )
 
+    def test_main_inspects_its_transport_authority_without_provider_calls(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        authority = service.inspect_authority(self.main_token())
+
+        self.assertEqual(
+            authority,
+            {
+                "role": "main",
+                "taskKey": "root",
+                "allowedActions": [
+                    "cancel_mission",
+                    "create_child",
+                    "read_usage",
+                    "resume_mission",
+                ],
+                "expiresAt": "2026-08-20T01:00:00Z",
+            },
+        )
+        self.assertEqual(provider.calls, [])
+
+    def test_deputy_inspects_its_transport_authority(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        deputy = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        token = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=deputy,
+            task_key="issue-650",
+            role="deputy",
+            allowed_actions={"send_message", "create_child"},
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=self.now + timedelta(hours=2),
+        )
+
+        authority = service.inspect_authority(token)
+
+        self.assertEqual(authority["role"], "deputy")
+        self.assertEqual(authority["taskKey"], "issue-650")
+        self.assertEqual(authority["allowedActions"], ["create_child", "send_message"])
+        self.assertEqual(provider.calls, [])
+
+    def test_child_inspects_its_transport_authority(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(
+            service, self.main_token(), "issue-650-writer", "writer", self.mission()
+        )
+        provider.calls.clear()
+
+        authority = service.inspect_authority(child["capabilityRef"])
+
+        self.assertEqual(authority["role"], "writer")
+        self.assertEqual(authority["taskKey"], "issue-650-writer")
+        self.assertEqual(
+            authority["allowedActions"],
+            ["cancel_mission", "resume_mission", "send_message"],
+        )
+        self.assertEqual(provider.calls, [])
+
+    def test_inspect_authority_rejects_missing_and_invalid_capabilities(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+
+        for token in (None, "", "not-a-ref", "evx1_invalid"):
+            with self.subTest(token=token), self.assertRaises(CapabilityError):
+                service.inspect_authority(token)
+
+    def test_inspect_authority_rejects_forged_capability_without_echoing_it(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        token = self.main_token()
+        forged = token[:10] + ("A" if token[10] != "A" else "B") + token[11:]
+
+        with self.assertRaises(CapabilityError) as raised:
+            service.inspect_authority(forged)
+
+        self.assertNotIn(forged, str(raised.exception))
+
+    def test_inspect_authority_rejects_expired_capability_without_echoing_it(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        expired = main_capability_token(
+            self.secret,
+            self.main,
+            issued_at=self.now - timedelta(hours=2),
+            expires_at=self.now,
+        )
+
+        with self.assertRaises(CapabilityError) as raised:
+            service.inspect_authority(expired)
+
+        self.assertNotIn(expired, str(raised.exception))
+
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
 

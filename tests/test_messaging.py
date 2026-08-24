@@ -231,9 +231,11 @@ class MessagingTest(unittest.TestCase):
             issued_at=self.now + timedelta(seconds=1),
             expires_at=self.now + timedelta(hours=1),
         )
-        forged = self.main_token()[:-1] + ("A" if self.main_token()[-1] != "A" else "B")
+        valid = self.main_token()
+        forged = valid[:-1] + ("A" if valid[-1] != "A" else "B")
+        illegal_base64 = valid[:10] + "!" + valid[10:]
 
-        for token in (None, "", "evx1_invalid", forged, expired, future):
+        for token in (None, "", "evx1_invalid", forged, illegal_base64, expired, future):
             with self.subTest(token=bool(token)):
                 with self.assertRaises(CapabilityError) as raised:
                     service.inspect_authority(token)

@@ -284,11 +284,23 @@ class McpServerTest(unittest.TestCase):
             },
             capability_ref="evx1_forged_sensitive_reference",
         )
+        illegal_base64 = capability[:10] + "!" + capability[10:]
+        malformed = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 13,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref=illegal_base64,
+        )
 
         self.assertEqual(rejected["error"]["code"], -32602)
         self.assertNotIn("evx1_user_supplied_secret", rejected["error"]["message"])
         self.assertEqual(invalid["error"]["code"], -32602)
         self.assertNotIn("evx1_forged_sensitive_reference", invalid["error"]["message"])
+        self.assertEqual(malformed["error"]["code"], -32602)
+        self.assertNotIn(illegal_base64, malformed["error"]["message"])
 
     def test_http_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_opaque"), "evx1_opaque")

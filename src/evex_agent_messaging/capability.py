@@ -14,6 +14,7 @@ import uuid
 
 CAPABILITY_NAMESPACE = uuid.UUID("ab1fbaf1-cc0e-4a2e-9cf2-6e4cb2ee8c89")
 TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_URLSAFE_B64_RE = re.compile(r"^[A-Za-z0-9_-]*$")
 REFERENCE_PREFIX = "evx1_"
 _HEADER = struct.Struct(">B16s16sIIBBH")
 _SIGNATURE_BYTES = 32
@@ -57,7 +58,15 @@ def _b64(value: bytes) -> str:
 
 
 def _unb64(value: str) -> bytes:
-    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    if (
+        not isinstance(value, str)
+        or len(value) % 4 == 1
+        or _URLSAFE_B64_RE.fullmatch(value) is None
+    ):
+        raise ValueError("invalid unpadded URL-safe base64")
+    return base64.b64decode(
+        value + "=" * (-len(value) % 4), altchars=b"-_", validate=True
+    )
 
 
 def _epoch(value: datetime) -> int:

@@ -141,6 +141,106 @@ class MessagingTest(unittest.TestCase):
                 "writer-604",
             )
 
+    def test_inspect_authority_returns_only_current_bound_authority(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        deputy = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        child = uuid.UUID("33333333-3333-4333-8333-333333333333")
+        expires_at = self.now + timedelta(hours=1, seconds=7)
+        cases = [
+            (
+                self.main_token(),
+                {
+                    "role": "main",
+                    "taskKey": "root",
+                    "allowedActions": [
+                        "cancel_mission",
+                        "create_child",
+                        "read_usage",
+                        "resume_mission",
+                    ],
+                    "expiresAt": "2026-08-20T01:00:00Z",
+                },
+            ),
+            (
+                capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=deputy,
+                    task_key="issue-728",
+                    role="deputy",
+                    allowed_actions={"send_message", "create_child"},
+                    issued_at=self.now - timedelta(seconds=1),
+                    expires_at=expires_at,
+                ),
+                {
+                    "role": "deputy",
+                    "taskKey": "issue-728",
+                    "allowedActions": ["create_child", "send_message"],
+                    "expiresAt": "2026-08-20T01:00:07Z",
+                },
+            ),
+            (
+                capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=child,
+                    task_key="issue-728-writer",
+                    role="writer",
+                    allowed_actions={"resume_mission", "send_message", "cancel_mission"},
+                    issued_at=self.now - timedelta(seconds=1),
+                    expires_at=expires_at,
+                ),
+                {
+                    "role": "writer",
+                    "taskKey": "issue-728-writer",
+                    "allowedActions": [
+                        "cancel_mission",
+                        "resume_mission",
+                        "send_message",
+                    ],
+                    "expiresAt": "2026-08-20T01:00:07Z",
+                },
+            ),
+        ]
+
+        for token, expected in cases:
+            with self.subTest(role=expected["role"]):
+                self.assertEqual(service.inspect_authority(token), expected)
+        self.assertEqual(provider.calls, [])
+
+    def test_inspect_authority_fails_closed_without_sensitive_disclosure(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        expired = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=self.main,
+            task_key="root",
+            role="main",
+            allowed_actions={"create_child"},
+            issued_at=self.now - timedelta(hours=2),
+            expires_at=self.now - timedelta(hours=1),
+        )
+        future = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=self.main,
+            task_key="root",
+            role="main",
+            allowed_actions={"create_child"},
+            issued_at=self.now + timedelta(seconds=1),
+            expires_at=self.now + timedelta(hours=1),
+        )
+        forged = self.main_token()[:-1] + ("A" if self.main_token()[-1] != "A" else "B")
+
+        for token in (None, "", "evx1_invalid", forged, expired, future):
+            with self.subTest(token=bool(token)):
+                with self.assertRaises(CapabilityError) as raised:
+                    service.inspect_authority(token)
+                if token:
+                    self.assertNotIn(str(token), str(raised.exception))
+                self.assertNotIn(str(self.main), str(raised.exception))
+
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
 

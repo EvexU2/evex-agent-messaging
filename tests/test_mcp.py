@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from http.client import HTTPConnection
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -9,6 +10,8 @@ import sys
 import threading
 import unittest
 from unittest.mock import patch
+from datetime import datetime, timedelta, timezone
+import uuid
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -19,6 +22,8 @@ from evex_agent_messaging.mcp_server import (  # noqa: E402
     main,
     make_http_server,
 )
+from evex_agent_messaging.capability import main_capability_token  # noqa: E402
+from evex_agent_messaging.service import MessagingService  # noqa: E402
 
 
 class FakeService:
@@ -51,6 +56,15 @@ class FakeService:
     def get_usage(self, *args):
         self.calls.append(("get_usage", args, {}))
         return {"cacheHitRate": 0.9}
+
+    def inspect_authority(self, *args):
+        self.calls.append(("inspect_authority", args, {}))
+        return {
+            "role": "writer",
+            "taskKey": "issue-728-writer",
+            "allowedActions": ["send_message"],
+            "expiresAt": "2026-08-20T01:00:00Z",
+        }
 
     def readiness(self):
         self.calls.append(("readiness", (), {}))
@@ -91,7 +105,7 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage", "inspect_authority"})
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -129,6 +143,11 @@ class McpServerTest(unittest.TestCase):
         self.assertIn("context", resume["inputSchema"]["required"])
         for tool in listed["result"]["tools"]:
             self.assertNotIn("capabilityRef", tool["inputSchema"].get("properties", {}))
+        inspection = next(tool for tool in listed["result"]["tools"] if tool["name"] == "inspect_authority")
+        self.assertEqual(
+            inspection["inputSchema"],
+            {"type": "object", "additionalProperties": False, "properties": {}},
+        )
 
     def test_create_child_uses_transport_bound_capability(self):
         result = self.server.handle({
@@ -206,6 +225,70 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(result["result"]["structuredContent"]["cacheHitRate"], 0.9)
         self.assertEqual(self.service.calls[-1][0], "get_usage")
         self.assertEqual(self.service.calls[-1][1][0], "evx1_parent")
+
+    def test_inspect_authority_uses_only_transport_capability_and_preserves_content_parity(self):
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 10,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref="evx1_transport_bound",
+        )
+
+        body = result["result"]
+        self.assertEqual(
+            json.loads(body["content"][0]["text"]), body["structuredContent"]
+        )
+        self.assertEqual(
+            body["structuredContent"],
+            {
+                "role": "writer",
+                "taskKey": "issue-728-writer",
+                "allowedActions": ["send_message"],
+                "expiresAt": "2026-08-20T01:00:00Z",
+            },
+        )
+        self.assertEqual(self.service.calls[-1], ("inspect_authority", ("evx1_transport_bound",), {}))
+
+    def test_inspect_authority_rejects_arguments_without_disclosing_them(self):
+        secret = b"test-secret"
+        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        capability = main_capability_token(
+            secret,
+            uuid.UUID("11111111-1111-4111-8111-111111111111"),
+            issued_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(hours=1),
+        )
+        server = McpServer(MessagingService(object(), secret, clock=lambda: now))
+
+        rejected = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 11,
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_authority",
+                    "arguments": {"capability": "evx1_user_supplied_secret"},
+                },
+            },
+            capability_ref=capability,
+        )
+        invalid = server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 12,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref="evx1_forged_sensitive_reference",
+        )
+
+        self.assertEqual(rejected["error"]["code"], -32602)
+        self.assertNotIn("evx1_user_supplied_secret", rejected["error"]["message"])
+        self.assertEqual(invalid["error"]["code"], -32602)
+        self.assertNotIn("evx1_forged_sensitive_reference", invalid["error"]["message"])
 
     def test_http_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_opaque"), "evx1_opaque")

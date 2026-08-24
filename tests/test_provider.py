@@ -81,6 +81,22 @@ class OpenHandsProviderTest(unittest.TestCase):
                         "GET", "/api/agent-profiles", timeout=15.0
                     )
 
+    def test_readiness_fails_closed_for_malformed_raw_json(self) -> None:
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        response = MagicMock()
+        response.read.return_value = b'{'
+        context = MagicMock()
+        context.__enter__.return_value = response
+
+        with patch("evex_agent_messaging.provider.urllib.request.urlopen", return_value=context):
+            with self.assertRaises(ValueError):
+                provider._request("GET", "/api/agent-profiles", timeout=15.0)
+        with patch("evex_agent_messaging.provider.urllib.request.urlopen", return_value=context) as urlopen:
+            self.assertFalse(provider.readiness())
+
+        urlopen.assert_called_once()
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 15.0)
+
     def test_callback_waits_for_busy_main_before_delivery(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)

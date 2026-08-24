@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from http.client import HTTPConnection
+import os
 from pathlib import Path
+import subprocess
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -13,6 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from evex_agent_messaging.mcp_server import (  # noqa: E402
     McpServer,
     bearer_capability,
+    main,
     make_http_server,
 )
 
@@ -257,3 +261,45 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b'"protocolVersion"', body)
         self.assertEqual(self.service.calls, [])
+
+    def test_main_rejects_absent_blank_and_whitespace_required_configuration_before_construction(self):
+        valid = {
+            "EVEX_MESSAGING_SECRET": "secret",
+            "OPENHANDS_URL": "http://openhands",
+            "OPENHANDS_API_KEY": "key",
+            "OPENHANDS_PUBLIC_URL": "http://public",
+        }
+        for name in valid:
+            for label, value in (("absent", None), ("blank", ""), ("whitespace", " \t")):
+                with self.subTest(name=name, label=label):
+                    environment = dict(valid)
+                    if value is None:
+                        environment.pop(name)
+                    else:
+                        environment[name] = value
+                    with patch.dict(os.environ, environment, clear=True), patch(
+                        "evex_agent_messaging.mcp_server.OpenHandsProvider"
+                    ) as provider:
+                        with self.assertRaises(SystemExit) as raised:
+                            main()
+                    self.assertNotEqual(raised.exception.code, 0)
+                    provider.assert_not_called()
+
+    def test_module_exits_nonzero_for_whitespace_startup_configuration(self):
+        environment = {
+            "PYTHONPATH": str(ROOT / "src"),
+            "EVEX_MESSAGING_SECRET": "secret",
+            "OPENHANDS_URL": "http://openhands",
+            "OPENHANDS_API_KEY": " \t",
+            "OPENHANDS_PUBLIC_URL": "http://public",
+        }
+
+        result = subprocess.run(
+            [sys.executable, "-m", "evex_agent_messaging"],
+            capture_output=True,
+            env=environment,
+            text=True,
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required", result.stderr)

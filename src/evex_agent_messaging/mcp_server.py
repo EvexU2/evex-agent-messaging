@@ -205,14 +205,15 @@ def bearer_capability(value: str | None) -> str | None:
 
 
 def main() -> int:
-    secret = os.environ.get("EVEX_MESSAGING_SECRET", "").encode()
-    if not secret:
+    secret_value = os.environ.get("EVEX_MESSAGING_SECRET", "")
+    if not secret_value.strip():
         raise SystemExit("EVEX_MESSAGING_SECRET is required")
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
-    if not base_url or not api_key or not public_url:
+    if not all(value.strip() for value in (base_url, api_key, public_url)):
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
+    secret = secret_value.encode()
     server = McpServer(
         MessagingService(
             OpenHandsProvider(

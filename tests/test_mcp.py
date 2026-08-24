@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from contextlib import contextmanager
 from http.client import HTTPConnection
 import json
@@ -22,8 +23,22 @@ from evex_agent_messaging.mcp_server import (  # noqa: E402
     main,
     make_http_server,
 )
-from evex_agent_messaging.capability import main_capability_token  # noqa: E402
+from evex_agent_messaging.capability import capability_token, main_capability_token  # noqa: E402
 from evex_agent_messaging.service import MessagingService  # noqa: E402
+
+
+_BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def noncanonical_base64url_alias(token: str) -> str:
+    suffix = token[len("evx1_"):]
+    unused_bits = {2: 4, 3: 2}.get(len(suffix) % 4)
+    if unused_bits is None:
+        raise ValueError("token has no unused Base64URL pad bits")
+    index = _BASE64URL_ALPHABET.index(suffix[-1])
+    if index & ((1 << unused_bits) - 1):
+        raise ValueError("token is already non-canonical")
+    return token[:-1] + _BASE64URL_ALPHABET[index | 1]
 
 
 class FakeService:
@@ -301,6 +316,52 @@ class McpServerTest(unittest.TestCase):
         self.assertNotIn("evx1_forged_sensitive_reference", invalid["error"]["message"])
         self.assertEqual(malformed["error"]["code"], -32602)
         self.assertNotIn(illegal_base64, malformed["error"]["message"])
+
+    def test_inspect_authority_rejects_noncanonical_base64url_aliases(self):
+        secret = b"test-secret"
+        now = datetime(2026, 8, 20, tzinfo=timezone.utc)
+        main_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        server = McpServer(MessagingService(object(), secret, clock=lambda: now))
+
+        for task_key, remainder in (("ab", 1), ("abc", 2)):
+            with self.subTest(task_key=task_key):
+                token = capability_token(
+                    secret,
+                    owning_main_id=main_id,
+                    child_id=main_id,
+                    task_key=task_key,
+                    role="writer",
+                    allowed_actions={"send_message"},
+                    issued_at=now - timedelta(seconds=1),
+                    expires_at=now + timedelta(hours=1),
+                )
+                suffix = token[len("evx1_"):]
+                raw = base64.urlsafe_b64decode(suffix + "=" * (-len(suffix) % 4))
+                alias = noncanonical_base64url_alias(token)
+
+                valid = server.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 14,
+                        "method": "tools/call",
+                        "params": {"name": "inspect_authority", "arguments": {}},
+                    },
+                    capability_ref=token,
+                )
+                malformed = server.handle(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 15,
+                        "method": "tools/call",
+                        "params": {"name": "inspect_authority", "arguments": {}},
+                    },
+                    capability_ref=alias,
+                )
+
+                self.assertEqual(len(raw) % 3, remainder)
+                self.assertEqual(valid["result"]["structuredContent"]["taskKey"], task_key)
+                self.assertEqual(malformed["error"]["code"], -32602)
+                self.assertNotIn(alias, malformed["error"]["message"])
 
     def test_http_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_opaque"), "evx1_opaque")

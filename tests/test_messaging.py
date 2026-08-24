@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import json
@@ -14,6 +15,21 @@ sys.path.insert(0, str(ROOT / "src"))
 from evex_agent_messaging.capability import CapabilityError, capability_token, deterministic_child_id, main_capability_token, verify_capability  # noqa: E402
 from evex_agent_messaging.provider import OpenHandsProvider  # noqa: E402
 from evex_agent_messaging.service import MessagingService  # noqa: E402
+
+
+_BASE64URL_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+
+def noncanonical_base64url_alias(token: str) -> str:
+    """Change only unused low bits in the final unpadded Base64URL sextet."""
+    suffix = token[len("evx1_"):]
+    unused_bits = {2: 4, 3: 2}.get(len(suffix) % 4)
+    if unused_bits is None:
+        raise ValueError("token has no unused Base64URL pad bits")
+    index = _BASE64URL_ALPHABET.index(suffix[-1])
+    if index & ((1 << unused_bits) - 1):
+        raise ValueError("token is already non-canonical")
+    return token[:-1] + _BASE64URL_ALPHABET[index | 1]
 
 
 class FakeProvider:
@@ -242,6 +258,33 @@ class MessagingTest(unittest.TestCase):
                 if token:
                     self.assertNotIn(str(token), str(raised.exception))
                 self.assertNotIn(str(self.main), str(raised.exception))
+
+    def test_inspect_authority_rejects_noncanonical_base64url_aliases(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        for task_key, remainder in (("ab", 1), ("abc", 2)):
+            with self.subTest(task_key=task_key):
+                token = capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=self.main,
+                    task_key=task_key,
+                    role="writer",
+                    allowed_actions={"send_message"},
+                    issued_at=self.now - timedelta(seconds=1),
+                    expires_at=self.now + timedelta(hours=1),
+                )
+                suffix = token[len("evx1_"):]
+                raw = base64.urlsafe_b64decode(suffix + "=" * (-len(suffix) % 4))
+                alias = noncanonical_base64url_alias(token)
+
+                self.assertEqual(len(raw) % 3, remainder)
+                self.assertEqual(service.inspect_authority(token)["taskKey"], task_key)
+                with self.assertRaises(CapabilityError) as raised:
+                    service.inspect_authority(alias)
+                self.assertNotIn(alias, str(raised.exception))
+        self.assertEqual(provider.calls, [])
 
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)

@@ -33,19 +33,10 @@ allowed action, and expiry. The server holds the OpenHands credential; it never 
 tool output, or child environment variables. There is no persistent state: callers provide a stable
 message key and the Main deduplicates semantic replays.
 
-Each created Child receives a synchronous native Stop hook. The hook calls the private
-`/completion-hook` endpoint with its scoped reference. Live Child event evidence makes it a successful
-no-op after an accepted `send_to_parent`; otherwise it gates one stable `RECOVERY_WAKE` on the
-authoritative terminal Conversation status. `finished` requires a bounded terminal `FinishAction`
-response; `error` and `stuck` carry bounded typed top-level `code`/`detail` evidence from a canonical
-error event or that terminal status. Ordinary assistant text is never terminal evidence, so a
-nonterminal Child cannot trigger a recovery wake. This is the provider-neutral fallback when a model
-finishes without calling `send_to_parent`.
-Accepted `send_to_parent` callbacks suppress recovery only within the current Child run: the newest
-provider `source=user` message bounds the event scan, so a prior run's callback cannot suppress a later
-terminal recovery.
-Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
-or receipt store.
+Children must complete one accepted `send_to_parent` call before they finish. There is no provider
+Stop hook, completion endpoint, poller, receipt store, or second callback channel. If a process crash
+prevents that callback, the owning Issue remains incomplete and an operator restarts its deterministic
+Main in Recovery Mode; the Main reuses current Issues, branches, pull requests, and verified evidence.
 
 The trusted Event Gateway/host mints the short-lived Main capability with
 `main_capability_token(...)` and binds it to that Conversation's MCP transport as Bearer auth. Child

@@ -19,7 +19,6 @@ from evex_agent_messaging.service import MessagingService  # noqa: E402
 class FakeProvider:
     def __init__(self):
         self.calls = []
-        self.callback_succeeded = False
 
     def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort):
         self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort))
@@ -40,17 +39,6 @@ class FakeProvider:
     def wait_until_terminal(self, target_id):
         self.calls.append(("wait-terminal", target_id))
         return "finished"
-
-    def terminal_recovery(self, target_id):
-        self.calls.append(("terminal-recovery", target_id))
-        return {
-            "status": "finished",
-            "terminalResponse": "Welche Option soll gelten?\nA ...\nB ...",
-        }
-
-    def parent_callback_succeeded(self, target_id):
-        self.calls.append(("callback-succeeded", target_id))
-        return self.callback_succeeded
 
     def usage(self, target_id):
         self.calls.append(("usage", target_id))
@@ -176,116 +164,6 @@ class MessagingTest(unittest.TestCase):
             service.cancel_mission(
                 self.main_token(), foreign_child, "writer-604", "cancel-foreign"
             )
-
-    def test_terminal_hook_wakes_parent_with_stable_semantic_key(self):
-        provider = FakeProvider()
-        service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = self.create(service, self.main_token(), "review-612", "reviewer", self.read_only_mission())
-
-        first = service.terminal_wake(child["capabilityRef"])
-        second = service.terminal_wake(child["capabilityRef"])
-
-        self.assertTrue(first["accepted"])
-        self.assertEqual(first["messageKey"], second["messageKey"])
-        self.assertNotIn("wait-terminal", [call[0] for call in provider.calls])
-        sends = [call for call in provider.calls if call[0] == "send"]
-        self.assertEqual([call[1] for call in sends], [self.main, self.main])
-        self.assertTrue(all(call[3] == "RECOVERY_WAKE" for call in sends))
-        envelope = json.loads(sends[0][4])
-        self.assertEqual(envelope["status"], "finished")
-        self.assertEqual(
-            envelope["terminalResponse"],
-            "Welche Option soll gelten?\nA ...\nB ...",
-        )
-
-    def test_terminal_hook_is_noop_after_successful_explicit_callback(self):
-        provider = FakeProvider()
-        provider.callback_succeeded = True
-        service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = self.create(
-            service, self.main_token(), "review-noop", "reviewer", self.read_only_mission()
-        )
-
-        result = service.terminal_wake(child["capabilityRef"])
-
-        self.assertEqual(result, {"accepted": True, "alreadyReported": True})
-        self.assertNotIn("terminal-recovery", [call[0] for call in provider.calls])
-        self.assertNotIn("send", [call[0] for call in provider.calls])
-
-    def test_terminal_hook_reports_typed_error_recovery(self):
-        provider = FakeProvider()
-        provider.terminal_recovery = lambda target_id: {
-            "status": "error",
-            "terminalError": {
-                "kind": "conversation-error",
-                "status": "error",
-                "message": "Child timed out.",
-            },
-        }
-        service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = self.create(
-            service,
-            self.main_token(),
-            "plan-error",
-            "plan-author",
-            self.read_only_mission(),
-        )
-
-        first = service.terminal_wake(child["capabilityRef"])
-        second = service.terminal_wake(child["capabilityRef"])
-
-        self.assertTrue(first["accepted"])
-        self.assertEqual(first["messageKey"], second["messageKey"])
-        sends = [call for call in provider.calls if call[0] == "send"]
-        self.assertEqual(len(sends), 2)
-        envelope = json.loads(sends[0][4])
-        self.assertEqual(envelope["status"], "error")
-        self.assertEqual(envelope["terminalError"]["kind"], "conversation-error")
-
-    def test_terminal_hook_wakes_after_prior_run_callback_and_resume(self):
-        child_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
-        token = capability_token(
-            self.secret,
-            owning_main_id=self.main,
-            child_id=child_id,
-            task_key="plan-resumed",
-            role="plan-author",
-            allowed_actions={"send_message"},
-            issued_at=self.now - timedelta(minutes=1),
-            expires_at=self.now + timedelta(hours=1),
-        )
-        old_callback_after_resume = {
-            "items": [
-                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "RESUME_MISSION\n{}"}]}},
-                {
-                    "kind": "ACPToolCallEvent",
-                    "title": "mcp.evex_agent_messaging.send_to_parent",
-                    "status": "completed",
-                    "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
-                },
-            ]
-        }
-        provider = OpenHandsProvider(
-            "http://openhands", "key", "http://public", sleeper=lambda _seconds: None
-        )
-        provider._request = Mock(side_effect=[
-            old_callback_after_resume,
-            old_callback_after_resume,
-            old_callback_after_resume,
-            {"execution_status": "error"},
-            {"items": [{"kind": "ConversationErrorEvent", "code": "TIMEOUT", "detail": "Child timed out."}]},
-            {"execution_status": "idle"},
-            {},
-        ])
-        service = MessagingService(provider, self.secret, clock=lambda: self.now)
-
-        result = service.terminal_wake(token)
-
-        self.assertTrue(result["accepted"])
-        envelope = json.loads(provider._request.call_args_list[-1].args[2]["content"][0]["text"].split("\n", 1)[1])
-        self.assertEqual(envelope["kind"], "RECOVERY_WAKE")
-        self.assertEqual(envelope["status"], "error")
-        self.assertEqual(envelope["terminalError"]["code"], "TIMEOUT")
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()

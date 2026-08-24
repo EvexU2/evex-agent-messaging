@@ -23,8 +23,6 @@ class MessagingProvider(Protocol):
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
-    def terminal_recovery(self, target_id: uuid.UUID) -> dict[str, Any]: ...
-    def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
 
 
@@ -161,40 +159,11 @@ class MessagingService:
             raise CapabilityError("mission must be bounded")
         return copied
 
-    def terminal_wake(self, token: str) -> dict[str, Any]:
-        """Wake the owner after a native Stop hook observes terminal Child state."""
-        child_id = self._capability_target(token)
-        capability = verify_capability(
-            token,
-            self._secret,
-            now=self._clock(),
-            action="send_message",
-            target_id=child_id,
-        )
-        if self._provider.parent_callback_succeeded(child_id):
-            return {"accepted": True, "alreadyReported": True}
-        terminal_recovery = self._provider.terminal_recovery(child_id)
-        message_key = f"terminal:{child_id}:{capability.task_key}"
-        envelope = {
-            "messageKey": message_key,
-            "owningMainId": str(capability.owning_main_id),
-            "childId": str(child_id),
-            "taskKey": capability.task_key,
-            "kind": "RECOVERY_WAKE",
-            **terminal_recovery,
-        }
-        return self._provider.send_message(
-            capability.owning_main_id,
-            message_key,
-            "RECOVERY_WAKE",
-            _compact(envelope),
-        )
-
     def send_message(
         self, token: str, target_id: uuid.UUID, message_key: str, kind: str, text: str
     ) -> dict[str, Any]:
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=target_id)
-        if kind not in {"RESULT", "NEEDS_INPUT", "CANCEL_MISSION", "RESUME_MISSION", "RECOVERY_WAKE", "NAVIGATION"}:
+        if kind not in {"RESULT", "NEEDS_INPUT", "CANCEL_MISSION", "RESUME_MISSION", "NAVIGATION"}:
             raise CapabilityError("unsupported message kind")
         if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
             raise CapabilityError("messageKey must be bounded and non-empty")

@@ -378,6 +378,46 @@ class OpenHandsProviderTest(unittest.TestCase):
                 ("GET", f"/api/conversations/{child}"),
             )
 
+    def test_provisioning_owns_branch_creation_without_remote_guessing_and_reports_git_cause(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            delivery = workspace / "delivery"
+            delivery.mkdir()
+            mirror = workspace / "mirrors" / "EvexU2--evex-agent-skills.git"
+            mirror.mkdir(parents=True)
+            provider = OpenHandsProvider(
+                "http://openhands", "key", "http://public", workspace_root=str(delivery)
+            )
+            completed = lambda output="": subprocess.CompletedProcess([], 0, output, "")
+            failure = subprocess.CalledProcessError(
+                128,
+                ["git", "worktree", "add"],
+                stderr="fatal: a branch named 'delivery/670-plan-author' already exists\n",
+            )
+            with patch("evex_agent_messaging.provider.subprocess.run") as run:
+                run.side_effect = [
+                    completed("https://github.com/EvexU2/evex-agent-skills.git\n"),
+                    completed(),
+                    completed(),
+                    failure,
+                ]
+                with self.assertRaisesRegex(
+                    ProviderError,
+                    "provisioning failed: a branch named 'delivery/670-plan-author' already exists",
+                ):
+                    provider._provision_checkout(
+                        delivery / "child-22222222-2222-4222-8222-222222222222",
+                        {
+                            "repository": "EvexU2/evex-agent-skills",
+                            "branch": "delivery/670-plan-author",
+                            "headSha": "a" * 40,
+                        },
+                    )
+
+            command = run.call_args_list[-1].args[0]
+            self.assertIn("--no-track", command)
+            self.assertIn("--no-guess-remote", command)
+
     def test_existing_progressed_child_is_reused_without_requiring_initial_head(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

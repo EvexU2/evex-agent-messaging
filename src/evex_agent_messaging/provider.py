@@ -352,6 +352,8 @@ class OpenHandsProvider:
                     str(mirror),
                     "worktree",
                     "add",
+                    "--no-track",
+                    "--no-guess-remote",
                     "-b",
                     branch,
                     str(path),
@@ -363,7 +365,14 @@ class OpenHandsProvider:
                 timeout=20,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise ProviderError("Child checkout provisioning failed") from exc
+            detail = getattr(exc, "stderr", "")
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            detail = " ".join(str(detail or "").split()).removeprefix("fatal: ")[:240]
+            message = "Child checkout provisioning failed"
+            if detail:
+                message += f": {detail}"
+            raise ProviderError(message) from exc
         # `git clone --mirror` sets this on the shared remote. Once the mirror
         # backs writable worktrees, keeping it true breaks ordinary explicit
         # branch pushes and makes bounded fetches include mirror refspecs.

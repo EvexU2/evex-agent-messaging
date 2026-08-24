@@ -1,18 +1,26 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from http.client import HTTPConnection
 from pathlib import Path
 import sys
+import threading
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from evex_agent_messaging.mcp_server import McpServer, bearer_capability  # noqa: E402
+from evex_agent_messaging.mcp_server import (  # noqa: E402
+    McpServer,
+    bearer_capability,
+    make_http_server,
+)
 
 
 class FakeService:
     def __init__(self):
         self.calls = []
+        self.readiness_result = False
 
     def create_child(self, *args, **kwargs):
         self.calls.append(("create_child", args, kwargs))
@@ -39,6 +47,35 @@ class FakeService:
     def get_usage(self, *args):
         self.calls.append(("get_usage", args, {}))
         return {"cacheHitRate": 0.9}
+
+    def readiness(self):
+        self.calls.append(("readiness", (), {}))
+        if isinstance(self.readiness_result, Exception):
+            raise self.readiness_result
+        return self.readiness_result
+
+
+@contextmanager
+def running_http_server(server):
+    httpd = make_http_server(server, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield httpd.server_address
+    finally:
+        httpd.shutdown()
+        thread.join()
+        httpd.server_close()
+
+
+def request_http(address, method, path, body=None, headers=None):
+    connection = HTTPConnection(*address, timeout=2)
+    try:
+        connection.request(method, path, body=body, headers=headers or {})
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
 
 
 class McpServerTest(unittest.TestCase):
@@ -171,3 +208,52 @@ class McpServerTest(unittest.TestCase):
         for value in (None, "", "evx1_opaque", "Basic evx1_opaque", "Bearer other"):
             with self.subTest(value=value):
                 self.assertIsNone(bearer_capability(value))
+
+    def test_http_healthz_is_process_only(self):
+        self.service.readiness_result = True
+
+        with running_http_server(self.server) as address:
+            status, body = request_http(address, "GET", "/healthz")
+
+        self.assertEqual((status, body), (200, b"ok\n"))
+        self.assertEqual(self.service.calls, [])
+
+    def test_http_readyz_has_exact_success_and_failure_contracts(self):
+        cases = {
+            "complete configuration and active profile": (True, 200, b"ok\n"),
+            "incomplete configuration": (False, 503, b"unavailable\n"),
+            "timeout": (TimeoutError(), 503, b"unavailable\n"),
+            "connection failure": (ConnectionError(), 503, b"unavailable\n"),
+            "authentication failure": (PermissionError(), 503, b"unavailable\n"),
+            "non-success response": (RuntimeError(), 503, b"unavailable\n"),
+            "invalid or missing active profile": (False, 503, b"unavailable\n"),
+        }
+        for name, (result, expected_status, expected_body) in cases.items():
+            with self.subTest(name=name):
+                self.service.readiness_result = result
+                with running_http_server(self.server) as address:
+                    status, body = request_http(address, "GET", "/readyz")
+                self.assertEqual((status, body), (expected_status, expected_body))
+
+    def test_http_readyz_fails_closed_for_incomplete_server_construction(self):
+        incomplete_server = McpServer(object())
+
+        with running_http_server(incomplete_server) as address:
+            status, body = request_http(address, "GET", "/readyz")
+
+        self.assertEqual((status, body), (503, b"unavailable\n"))
+
+    def test_http_mcp_does_not_perform_a_readiness_read(self):
+        request = b'{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+        with running_http_server(self.server) as address:
+            status, body = request_http(
+                address,
+                "POST",
+                "/mcp",
+                request,
+                {"Content-Type": "application/json", "Content-Length": str(len(request))},
+            )
+
+        self.assertEqual(status, 200)
+        self.assertIn(b'"protocolVersion"', body)
+        self.assertEqual(self.service.calls, [])

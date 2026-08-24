@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import ANY, Mock, patch
+from unittest.mock import ANY, MagicMock, Mock, patch
 from pathlib import Path
 import subprocess
 import tempfile
@@ -41,6 +41,45 @@ class OpenHandsProviderTest(unittest.TestCase):
                 {"model": "gpt-5.6-sol"},
             ),
         )
+
+    def test_readiness_makes_one_authenticated_read_with_fifteen_second_timeout(self) -> None:
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        response = MagicMock()
+        response.read.return_value = b'{"active_agent_profile_id":"profile-1"}'
+        context = MagicMock()
+        context.__enter__.return_value = response
+        with patch("evex_agent_messaging.provider.urllib.request.urlopen", return_value=context) as urlopen:
+            self.assertTrue(provider.readiness())
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "http://openhands/api/agent-profiles")
+        self.assertEqual(request.get_method(), "GET")
+        self.assertEqual(request.get_header("X-session-api-key"), "key")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 15.0)
+        urlopen.assert_called_once()
+
+    def test_readiness_fails_closed_without_retry_or_mutation(self) -> None:
+        failures = {
+            "incomplete configuration": (OpenHandsProvider("", "key", "http://public"), None),
+            "timeout": (OpenHandsProvider("http://openhands", "key", "http://public"), ProviderError("timeout")),
+            "connection failure": (OpenHandsProvider("http://openhands", "key", "http://public"), ProviderError("connection")),
+            "authentication failure": (OpenHandsProvider("http://openhands", "key", "http://public"), ProviderError("auth", status=401)),
+            "non-success response": (OpenHandsProvider("http://openhands", "key", "http://public"), ProviderError("upstream", status=503)),
+            "non-object response": (OpenHandsProvider("http://openhands", "key", "http://public"), []),
+            "missing active profile": (OpenHandsProvider("http://openhands", "key", "http://public"), {}),
+            "empty active profile": (OpenHandsProvider("http://openhands", "key", "http://public"), {"active_agent_profile_id": ""}),
+            "non-string active profile": (OpenHandsProvider("http://openhands", "key", "http://public"), {"active_agent_profile_id": 1}),
+        }
+        for name, (provider, response) in failures.items():
+            with self.subTest(name=name):
+                provider._request = Mock(side_effect=response) if isinstance(response, Exception) else Mock(return_value=response)
+                self.assertFalse(provider.readiness())
+                if response is None:
+                    provider._request.assert_not_called()
+                else:
+                    provider._request.assert_called_once_with(
+                        "GET", "/api/agent-profiles", timeout=15.0
+                    )
 
     def test_callback_waits_for_busy_main_before_delivery(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")

@@ -30,6 +30,7 @@ class MessagingProvider(Protocol):
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
+    def readiness(self) -> bool: ...
 
 
 class MessagingService:
@@ -41,6 +42,13 @@ class MessagingService:
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def readiness(self) -> bool:
+        """Return whether this configured provider can serve its active role now."""
+        try:
+            return bool(self._provider.readiness())
+        except Exception:
+            return False
 
     def create_child(
         self,

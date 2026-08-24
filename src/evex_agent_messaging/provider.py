@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import re
 import subprocess
 import threading
 import time
@@ -44,6 +45,18 @@ _STANDARD_PRICES_PER_MILLION = {
     },
 }
 _LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+_WORKSPACE_ISSUE_URL = re.compile(
+    r"https://github\.com/EvexU2/evex-u-workspace/issues/([1-9][0-9]*)"
+)
+_ISSUE_TASK_KEY = re.compile(r"(?:^|-)issue-([1-9][0-9]*)(?:-|$)")
+_ROLE_TITLES = {
+    "spec": "Spec",
+    "plan-author": "Plan",
+    "writer": "Implement",
+    "reviewer": "Review",
+    "qa": "QA",
+    "repair": "Repair",
+}
 
 
 @dataclass
@@ -185,11 +198,10 @@ class OpenHandsProvider:
                 )
                 created = False
             if created:
-                role_title = role.replace("-", " ").replace("_", " ").title()
                 self._request(
                     "PATCH",
                     f"/api/conversations/{child_id}",
-                    {"title": f"EVEX | {role_title} | {task_key}"},
+                    {"title": self._conversation_title(role, task_key, mission)},
                 )
         self._switch_and_verify_model(child_id, model)
         self._validate_existing_checkout(
@@ -209,6 +221,29 @@ class OpenHandsProvider:
             "provider": "openhands",
             "created": created,
         }
+
+    @staticmethod
+    def _conversation_title(role: str, task_key: str, mission: dict) -> str:
+        role_title = _ROLE_TITLES[role]
+        links = mission.get("links")
+        issue_url = links.get("issue") if isinstance(links, dict) else None
+        issue_match = (
+            _WORKSPACE_ISSUE_URL.fullmatch(issue_url)
+            if isinstance(issue_url, str)
+            else None
+        )
+        task_match = _ISSUE_TASK_KEY.search(task_key)
+        issue = issue_match.group(1) if issue_match else (
+            task_match.group(1) if task_match else None
+        )
+        prefix = f"#{issue} · {role_title}" if issue else role_title
+        display_title = mission.get("displayTitle")
+        if not isinstance(display_title, str):
+            return prefix
+        subject = " ".join(display_title.split())
+        if len(subject) > 60:
+            subject = subject[:59].rstrip() + "…"
+        return f"{prefix} · {subject}" if subject else prefix
 
     def _switch_and_verify_model(self, child_id: uuid.UUID, model: str) -> None:
         self._request(

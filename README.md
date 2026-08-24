@@ -37,10 +37,10 @@ Each created Child receives a synchronous native Stop hook. The hook calls the p
 `/completion-hook` endpoint with its scoped reference. Live Child event evidence makes it a successful
 no-op after an accepted `send_to_parent`; otherwise it gates one stable `RECOVERY_WAKE` on the
 authoritative terminal Conversation status. `finished` requires a bounded terminal `FinishAction`
-response; `error` and `stuck` carry bounded typed evidence from a canonical error event or that terminal
-status. Ordinary assistant text is never terminal evidence, so a nonterminal Child cannot trigger a
-recovery wake. This is the provider-neutral fallback when a model finishes without calling
-`send_to_parent`.
+response; `error` and `stuck` carry bounded typed top-level `code`/`detail` evidence from a canonical
+error event or that terminal status. Ordinary assistant text is never terminal evidence, so a
+nonterminal Child cannot trigger a recovery wake. This is the provider-neutral fallback when a model
+finishes without calling `send_to_parent`.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.
 

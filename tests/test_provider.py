@@ -517,7 +517,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         provider._request = Mock(side_effect=[
             {"execution_status": "error"},
-            {"items": [{"kind": "ConversationErrorEvent", "error": {"code": "TIMEOUT", "message": "Child timed out."}}]},
+            {"items": [{"kind": "ConversationErrorEvent", "code": "TIMEOUT", "detail": "Child timed out."}]},
         ])
 
         self.assertEqual(
@@ -531,6 +531,40 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "message": "Child timed out.",
                 },
             },
+        )
+
+    def test_terminal_recovery_bounds_canonical_error_fields(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "error"},
+            {"items": [{"kind": "ConversationErrorEvent", "code": "C" * 201, "detail": "D" * 2001}]},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {
+                "status": "error",
+                "terminalError": {
+                    "kind": "conversation-error",
+                    "status": "error",
+                    "code": "C" * 200,
+                    "message": "D" * 2000,
+                },
+            },
+        )
+
+    def test_terminal_recovery_falls_back_for_malformed_error_fields(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "error"},
+            {"items": [{"kind": "ConversationErrorEvent", "code": 408, "detail": []}]},
+        ])
+
+        self.assertEqual(
+            provider.terminal_recovery(child),
+            {"status": "error", "terminalError": {"kind": "terminal-status", "status": "error"}},
         )
 
     def test_terminal_recovery_reports_terminal_status_for_timeout_message(self) -> None:

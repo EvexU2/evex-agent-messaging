@@ -480,16 +480,14 @@ class OpenHandsProvider:
         for event in events.get("items", []):
             if not isinstance(event, dict) or event.get("kind") != "ConversationErrorEvent":
                 continue
-            error = event.get("error")
-            terminal_error = {"kind": "conversation-error", "status": status}
-            if isinstance(error, dict):
-                for key, limit in (("code", 200), ("message", 2000)):
-                    value = error.get(key)
-                    if isinstance(value, str) and value.strip():
-                        terminal_error[key] = value.strip()[:limit]
-            elif isinstance(error, str) and error.strip():
-                terminal_error["message"] = error.strip()[:2000]
-            break
+            fields = {}
+            for source, target, limit in (("code", "code", 200), ("detail", "message", 2000)):
+                value = event.get(source)
+                if isinstance(value, str) and value.strip():
+                    fields[target] = value.strip()[:limit]
+            if fields:
+                terminal_error = {"kind": "conversation-error", "status": status, **fields}
+                break
         return {"status": status, "terminalError": terminal_error}
 
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:

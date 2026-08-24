@@ -328,7 +328,18 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(mission["childId"], result["childId"])
         self.assertEqual(mission["taskKey"], "writer-bound")
         self.assertEqual(mission["role"], "writer")
-        self.assertEqual(mission["callback"]["tool"], "send_to_parent")
+        self.assertEqual(
+            mission["callback"],
+            {
+                "tool": "send_to_parent",
+                "requiredBeforeFinish": True,
+                "successEvidence": {"accepted": True},
+                "onFailure": (
+                    "Retry the identical result at most twice; if every attempt fails, "
+                    "preserve that result as the final response for Recovery Mode."
+                ),
+            },
+        )
         self.assertNotIn("capabilityRef", mission["callback"])
 
     def test_display_title_is_normalized_and_bound_for_navigation(self):

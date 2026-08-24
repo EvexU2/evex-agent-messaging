@@ -223,7 +223,13 @@ class MessagingTest(unittest.TestCase):
             },
         }
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
-        child = self.create(service, self.main_token(), "plan-error", "plan-author", self.mission())
+        child = self.create(
+            service,
+            self.main_token(),
+            "plan-error",
+            "plan-author",
+            self.read_only_mission(),
+        )
 
         first = service.terminal_wake(child["capabilityRef"])
         second = service.terminal_wake(child["capabilityRef"])
@@ -308,6 +314,27 @@ class MessagingTest(unittest.TestCase):
                 "writer",
                 self.mission(),
                 capabilities=["runtime_environment"],
+            )
+
+    def test_plan_author_mission_is_read_only(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+
+        child = self.create(
+            service,
+            self.main_token(),
+            "plan-read-only",
+            "plan-author",
+            self.read_only_mission(),
+        )
+
+        self.assertTrue(child["created"])
+        with self.assertRaisesRegex(CapabilityError, "plan author missions are read-only"):
+            self.create(
+                service,
+                self.main_token(),
+                "plan-write",
+                "plan-author",
+                self.mission(),
             )
 
     def test_child_can_only_report_to_owning_main_and_request_decision(self):
@@ -461,7 +488,7 @@ class MessagingTest(unittest.TestCase):
             self.main_token(),
             "plan-author-604",
             "plan-author",
-            writable,
+            self.read_only_mission(),
             model="gpt-5.6-sol",
             reasoning_effort="high",
         )

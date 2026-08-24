@@ -63,9 +63,11 @@ class MessagingService:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
         mutations = mission_payload["allowedMutations"]
-        if role in {"reviewer", "qa"} and mutations:
+        if role in {"reviewer", "qa", "plan-author"} and mutations:
+            if role == "plan-author":
+                raise CapabilityError("plan author missions are read-only")
             raise CapabilityError("reviewer and QA missions are read-only")
-        if role in {"spec", "plan-author", "writer", "repair"} and not mutations:
+        if role in {"spec", "writer", "repair"} and not mutations:
             raise CapabilityError("write-authorized missions require exact allowedMutations")
         requested_capabilities = capabilities or []
         if (

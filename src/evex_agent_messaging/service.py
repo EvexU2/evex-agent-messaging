@@ -100,7 +100,15 @@ class MessagingService:
             "childId": str(child_id),
             "taskKey": task_key,
             "role": role,
-            "callback": {"tool": "send_to_parent"},
+            "callback": {
+                "tool": "send_to_parent",
+                "requiredBeforeFinish": True,
+                "successEvidence": {"accepted": True},
+                "onFailure": (
+                    "Retry the identical result at most twice; if every attempt fails, "
+                    "preserve that result as the final response for Recovery Mode."
+                ),
+            },
             "capabilities": requested_capabilities,
         }
         result = self._provider.create_child(

@@ -6,11 +6,13 @@ import json
 import sys
 import unittest
 import uuid
+from unittest.mock import Mock
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evex_agent_messaging.capability import CapabilityError, capability_token, deterministic_child_id, main_capability_token, verify_capability  # noqa: E402
+from evex_agent_messaging.provider import OpenHandsProvider  # noqa: E402
 from evex_agent_messaging.service import MessagingService  # noqa: E402
 
 
@@ -39,9 +41,12 @@ class FakeProvider:
         self.calls.append(("wait-terminal", target_id))
         return "finished"
 
-    def terminal_response(self, target_id):
-        self.calls.append(("terminal-response", target_id))
-        return "Welche Option soll gelten?\nA ...\nB ..."
+    def terminal_recovery(self, target_id):
+        self.calls.append(("terminal-recovery", target_id))
+        return {
+            "status": "finished",
+            "terminalResponse": "Welche Option soll gelten?\nA ...\nB ...",
+        }
 
     def parent_callback_succeeded(self, target_id):
         self.calls.append(("callback-succeeded", target_id))
@@ -187,6 +192,7 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual([call[1] for call in sends], [self.main, self.main])
         self.assertTrue(all(call[3] == "RECOVERY_WAKE" for call in sends))
         envelope = json.loads(sends[0][4])
+        self.assertEqual(envelope["status"], "finished")
         self.assertEqual(
             envelope["terminalResponse"],
             "Welche Option soll gelten?\nA ...\nB ...",
@@ -203,8 +209,83 @@ class MessagingTest(unittest.TestCase):
         result = service.terminal_wake(child["capabilityRef"])
 
         self.assertEqual(result, {"accepted": True, "alreadyReported": True})
-        self.assertNotIn("terminal-response", [call[0] for call in provider.calls])
+        self.assertNotIn("terminal-recovery", [call[0] for call in provider.calls])
         self.assertNotIn("send", [call[0] for call in provider.calls])
+
+    def test_terminal_hook_reports_typed_error_recovery(self):
+        provider = FakeProvider()
+        provider.terminal_recovery = lambda target_id: {
+            "status": "error",
+            "terminalError": {
+                "kind": "conversation-error",
+                "status": "error",
+                "message": "Child timed out.",
+            },
+        }
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(
+            service,
+            self.main_token(),
+            "plan-error",
+            "plan-author",
+            self.read_only_mission(),
+        )
+
+        first = service.terminal_wake(child["capabilityRef"])
+        second = service.terminal_wake(child["capabilityRef"])
+
+        self.assertTrue(first["accepted"])
+        self.assertEqual(first["messageKey"], second["messageKey"])
+        sends = [call for call in provider.calls if call[0] == "send"]
+        self.assertEqual(len(sends), 2)
+        envelope = json.loads(sends[0][4])
+        self.assertEqual(envelope["status"], "error")
+        self.assertEqual(envelope["terminalError"]["kind"], "conversation-error")
+
+    def test_terminal_hook_wakes_after_prior_run_callback_and_resume(self):
+        child_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        token = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=child_id,
+            task_key="plan-resumed",
+            role="plan-author",
+            allowed_actions={"send_message"},
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=self.now + timedelta(hours=1),
+        )
+        old_callback_after_resume = {
+            "items": [
+                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "RESUME_MISSION\n{}"}]}},
+                {
+                    "kind": "ACPToolCallEvent",
+                    "title": "mcp.evex_agent_messaging.send_to_parent",
+                    "status": "completed",
+                    "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
+                },
+            ]
+        }
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public", sleeper=lambda _seconds: None
+        )
+        provider._request = Mock(side_effect=[
+            old_callback_after_resume,
+            old_callback_after_resume,
+            old_callback_after_resume,
+            {"execution_status": "error"},
+            {"items": [{"kind": "ConversationErrorEvent", "code": "TIMEOUT", "detail": "Child timed out."}]},
+            {"execution_status": "idle"},
+            {},
+        ])
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        result = service.terminal_wake(token)
+
+        self.assertTrue(result["accepted"])
+        envelope = json.loads(provider._request.call_args_list[-1].args[2]["content"][0]["text"].split("\n", 1)[1])
+        self.assertEqual(envelope["kind"], "RECOVERY_WAKE")
+        self.assertEqual(envelope["status"], "error")
+        self.assertEqual(envelope["terminalError"]["code"], "TIMEOUT")
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()
@@ -233,6 +314,27 @@ class MessagingTest(unittest.TestCase):
                 "writer",
                 self.mission(),
                 capabilities=["runtime_environment"],
+            )
+
+    def test_plan_author_mission_is_read_only(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+
+        child = self.create(
+            service,
+            self.main_token(),
+            "plan-read-only",
+            "plan-author",
+            self.read_only_mission(),
+        )
+
+        self.assertTrue(child["created"])
+        with self.assertRaisesRegex(CapabilityError, "plan author missions are read-only"):
+            self.create(
+                service,
+                self.main_token(),
+                "plan-write",
+                "plan-author",
+                self.mission(),
             )
 
     def test_child_can_only_report_to_owning_main_and_request_decision(self):
@@ -386,7 +488,7 @@ class MessagingTest(unittest.TestCase):
             self.main_token(),
             "plan-author-604",
             "plan-author",
-            writable,
+            self.read_only_mission(),
             model="gpt-5.6-sol",
             reasoning_effort="high",
         )

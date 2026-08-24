@@ -461,27 +461,34 @@ class OpenHandsProvider:
                 if len(text) > 20000:
                     raise ProviderError("OpenHands Child terminal response is too large")
                 return text
-            if (
-                event.get("kind") != "MessageEvent"
-                or event.get("source") not in {"agent", "assistant"}
-            ):
-                continue
-            message = event.get("llm_message")
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                continue
-            text = "\n".join(
-                item["text"]
-                for item in content
-                if isinstance(item, dict)
-                and item.get("type") == "text"
-                and isinstance(item.get("text"), str)
-            ).strip()
-            if text:
-                if len(text) > 20000:
-                    raise ProviderError("OpenHands Child terminal response is too large")
-                return text
         raise ProviderError("OpenHands Child terminal response is unavailable")
+
+    def terminal_recovery(self, target_id: uuid.UUID) -> dict:
+        """Return only terminal evidence suitable for one fallback callback."""
+        status = self._request(
+            "GET", f"/api/conversations/{target_id}"
+        ).get("execution_status")
+        if status == "finished":
+            return {"status": status, "terminalResponse": self.terminal_response(target_id)}
+        if status not in {"error", "stuck"}:
+            raise ProviderError("OpenHands Child is not terminal")
+        events = self._request(
+            "GET",
+            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+        )
+        terminal_error = {"kind": "terminal-status", "status": status}
+        for event in events.get("items", []):
+            if not isinstance(event, dict) or event.get("kind") != "ConversationErrorEvent":
+                continue
+            fields = {}
+            for source, target, limit in (("code", "code", 200), ("detail", "message", 2000)):
+                value = event.get(source)
+                if isinstance(value, str) and value.strip():
+                    fields[target] = value.strip()[:limit]
+            if fields:
+                terminal_error = {"kind": "conversation-error", "status": status, **fields}
+                break
+        return {"status": status, "terminalError": terminal_error}
 
     def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:
         """Use provider event evidence to suppress a redundant Stop-hook recovery wake."""
@@ -493,6 +500,8 @@ class OpenHandsProvider:
             for event in events.get("items", []):
                 if not isinstance(event, dict):
                     continue
+                if event.get("kind") == "MessageEvent" and event.get("source") == "user":
+                    break
                 if (
                     event.get("kind") != "ACPToolCallEvent"
                     or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"

@@ -12,7 +12,7 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   admits tools, starts the Mission, and returns without waiting for the Child turn. No
   Conversation API call occurs when checkout authority is missing or mismatched. The provider switches
   and verifies the requested model before Mission delivery. Read-only Review/QA require no mutations;
-  Spec/Plan Author/Writer/Repair require exact mutations; Review/QA are read-only. Source roles receive only Messaging; only
+  Spec/Writer/Repair require exact mutations; Plan Author/Review/QA are read-only. Source roles receive only Messaging; only
   explicit QA/repair Missions may request `capabilities: ["runtime_environment"]`; the provider
   binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
   for that Child.
@@ -35,8 +35,15 @@ message key and the Main deduplicates semantic replays.
 
 Each created Child receives a synchronous native Stop hook. The hook calls the private
 `/completion-hook` endpoint with its scoped reference. Live Child event evidence makes it a successful
-no-op after an accepted `send_to_parent`; otherwise it sends one stable `RECOVERY_WAKE` containing the
-bounded terminal assistant response to the owning Main. This is the provider-neutral fallback when a model finishes without calling `send_to_parent`.
+no-op after an accepted `send_to_parent`; otherwise it gates one stable `RECOVERY_WAKE` on the
+authoritative terminal Conversation status. `finished` requires a bounded terminal `FinishAction`
+response; `error` and `stuck` carry bounded typed top-level `code`/`detail` evidence from a canonical
+error event or that terminal status. Ordinary assistant text is never terminal evidence, so a
+nonterminal Child cannot trigger a recovery wake. This is the provider-neutral fallback when a model
+finishes without calling `send_to_parent`.
+Accepted `send_to_parent` callbacks suppress recovery only within the current Child run: the newest
+provider `source=user` message bounds the event scan, so a prior run's callback cannot suppress a later
+terminal recovery.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.
 

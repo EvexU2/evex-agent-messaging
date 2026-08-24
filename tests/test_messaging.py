@@ -112,6 +112,106 @@ class MessagingTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaisesRegex(CapabilityError, "unknown or invalid capability reference"):
                 verify_capability(value, self.secret, now=self.now, action="create_child", target_id=self.main)
 
+    def test_inspect_authority_projects_main_deputy_and_role_child(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        deputy = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        child = uuid.UUID("33333333-3333-4333-8333-333333333333")
+        expiry = self.now + timedelta(hours=2)
+        cases = (
+            (
+                self.main_token(),
+                "main",
+                "root",
+                ["cancel_mission", "create_child", "read_usage", "resume_mission"],
+                self.now + timedelta(hours=1),
+            ),
+            (
+                capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=deputy,
+                    task_key="issue-665-deputy",
+                    role="deputy",
+                    allowed_actions={"send_message", "resume_mission", "create_child"},
+                    issued_at=self.now - timedelta(minutes=1),
+                    expires_at=expiry,
+                ),
+                "deputy",
+                "issue-665-deputy",
+                ["create_child", "resume_mission", "send_message"],
+                expiry,
+            ),
+            (
+                capability_token(
+                    self.secret,
+                    owning_main_id=self.main,
+                    child_id=child,
+                    task_key="issue-665-writer-v1",
+                    role="writer",
+                    allowed_actions={"send_message", "cancel_mission", "resume_mission"},
+                    issued_at=self.now - timedelta(minutes=1),
+                    expires_at=expiry,
+                ),
+                "writer",
+                "issue-665-writer-v1",
+                ["cancel_mission", "resume_mission", "send_message"],
+                expiry,
+            ),
+        )
+
+        for token, role, task_key, actions, expires_at in cases:
+            with self.subTest(role=role):
+                self.assertEqual(
+                    service.inspect_authority(token),
+                    {
+                        "role": role,
+                        "taskKey": task_key,
+                        "allowedActions": actions,
+                        "expiresAt": expires_at.isoformat().replace("+00:00", "Z"),
+                    },
+                )
+        self.assertEqual(provider.calls, [])
+
+    def test_inspect_authority_rejects_unsafe_references_without_redaction_leaks(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        token_fields = {
+            "owning_main_id": self.main,
+            "child_id": self.main,
+            "task_key": "root",
+            "role": "main",
+            "allowed_actions": {"create_child"},
+        }
+        cases = {
+            "missing": None,
+            "invalid": "evx1_invalid",
+            "forged": capability_token(
+                b"forging-secret",
+                **token_fields,
+                issued_at=self.now - timedelta(minutes=1),
+                expires_at=self.now + timedelta(hours=1),
+            ),
+            "future-issued": capability_token(
+                self.secret,
+                **token_fields,
+                issued_at=self.now + timedelta(minutes=1),
+                expires_at=self.now + timedelta(hours=1),
+            ),
+            "expired": capability_token(
+                self.secret,
+                **token_fields,
+                issued_at=self.now - timedelta(hours=2),
+                expires_at=self.now - timedelta(hours=1),
+            ),
+        }
+
+        for label, token in cases.items():
+            with self.subTest(label=label), self.assertRaises(CapabilityError) as raised:
+                service.inspect_authority(token)
+            self.assertNotIn(str(token), str(raised.exception))
+        self.assertEqual(provider.calls, [])
+
     def test_service_creates_deterministic_child_and_sends(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

@@ -13,6 +13,18 @@ from evex_agent_messaging.mcp_server import McpServer, bearer_capability  # noqa
 class FakeService:
     def __init__(self):
         self.calls = []
+        self.authority_error = False
+
+    def inspect_authority(self, *args):
+        self.calls.append(("inspect_authority", args, {}))
+        if self.authority_error:
+            raise ValueError(f"invalid authority {args[0]}")
+        return {
+            "role": "writer",
+            "taskKey": "issue-665-writer-v1",
+            "allowedActions": ["cancel_mission", "resume_mission", "send_message"],
+            "expiresAt": "2026-08-25T08:00:00Z",
+        }
 
     def create_child(self, *args, **kwargs):
         self.calls.append(("create_child", args, kwargs))
@@ -50,7 +62,12 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"inspect_authority", "create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        inspect = next(tool for tool in listed["result"]["tools"] if tool["name"] == "inspect_authority")
+        self.assertEqual(
+            inspect["inputSchema"],
+            {"type": "object", "additionalProperties": False, "properties": {}},
+        )
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -84,6 +101,66 @@ class McpServerTest(unittest.TestCase):
         self.assertIn("context", resume["inputSchema"]["required"])
         for tool in listed["result"]["tools"]:
             self.assertNotIn("capabilityRef", tool["inputSchema"].get("properties", {}))
+
+    def test_inspect_authority_is_parameterless_and_transport_bound(self):
+        capability = "evx1_transport_only"
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref=capability,
+        )
+
+        self.assertEqual(result["result"]["structuredContent"]["role"], "writer")
+        self.assertEqual(self.service.calls[-1][0], "inspect_authority")
+        self.assertEqual(self.service.calls[-1][1], (capability,))
+        self.assertNotIn(capability, str(result))
+
+        rejected = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "inspect_authority",
+                    "arguments": {"capabilityRef": capability},
+                },
+            },
+            capability_ref=capability,
+        )
+        self.assertEqual(rejected["error"]["code"], -32602)
+        self.assertIn("accepts no arguments", rejected["error"]["message"])
+        self.assertEqual(
+            [call[0] for call in self.service.calls], ["inspect_authority"]
+        )
+
+    def test_inspect_authority_missing_or_failed_capability_is_redacted(self):
+        missing = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 5,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            }
+        )
+        self.assertEqual(missing["error"]["code"], -32602)
+
+        capability = "evx1_forged_reference"
+        self.service.authority_error = True
+        failed = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 6,
+                "method": "tools/call",
+                "params": {"name": "inspect_authority", "arguments": {}},
+            },
+            capability_ref=capability,
+        )
+        self.assertEqual(failed["error"]["code"], -32000)
+        self.assertNotIn(capability, str(failed))
 
     def test_create_child_uses_transport_bound_capability(self):
         result = self.server.handle({

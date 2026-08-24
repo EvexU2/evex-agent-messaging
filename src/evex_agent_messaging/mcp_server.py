@@ -15,6 +15,11 @@ from .service import MessagingService
 
 TOOLS = [
     {
+        "name": "inspect_authority",
+        "description": "Inspect the role, task, allowed actions, and expiry of the current transport-bound capability without provider access or mutation.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "properties": {}},
+    },
+    {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
@@ -71,11 +76,19 @@ class McpServer:
 
     def _call(self, request_id: object, params: dict, capability_ref: str | None) -> dict:
         name = params.get("name")
-        args = params.get("arguments") or {}
+        raw_args = params.get("arguments", {})
+        args = raw_args or {}
         try:
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
-            if name == "create_child":
+            if name == "inspect_authority":
+                if not isinstance(raw_args, dict) or args:
+                    raise ValueError("inspect_authority accepts no arguments")
+                try:
+                    value = self._service.inspect_authority(capability_ref)
+                except Exception:
+                    return self._error(request_id, -32000, "authority inspection failed")
+            elif name == "create_child":
                 value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"])
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":

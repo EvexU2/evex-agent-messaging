@@ -5,6 +5,9 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 
 ## Tools
 
+- `inspect_authority`: authenticate the transport-bound capability's current issued-at/expiry window
+  and return only its role, task key, sorted allowed actions, and UTC expiry. It accepts no arguments,
+  makes no provider call, and performs no write.
 - `create_child`: validate the exact role, model, `medium|high` reasoning effort, complete structured
   Mission, role-compatible mutation envelope, and clean deterministic Git checkout,
   bind Child identity plus callback capability, then create one deterministic Conversation. The

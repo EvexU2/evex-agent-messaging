@@ -161,6 +161,17 @@ def inspect_capability(token: str, secret: bytes) -> Capability:
         raise error from exc
 
 
+def inspect_current_capability(
+    token: str, secret: bytes, *, now: datetime
+) -> Capability:
+    """Authenticate a reference and require its complete validity window to be current."""
+    capability = inspect_capability(token, secret)
+    normalized_now = now.astimezone(timezone.utc)
+    if capability.expires_at <= normalized_now or capability.issued_at > normalized_now:
+        raise CapabilityError("capability reference is expired or out of scope")
+    return capability
+
+
 def verify_capability(
     token: str,
     secret: bytes,
@@ -169,12 +180,9 @@ def verify_capability(
     action: str,
     target_id: uuid.UUID,
 ) -> Capability:
-    capability = inspect_capability(token, secret)
-    normalized_now = now.astimezone(timezone.utc)
+    capability = inspect_current_capability(token, secret, now=now)
     if (
-        capability.expires_at <= normalized_now
-        or capability.issued_at > normalized_now
-        or target_id != capability.child_id
+        target_id != capability.child_id
         or action not in capability.allowed_actions
     ):
         raise CapabilityError("capability reference is expired or out of scope")

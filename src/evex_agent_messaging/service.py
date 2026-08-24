@@ -13,6 +13,7 @@ from .capability import (
     capability_token,
     deterministic_child_id,
     inspect_capability,
+    inspect_current_capability,
     verify_capability,
 )
 
@@ -37,6 +38,18 @@ class MessagingService:
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def inspect_authority(self, token: str) -> dict[str, Any]:
+        """Return the current transport authority without provider access or mutation."""
+        capability = inspect_current_capability(
+            token, self._secret, now=self._clock()
+        )
+        return {
+            "role": capability.role,
+            "taskKey": capability.task_key,
+            "allowedActions": sorted(capability.allowed_actions),
+            "expiresAt": capability.expires_at.isoformat().replace("+00:00", "Z"),
+        }
 
     def create_child(
         self,

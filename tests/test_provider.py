@@ -603,7 +603,8 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "title": "mcp.evex_agent_messaging.send_to_parent",
                     "status": "completed",
                     "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
-                }
+                },
+                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "MISSION\n{}"}]}},
             ]
         })
 
@@ -637,8 +638,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         provider._request = Mock(
             side_effect=[
-                {"items": []},
-                {"items": []},
+                {"items": [{"kind": "MessageEvent", "source": "user"}]},
+                {"items": [{"kind": "MessageEvent", "source": "user"}]},
                 {
                     "items": [
                         {
@@ -651,7 +652,8 @@ class OpenHandsProviderTest(unittest.TestCase):
                                 },
                                 "error": None,
                             },
-                        }
+                        },
+                        {"kind": "MessageEvent", "source": "user"},
                     ]
                 },
             ]
@@ -659,6 +661,62 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertTrue(provider.parent_callback_succeeded(child))
         self.assertEqual(provider._request.call_count, 3)
+
+    def test_parent_callback_succeeded_does_not_cross_resume_boundary(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public", sleeper=lambda _seconds: None
+        )
+        provider._request = Mock(return_value={
+            "items": [
+                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "RESUME_MISSION\n{}"}]}},
+                {
+                    "kind": "ACPToolCallEvent",
+                    "title": "mcp.evex_agent_messaging.send_to_parent",
+                    "status": "completed",
+                    "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
+                },
+            ]
+        })
+
+        self.assertFalse(provider.parent_callback_succeeded(child))
+        self.assertEqual(provider._request.call_count, 3)
+
+    def test_parent_callback_succeeded_accepts_same_run_callback_before_boundary(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={
+            "items": [
+                {
+                    "kind": "ACPToolCallEvent",
+                    "title": "mcp.evex_agent_messaging.send_to_parent",
+                    "status": "completed",
+                    "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
+                },
+                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "RESUME_MISSION\n{}"}]}},
+            ]
+        })
+
+        self.assertTrue(provider.parent_callback_succeeded(child))
+
+    def test_parent_callback_succeeded_treats_unrelated_user_message_as_boundary(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public", sleeper=lambda _seconds: None
+        )
+        provider._request = Mock(return_value={
+            "items": [
+                {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "unrelated"}]}},
+                {
+                    "kind": "ACPToolCallEvent",
+                    "title": "mcp.evex_agent_messaging.send_to_parent",
+                    "status": "completed",
+                    "raw_output": {"result": {"structuredContent": {"accepted": True}}, "error": None},
+                },
+            ]
+        })
+
+        self.assertFalse(provider.parent_callback_succeeded(child))
 
     def test_usage_reports_tokens_cache_hit_rate_and_official_standard_estimate(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

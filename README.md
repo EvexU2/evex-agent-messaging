@@ -41,6 +41,9 @@ response; `error` and `stuck` carry bounded typed top-level `code`/`detail` evid
 error event or that terminal status. Ordinary assistant text is never terminal evidence, so a
 nonterminal Child cannot trigger a recovery wake. This is the provider-neutral fallback when a model
 finishes without calling `send_to_parent`.
+Accepted `send_to_parent` callbacks suppress recovery only within the current Child run: the newest
+provider `source=user` message bounds the event scan, so a prior run's callback cannot suppress a later
+terminal recovery.
 Repeated hooks reuse the same semantic message key and do not require a database, poller, read tool,
 or receipt store.
 

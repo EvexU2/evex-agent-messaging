@@ -500,6 +500,8 @@ class OpenHandsProvider:
             for event in events.get("items", []):
                 if not isinstance(event, dict):
                     continue
+                if event.get("kind") == "MessageEvent" and event.get("source") == "user":
+                    break
                 if (
                     event.get("kind") != "ACPToolCallEvent"
                     or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"

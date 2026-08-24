@@ -143,25 +143,6 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
                 self.send_error(404)
 
         def do_POST(self):  # noqa: N802
-            if self.path == "/completion-hook":
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                    if length < 2 or length > 4096:
-                        raise ValueError("invalid completion-hook body size")
-                    payload = json.loads(self.rfile.read(length))
-                    capability_ref = payload.get("capabilityRef") if isinstance(payload, dict) else None
-                    if not isinstance(capability_ref, str):
-                        raise ValueError("capabilityRef is required")
-                    value = server._service.terminal_wake(capability_ref)
-                    body = json.dumps(value, separators=(",", ":")).encode()
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.send_header("Content-Length", str(len(body)))
-                    self.end_headers()
-                    self.wfile.write(body)
-                except Exception:
-                    self.send_error(503, "terminal wake unavailable")
-                return
             if self.path != "/mcp":
                 self.send_error(404)
                 return
@@ -212,17 +193,12 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not base_url or not api_key or not public_url:
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
-    completion_hook_url = os.environ.get(
-        "EVEX_MESSAGING_COMPLETION_HOOK_URL",
-        "http://evex-agent-messaging.evex-agents.svc.cluster.local:3101/completion-hook",
-    )
     server = McpServer(
         MessagingService(
             OpenHandsProvider(
                 base_url,
                 api_key,
                 public_url,
-                completion_hook_url=completion_hook_url,
             ),
             secret,
         )

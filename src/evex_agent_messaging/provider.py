@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-import shlex
 import subprocess
 import threading
 import time
@@ -54,7 +53,6 @@ class OpenHandsProvider:
     public_url: str
     timeout: float = 5.0
     sleeper: object = time.sleep
-    completion_hook_url: str = "http://evex-agent-messaging.evex-agents.svc.cluster.local:3101/completion-hook"
     workspace_root: str = "/home/openhands/workspace/delivery"
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
@@ -175,36 +173,6 @@ class OpenHandsProvider:
                         "Runtime MCP. Never call OpenHands provider-control APIs or inspect peers."
                     )
                 },
-                "hook_config": {
-                    "pre_tool_use": [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": f"test -f {shlex.quote(str(self._admission_marker(child_id)))}",
-                                    "timeout": 2,
-                                }
-                            ],
-                        }
-                    ],
-                    "stop": [
-                        {
-                            "matcher": "*",
-                            "hooks": [
-                                {
-                                    "type": "command",
-                                    "command": (
-                                        f"if test -f {shlex.quote(str(self._admission_marker(child_id)))}; "
-                                        f"then {self._completion_hook_command()}; fi"
-                                    ),
-                                    "timeout": 50,
-                                    "async": False,
-                                }
-                            ],
-                        }
-                    ]
-                },
             }
             try:
                 self._request("POST", "/api/conversations", payload)
@@ -227,11 +195,6 @@ class OpenHandsProvider:
         self._validate_existing_checkout(
             self._checkout_path(child_id), mission.get("checkout"), exact=True
         )
-        marker = self._admission_marker(child_id)
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        temporary = marker.with_suffix(".tmp")
-        temporary.write_text(str(mission["checkout"]["headSha"]) + "\n")
-        temporary.replace(marker)
         self._request(
             "POST",
             f"/api/conversations/{child_id}/events",
@@ -257,9 +220,6 @@ class OpenHandsProvider:
 
     def _checkout_path(self, child_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve() / f"child-{child_id}"
-
-    def _admission_marker(self, child_id: uuid.UUID) -> Path:
-        return Path(self.workspace_root).resolve().parent / ".evex-admission" / f"{child_id}.ready"
 
     def _has_user_message(self, child_id: uuid.UUID, expected_text: str) -> bool:
         events = self._request(
@@ -432,15 +392,6 @@ class OpenHandsProvider:
             raise ProviderError("Child checkout origin is invalid")
         return value
 
-    def _completion_hook_command(self) -> str:
-        body = '{"capabilityRef":"$EVEX_AGENT_MESSAGING_CAPABILITY"}'
-        return (
-            "curl --fail --silent --show-error --retry 2 --retry-delay 2 "
-            "--retry-all-errors --max-time 45 --header 'Content-Type: application/json' "
-            f"--data \"{body.replace(chr(34), chr(92) + chr(34))}\" "
-            f"{shlex.quote(self.completion_hook_url)}"
-        )
-
     def wait_until_terminal(self, target_id: uuid.UUID) -> str:
         path = f"/api/conversations/{target_id}"
         for _ in range(300):
@@ -449,84 +400,6 @@ class OpenHandsProvider:
                 return status
             self.sleeper(0.1)
         raise ProviderError("OpenHands Child did not reach terminal state")
-
-    def terminal_response(self, target_id: uuid.UUID) -> str:
-        events = self._request(
-            "GET",
-            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
-        )
-        for event in events.get("items", []):
-            if not isinstance(event, dict):
-                continue
-            action = event.get("action")
-            if (
-                event.get("kind") == "ActionEvent"
-                and isinstance(action, dict)
-                and action.get("kind") == "FinishAction"
-                and isinstance(action.get("message"), str)
-                and action["message"].strip()
-            ):
-                text = action["message"].strip()
-                if len(text) > 20000:
-                    raise ProviderError("OpenHands Child terminal response is too large")
-                return text
-        raise ProviderError("OpenHands Child terminal response is unavailable")
-
-    def terminal_recovery(self, target_id: uuid.UUID) -> dict:
-        """Return only terminal evidence suitable for one fallback callback."""
-        status = self._request(
-            "GET", f"/api/conversations/{target_id}"
-        ).get("execution_status")
-        if status == "finished":
-            return {"status": status, "terminalResponse": self.terminal_response(target_id)}
-        if status not in {"error", "stuck"}:
-            raise ProviderError("OpenHands Child is not terminal")
-        events = self._request(
-            "GET",
-            f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
-        )
-        terminal_error = {"kind": "terminal-status", "status": status}
-        for event in events.get("items", []):
-            if not isinstance(event, dict) or event.get("kind") != "ConversationErrorEvent":
-                continue
-            fields = {}
-            for source, target, limit in (("code", "code", 200), ("detail", "message", 2000)):
-                value = event.get(source)
-                if isinstance(value, str) and value.strip():
-                    fields[target] = value.strip()[:limit]
-            if fields:
-                terminal_error = {"kind": "conversation-error", "status": status, **fields}
-                break
-        return {"status": status, "terminalError": terminal_error}
-
-    def parent_callback_succeeded(self, target_id: uuid.UUID) -> bool:
-        """Use provider event evidence to suppress a redundant Stop-hook recovery wake."""
-        for attempt in range(3):
-            events = self._request(
-                "GET",
-                f"/api/conversations/{target_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
-            )
-            for event in events.get("items", []):
-                if not isinstance(event, dict):
-                    continue
-                if event.get("kind") == "MessageEvent" and event.get("source") == "user":
-                    break
-                if (
-                    event.get("kind") != "ACPToolCallEvent"
-                    or event.get("title") != "mcp.evex_agent_messaging.send_to_parent"
-                    or event.get("status") != "completed"
-                ):
-                    continue
-                output = event.get("raw_output")
-                if not isinstance(output, dict) or output.get("error") is not None:
-                    continue
-                result = output.get("result")
-                structured = result.get("structuredContent") if isinstance(result, dict) else None
-                if isinstance(structured, dict) and structured.get("accepted") is True:
-                    return True
-            if attempt < 2:
-                self.sleeper(0.2)
-        return False
 
     def usage(self, target_id: uuid.UUID) -> dict:
         """Return stateless token and official Standard API-equivalent cost evidence."""

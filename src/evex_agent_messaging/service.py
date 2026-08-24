@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -14,6 +15,11 @@ from .capability import (
     deterministic_child_id,
     inspect_capability,
     verify_capability,
+)
+
+
+_WORKSPACE_ISSUE_URL = re.compile(
+    r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
 
 
@@ -145,6 +151,18 @@ class MessagingService:
         for key in ("links",):
             if not isinstance(mission.get(key), dict) or len(mission[key]) > 10:
                 raise CapabilityError(f"mission {key} must be an object")
+        display_title = mission.get("displayTitle")
+        if display_title is not None:
+            if not isinstance(display_title, str):
+                raise CapabilityError("mission displayTitle must be a string")
+            display_title = " ".join(display_title.split())
+            issue_url = mission["links"].get("issue")
+            if not 3 <= len(display_title) <= 60:
+                raise CapabilityError("mission displayTitle must contain 3-60 visible characters")
+            if not isinstance(issue_url, str) or _WORKSPACE_ISSUE_URL.fullmatch(issue_url) is None:
+                raise CapabilityError(
+                    "mission displayTitle requires a canonical Workspace Issue link"
+                )
         for key in ("allowedMutations", "prohibitions", "skills", "evidence"):
             value = mission.get(key)
             if not isinstance(value, list) or len(value) > 10 or any(
@@ -157,6 +175,8 @@ class MessagingService:
             raise CapabilityError("mission must be JSON-compatible") from exc
         if len(json.dumps(copied, separators=(",", ":"))) > 6000:
             raise CapabilityError("mission must be bounded")
+        if display_title is not None:
+            copied["displayTitle"] = display_title
         return copied
 
     def send_message(

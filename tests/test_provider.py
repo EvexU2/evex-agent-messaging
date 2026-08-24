@@ -105,7 +105,11 @@ class OpenHandsProviderTest(unittest.TestCase):
                 child,
                 "reviewer",
                 "review-612",
-                {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40}},
+                {
+                    "checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/612", "headSha": "a" * 40},
+                    "displayTitle": "Runtime resolution",
+                    "links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/677"},
+                },
                 "evx1_opaque",
                 frozenset(),
             )
@@ -130,12 +134,44 @@ class OpenHandsProviderTest(unittest.TestCase):
             (
                 "PATCH",
                 f"/api/conversations/{child}",
-                {"title": "EVEX | Reviewer | review-612"},
+                {"title": "#677 · Review · Runtime resolution"},
             ),
         )
         mission_event = provider._request.call_args_list[4].args[2]["content"][0]["text"]
         self.assertTrue(mission_event.startswith("MISSION\n{"))
         self.assertFalse(hasattr(provider.wait_until_terminal, "assert_called"))
+
+    def test_specialist_title_maps_roles_and_hides_task_identity(self) -> None:
+        mission = {
+            "displayTitle": "  Runtime   resolution  ",
+            "links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/677"},
+        }
+        expected = {
+            "spec": "Spec",
+            "plan-author": "Plan",
+            "writer": "Implement",
+            "reviewer": "Review",
+            "qa": "QA",
+            "repair": "Repair",
+        }
+
+        for role, label in expected.items():
+            with self.subTest(role=role):
+                title = OpenHandsProvider._conversation_title(
+                    role, "issue-677-deadbeef", mission
+                )
+                self.assertEqual(title, f"#677 · {label} · Runtime resolution")
+                self.assertNotIn("deadbeef", title)
+                self.assertNotIn("EVEX", title)
+
+    def test_specialist_title_has_issue_role_fallback_for_legacy_mission(self) -> None:
+        title = OpenHandsProvider._conversation_title(
+            "qa",
+            "issue-677-e1-qa-48491",
+            {"links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/677"}},
+        )
+
+        self.assertEqual(title, "#677 · QA")
 
     def test_integrated_mission_starts_with_empty_profile_mcp_override(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")

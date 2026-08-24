@@ -62,6 +62,10 @@ class McpServerTest(unittest.TestCase):
         )
         self.assertEqual(create["inputSchema"]["properties"]["mission"]["type"], "object")
         self.assertIn("checkout", create["inputSchema"]["properties"]["mission"]["required"])
+        self.assertEqual(
+            create["inputSchema"]["properties"]["mission"]["properties"]["displayTitle"],
+            {"type": "string", "minLength": 3, "maxLength": 60},
+        )
         self.assertIn("model", create["inputSchema"]["required"])
         self.assertIn("reasoningEffort", create["inputSchema"]["required"])
         self.assertEqual(

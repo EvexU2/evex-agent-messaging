@@ -331,6 +331,41 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(mission["callback"]["tool"], "send_to_parent")
         self.assertNotIn("capabilityRef", mission["callback"])
 
+    def test_display_title_is_normalized_and_bound_for_navigation(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        mission = self.mission()
+        mission["displayTitle"] = "  Runtime   resolution  "
+
+        self.create(service, self.main_token(), "writer-title", "writer", mission)
+
+        self.assertEqual(provider.calls[0][5]["displayTitle"], "Runtime resolution")
+
+    def test_display_title_requires_bounded_text_and_canonical_workspace_issue(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        invalid = []
+        for title in ("x", "x" * 61, 42):
+            mission = self.mission()
+            mission["displayTitle"] = title
+            invalid.append(mission)
+        mission = self.mission()
+        mission["displayTitle"] = "Runtime resolution"
+        mission["links"]["issue"] = "https://github.com/EvexU2/other/issues/604"
+        invalid.append(mission)
+
+        for mission in invalid:
+            with self.subTest(mission=mission), self.assertRaises(CapabilityError):
+                self.create(service, self.main_token(), "writer-invalid-title", "writer", mission)
+
+    def test_legacy_mission_without_display_title_remains_accepted(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+
+        result = self.create(
+            service, self.main_token(), "writer-legacy", "writer", self.mission()
+        )
+
+        self.assertTrue(result["created"])
+
     def test_create_child_rejects_incomplete_mission_before_provider_call(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

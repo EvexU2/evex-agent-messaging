@@ -131,14 +131,29 @@ def serve(server: McpServer, stdin=None, stdout=None) -> None:
             stdout.flush()
 
 
-def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> None:
-    """Small stateless Streamable-HTTP-compatible JSON-RPC endpoint for in-cluster MCP use."""
+def make_http_server(
+    server: McpServer, host: str = "0.0.0.0", port: int = 3101
+) -> ThreadingHTTPServer:
+    """Build the small stateless HTTP server used for in-cluster MCP transport."""
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             if self.path == "/healthz":
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(b"ok\n")
+            elif self.path == "/readyz":
+                try:
+                    ready = bool(server._service.readiness())
+                except Exception:
+                    ready = False
+                if ready:
+                    self.send_response(200)
+                    body = b"ok\n"
+                else:
+                    self.send_response(503)
+                    body = b"unavailable\n"
+                self.end_headers()
+                self.wfile.write(body)
             else:
                 self.send_error(404)
 
@@ -173,7 +188,12 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
         def log_message(self, *_args):
             return
 
-    ThreadingHTTPServer((host, port), Handler).serve_forever()
+    return ThreadingHTTPServer((host, port), Handler)
+
+
+def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> None:
+    """Serve the small stateless HTTP MCP transport."""
+    make_http_server(server, host, port).serve_forever()
 
 
 def bearer_capability(value: str | None) -> str | None:
@@ -185,14 +205,15 @@ def bearer_capability(value: str | None) -> str | None:
 
 
 def main() -> int:
-    secret = os.environ.get("EVEX_MESSAGING_SECRET", "").encode()
-    if not secret:
+    secret_value = os.environ.get("EVEX_MESSAGING_SECRET", "")
+    if not secret_value.strip():
         raise SystemExit("EVEX_MESSAGING_SECRET is required")
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
-    if not base_url or not api_key or not public_url:
+    if not all(value.strip() for value in (base_url, api_key, public_url)):
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
+    secret = secret_value.encode()
     server = McpServer(
         MessagingService(
             OpenHandsProvider(

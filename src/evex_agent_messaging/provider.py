@@ -68,7 +68,9 @@ class OpenHandsProvider:
     sleeper: object = time.sleep
     workspace_root: str = "/home/openhands/workspace/delivery"
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> dict:
+    def _request(
+        self, method: str, path: str, body: dict | None = None, *, timeout: float | None = None
+    ) -> dict:
         request = urllib.request.Request(
             f"{self.base_url.rstrip('/')}{path}",
             data=json.dumps(body, separators=(",", ":")).encode() if body is not None else None,
@@ -77,7 +79,9 @@ class OpenHandsProvider:
         )
         created = True
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with urllib.request.urlopen(
+                request, timeout=self.timeout if timeout is None else timeout
+            ) as response:
                 raw = response.read()
                 value = json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
@@ -87,6 +91,22 @@ class OpenHandsProvider:
         if not isinstance(value, dict):
             raise ProviderError("OpenHands returned an invalid response")
         return value
+
+    def readiness(self) -> bool:
+        """Perform the single, bounded read required by the readiness probe."""
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (self.base_url, self.api_key, self.public_url)
+        ):
+            return False
+        try:
+            profiles = self._request("GET", "/api/agent-profiles", timeout=15.0)
+        except (ProviderError, TypeError, ValueError):
+            return False
+        if not isinstance(profiles, dict):
+            return False
+        profile_id = profiles.get("active_agent_profile_id")
+        return isinstance(profile_id, str) and bool(profile_id)
 
     def create_child(
         self,

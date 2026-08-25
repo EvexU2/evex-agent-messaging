@@ -110,6 +110,17 @@ class OpenHandsProvider:
         profile_id = profiles.get("active_agent_profile_id")
         return isinstance(profile_id, str) and bool(profile_id)
 
+    def parent_lifecycle(self, parent_id: uuid.UUID) -> str:
+        """Return only the lifecycle state relevant to Parent-envelope retention."""
+        status = self._request("GET", f"/api/conversations/{parent_id}").get(
+            "execution_status"
+        )
+        if status in {"finished", "error", "stuck"}:
+            return "terminal"
+        if status == "cancelled":
+            return "cancelled"
+        return "active"
+
     def create_child(
         self,
         parent_id: uuid.UUID,

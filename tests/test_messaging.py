@@ -86,6 +86,26 @@ class MessagingTest(unittest.TestCase):
         kwargs.setdefault("reasoning_effort", "medium")
         return service.create_child(*args, **kwargs)
 
+    def retained_parent_token(self, *, actions=None, expires_at=None, role="main", main=None):
+        return capability_token(
+            self.secret,
+            owning_main_id=main or self.main,
+            child_id=main or self.main,
+            task_key="root",
+            role=role,
+            allowed_actions=actions
+            or {
+                "create_child",
+                "cancel_mission",
+                "resume_mission",
+                "read_usage",
+                "publish_navigation_links",
+                "request_user_decision",
+            },
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=expires_at or self.now + timedelta(hours=1),
+        )
+
     def test_capability_is_signed_and_target_bound(self):
         child = deterministic_child_id(self.main, "writer-604")
         token = capability_token(self.secret, owning_main_id=self.main, child_id=child, task_key="writer-604", role="writer", allowed_actions={"send_message"}, issued_at=self.now, expires_at=self.now + timedelta(hours=1))
@@ -140,6 +160,115 @@ class MessagingTest(unittest.TestCase):
                 uuid.UUID("33333333-3333-4333-8333-333333333333"),
                 "writer-604",
             )
+
+    def test_successful_child_admission_retains_exact_parent_operations_across_boundaries(self):
+        operations = {
+            "create_child": lambda service, token, child: self.create(
+                service, token, "writer-retained", "writer", self.mission()
+            ),
+            "get_usage": lambda service, token, child: service.get_usage(
+                token, self.main, "root"
+            ),
+            "cancel_mission": lambda service, token, child: service.cancel_mission(
+                token, child, "writer-retained", "cancel-retained"
+            ),
+            "resume_mission": lambda service, token, child: service.resume_mission(
+                token, child, "writer-retained", "resume-retained", {"verified": True}
+            ),
+            "publish_navigation_links": lambda service, token, child: service.publish_navigation_links(
+                token, {"main": "https://example.test/main"}
+            ),
+            "request_user_decision": lambda service, token, child: service.request_user_decision(
+                token, "Choose", ["A", "B"]
+            ),
+        }
+        for boundary in ("ordinary_wake", "recovery", "tool_refresh", "rollout", "rollback"):
+            with self.subTest(boundary=boundary):
+                provider = FakeProvider()
+                service = MessagingService(
+                    provider, self.secret, clock=lambda: self.now, retention_boundary=boundary
+                )
+                token = self.retained_parent_token()
+                child = uuid.UUID(self.create(service, token, "writer-retained", "writer", self.mission())["childId"])
+                for operation, invoke in operations.items():
+                    with self.subTest(operation=operation):
+                        result = invoke(service, token, child)
+                        self.assertTrue(result["accepted"] if "accepted" in result else result)
+
+    def test_unavailable_retained_operation_fails_before_dependent_mutation(self):
+        invocations = {
+            "create_child": lambda service, token, child: self.create(service, token, "writer-unavailable", "writer", self.mission()),
+            "get_usage": lambda service, token, child: service.get_usage(token, self.main, "root"),
+            "cancel_mission": lambda service, token, child: service.cancel_mission(token, child, "writer-unavailable", "cancel"),
+            "resume_mission": lambda service, token, child: service.resume_mission(token, child, "writer-unavailable", "resume", {"verified": True}),
+            "publish_navigation_links": lambda service, token, child: service.publish_navigation_links(token, {"main": "https://example.test/main"}),
+            "request_user_decision": lambda service, token, child: service.request_user_decision(token, "Choose", ["A", "B"]),
+        }
+        for boundary in ("ordinary_wake", "recovery", "tool_refresh", "rollout", "rollback"):
+            for missing, invoke in invocations.items():
+                with self.subTest(boundary=boundary, missing=missing):
+                    provider = FakeProvider()
+                    service = MessagingService(
+                        provider,
+                        self.secret,
+                        clock=lambda: self.now,
+                        retention_boundary=boundary,
+                        available_parent_operations=set(invocations) - {missing},
+                    )
+                    child = deterministic_child_id(self.main, "writer-unavailable")
+                    with self.assertRaisesRegex(
+                        CapabilityError,
+                        f"^PARENT_MESSAGING_OPERATION_UNAVAILABLE:{missing}:{boundary}$",
+                    ):
+                        invoke(service, self.retained_parent_token(), child)
+                    self.assertEqual(provider.calls, [])
+
+    def test_retention_never_grants_deputy_child_foreign_or_expired_parent_operations(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        deputy_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        deputy = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=deputy_id,
+            task_key="issue-792",
+            role="deputy",
+            allowed_actions={"create_child", "cancel_mission", "resume_mission", "read_usage"},
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=self.now + timedelta(hours=1),
+        )
+        child = capability_token(
+            self.secret,
+            owning_main_id=self.main,
+            child_id=deterministic_child_id(self.main, "writer-negative"),
+            task_key="writer-negative",
+            role="writer",
+            allowed_actions={"send_message"},
+            issued_at=self.now - timedelta(minutes=1),
+            expires_at=self.now + timedelta(hours=1),
+        )
+        foreign = self.retained_parent_token(main=uuid.UUID("33333333-3333-4333-8333-333333333333"))
+        expired = self.retained_parent_token(expires_at=self.now - timedelta(seconds=1))
+        owned_child = deterministic_child_id(self.main, "writer-negative")
+        for token in (deputy, child, foreign, expired):
+            with self.subTest(token=token[:20]), self.assertRaises(CapabilityError):
+                service.cancel_mission(token, owned_child, "writer-negative", "cancel-negative")
+
+    def test_terminal_or_cancelled_parent_lifecycle_ends_retention(self):
+        class LifecycleProvider(FakeProvider):
+            def __init__(self, lifecycle):
+                super().__init__()
+                self.lifecycle = lifecycle
+
+            def parent_lifecycle(self, parent_id):
+                return self.lifecycle
+
+        for lifecycle in ("terminal", "cancelled"):
+            with self.subTest(lifecycle=lifecycle):
+                provider = LifecycleProvider(lifecycle)
+                service = MessagingService(provider, self.secret, clock=lambda: self.now)
+                with self.assertRaisesRegex(CapabilityError, "terminal or cancelled"):
+                    service.get_usage(self.retained_parent_token(), self.main, "root")
+                self.assertEqual(provider.calls, [])
 
     def test_role_child_capability_is_valid_for_exactly_twenty_four_hours(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)

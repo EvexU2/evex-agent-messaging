@@ -21,6 +21,19 @@ from .capability import (
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
+_PARENT_OPERATIONS = frozenset(
+    {
+        "create_child",
+        "get_usage",
+        "cancel_mission",
+        "resume_mission",
+        "publish_navigation_links",
+        "request_user_decision",
+    }
+)
+_RETENTION_BOUNDARIES = frozenset(
+    {"ordinary_wake", "recovery", "tool_refresh", "rollout", "rollback"}
+)
 
 
 class MessagingProvider(Protocol):
@@ -31,6 +44,7 @@ class MessagingProvider(Protocol):
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def readiness(self) -> bool: ...
+    def parent_lifecycle(self, parent_id: uuid.UUID) -> str: ...
 
 
 class MessagingService:
@@ -43,15 +57,27 @@ class MessagingService:
         *,
         clock=None,
         write_mission_admission_paused: bool = False,
+        available_parent_operations: set[str] | frozenset[str] | None = None,
+        retention_boundary: str = "ordinary_wake",
     ) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
         if not isinstance(write_mission_admission_paused, bool):
             raise ValueError("write Mission admission pause must be boolean")
+        if retention_boundary not in _RETENTION_BOUNDARIES:
+            raise ValueError("retention boundary is invalid")
+        if available_parent_operations is None:
+            available_parent_operations = _PARENT_OPERATIONS
+        if not isinstance(available_parent_operations, (set, frozenset)) or not set(
+            available_parent_operations
+        ).issubset(_PARENT_OPERATIONS):
+            raise ValueError("parent operations are invalid")
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._write_mission_admission_paused = write_mission_admission_paused
+        self._available_parent_operations = frozenset(available_parent_operations)
+        self._retention_boundary = retention_boundary
 
     def readiness(self) -> bool:
         """Return whether this configured provider can serve its active role now."""
@@ -79,6 +105,7 @@ class MessagingService:
         )
         if parent.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may create a Child")
+        self._require_retained_parent_operation(parent, "create_child")
         if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair"}:
             raise CapabilityError("unsupported Child role")
         if role in {"spec", "writer"} and self._write_mission_admission_paused:
@@ -269,6 +296,7 @@ class MessagingService:
         )
         if capability.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may read delivery usage")
+        self._require_retained_parent_operation(capability, "get_usage")
         owns_target = target_id == capability.child_id and task_key == "root"
         owns_child = deterministic_child_id(capability.child_id, task_key) == target_id
         if not (owns_target or owns_child):
@@ -287,6 +315,7 @@ class MessagingService:
         )
         if capability.role not in {"main", "deputy"}:
             raise CapabilityError("only a Main may control a Child")
+        self._require_retained_parent_operation(capability, action)
         if deterministic_child_id(capability.child_id, task_key) != target_id:
             raise CapabilityError("target is not the Main's deterministic Child")
         return capability
@@ -314,7 +343,12 @@ class MessagingService:
             raise CapabilityError("question must be non-empty and bounded")
         if not isinstance(options, list) or not 2 <= len(options) <= 5 or any(not isinstance(x, str) or not x.strip() for x in options):
             raise CapabilityError("options must contain 2-5 non-empty strings")
-        capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
+        capability = inspect_capability(token, self._secret)
+        if capability.role == "main":
+            capability = verify_capability(token, self._secret, now=self._clock(), action="request_user_decision", target_id=capability.child_id)
+            self._require_retained_parent_operation(capability, "request_user_decision")
+        else:
+            capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=capability.child_id)
         import hashlib
         message_key = "decision:" + hashlib.sha256(_compact({"question": question.strip(), "options": options}).encode()).hexdigest()[:24]
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
@@ -323,7 +357,12 @@ class MessagingService:
     def publish_navigation_links(self, token: str, links: dict[str, str]) -> dict[str, Any]:
         if not isinstance(links, dict) or not links or len(links) > 12 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in links.items()):
             raise CapabilityError("links must be a bounded map of strings")
-        capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
+        capability = inspect_capability(token, self._secret)
+        if capability.role == "main":
+            capability = verify_capability(token, self._secret, now=self._clock(), action="publish_navigation_links", target_id=capability.child_id)
+            self._require_retained_parent_operation(capability, "publish_navigation_links")
+        else:
+            capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=capability.child_id)
         import hashlib
         message_key = "navigation:" + hashlib.sha256(_compact(links).encode()).hexdigest()[:24]
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NAVIGATION", "text": _compact({"links": links})}
@@ -331,6 +370,19 @@ class MessagingService:
 
     def _capability_target(self, token: str) -> uuid.UUID:
         return inspect_capability(token, self._secret).child_id
+
+    def _require_retained_parent_operation(self, capability, operation: str) -> None:
+        """Fail closed if a supported Parent loses an operation from its signed envelope."""
+        if capability.role != "main":
+            return
+        lifecycle = getattr(self._provider, "parent_lifecycle", None)
+        if callable(lifecycle) and lifecycle(capability.child_id) in {"terminal", "cancelled"}:
+            raise CapabilityError("parent lifecycle is terminal or cancelled")
+        if operation not in self._available_parent_operations:
+            raise CapabilityError(
+                "PARENT_MESSAGING_OPERATION_UNAVAILABLE:"
+                f"{operation}:{self._retention_boundary}"
+            )
 
 
 def _compact(value: dict[str, Any]) -> str:

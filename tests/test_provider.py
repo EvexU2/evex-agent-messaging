@@ -97,6 +97,25 @@ class OpenHandsProviderTest(unittest.TestCase):
         urlopen.assert_called_once()
         self.assertEqual(urlopen.call_args.kwargs["timeout"], 15.0)
 
+    def test_parent_lifecycle_exposes_only_active_terminal_or_cancelled(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        for status, expected in {
+            "running": "active",
+            "idle": "active",
+            "finished": "terminal",
+            "error": "terminal",
+            "stuck": "terminal",
+            "cancelled": "cancelled",
+        }.items():
+            with self.subTest(status=status):
+                provider = OpenHandsProvider("http://openhands", "key", "http://public")
+                provider._request = Mock(return_value={"execution_status": status})
+
+                self.assertEqual(provider.parent_lifecycle(parent), expected)
+                provider._request.assert_called_once_with(
+                    "GET", f"/api/conversations/{parent}"
+                )
+
     def test_callback_waits_for_busy_main_before_delivery(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)

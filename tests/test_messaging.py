@@ -177,20 +177,28 @@ class MessagingTest(unittest.TestCase):
             self.read_only_mission(),
             capabilities=["runtime_environment"],
         )
+        self.create(service,
+            self.main_token(),
+            "writer-integrated",
+            "writer",
+            self.mission(),
+            capabilities=["runtime_environment"],
+        )
 
         creates = [call for call in provider.calls if call[0] == "create"]
         self.assertEqual(creates[0][-3], frozenset())
         self.assertEqual(creates[1][-3], frozenset({"runtime_environment"}))
+        self.assertEqual(creates[2][-3], frozenset({"runtime_environment"}))
         with self.assertRaises(CapabilityError):
             self.create(service,
                 self.main_token(), "writer-broad", "writer", self.mission(), capabilities=["all_tools"]
             )
-        with self.assertRaisesRegex(CapabilityError, "limited to QA or repair"):
+        with self.assertRaisesRegex(CapabilityError, "limited to writer, QA, or repair"):
             self.create(service,
                 self.main_token(),
-                "writer-runtime",
-                "writer",
-                self.mission(),
+                "review-runtime",
+                "reviewer",
+                self.read_only_mission(),
                 capabilities=["runtime_environment"],
             )
 

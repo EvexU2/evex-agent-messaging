@@ -34,6 +34,7 @@ _ACTION_BITS = {
     "cancel_mission": 4,
     "resume_mission": 8,
     "read_usage": 16,
+    "callback_fallback": 32,
 }
 
 

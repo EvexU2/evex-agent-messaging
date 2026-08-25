@@ -42,6 +42,10 @@ class FakeService:
     def send_to_parent(self, *args):
         return {"accepted": True}
 
+    def send_callback_fallback(self, *args):
+        self.calls.append(("send_callback_fallback", args, {}))
+        return {"accepted": True, "replayed": False}
+
     def request_user_decision(self, *args):
         return {"accepted": True}
 
@@ -91,7 +95,7 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "send_callback_fallback", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -156,6 +160,20 @@ class McpServerTest(unittest.TestCase):
         }, capability_ref="evx1_parent")
         self.assertNotIn("capabilityRef", result["result"]["structuredContent"])
         self.assertEqual(self.service.calls[0][1][0], "evx1_parent")
+
+    def test_callback_fallback_has_no_caller_authority_arguments(self):
+        result = self.server.handle({
+            "jsonrpc": "2.0", "id": 41, "method": "tools/call",
+            "params": {"name": "send_callback_fallback", "arguments": {}},
+        }, capability_ref="evx1_opaque")
+        self.assertEqual(result["result"]["structuredContent"], {"accepted": True, "replayed": False})
+        self.assertEqual(self.service.calls[-1], ("send_callback_fallback", ("evx1_opaque",), {}))
+        rejected = self.server.handle({
+            "jsonrpc": "2.0", "id": 42, "method": "tools/call",
+            "params": {"name": "send_callback_fallback", "arguments": {"body": "forged"}},
+        }, capability_ref="evx1_opaque")
+        self.assertIn("accepts no arguments", rejected["error"]["message"])
+        self.assertEqual(len(self.service.calls), 1)
 
     def test_tool_call_without_transport_capability_fails_closed(self):
         result = self.server.handle({

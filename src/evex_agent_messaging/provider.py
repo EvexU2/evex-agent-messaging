@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 import uuid
 
+from .fallback import materialize_callback_fallback_mutation
+
 
 class ProviderError(RuntimeError):
     """Provider failure translated away from raw credentials/HTTP details."""
@@ -146,6 +148,9 @@ class OpenHandsProvider:
         model: str,
         reasoning_effort: str,
     ) -> dict:
+        mission = materialize_callback_fallback_mutation(
+            mission, f"{self.public_url.rstrip('/')}/conversations/{child_id}"
+        )
         mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
@@ -292,6 +297,73 @@ class OpenHandsProvider:
             ):
                 return True
         return False
+
+    def callback_fallback_context(self, child_id: uuid.UUID) -> dict | None:
+        """Read the original Mission and newest-run callback facts without trusting callers."""
+        try:
+            events = self._request(
+                "GET", f"/api/conversations/{child_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC"
+            ).get("items")
+        except (ProviderError, TypeError, ValueError):
+            return None
+        if not isinstance(events, list) or len(events) >= 100:
+            return None
+        missions = [self._mission_from_event(event) for event in events]
+        missions = [mission for mission in missions if mission is not None]
+        if len(missions) != 1:
+            return None
+        newest_run = next((self._run_id(event) for event in events if self._run_id(event)), None)
+        if not isinstance(newest_run, str):
+            return None
+        attempts = []
+        intervening_fallback = False
+        for event in reversed(events):
+            if self._run_id(event) != newest_run:
+                continue
+            name = event.get("toolName") or event.get("tool_name")
+            if name == "send_callback_fallback":
+                intervening_fallback = True
+            if name != "send_to_parent":
+                continue
+            result = event.get("result")
+            if isinstance(result, (dict, list)):
+                result = json.dumps(result, sort_keys=True, separators=(",", ":"))
+            if event.get("retryable") is True and isinstance(result, str):
+                attempts.append({"result": result, "outcome": "retryable"})
+            else:
+                return None
+        return {
+            "mission": missions[0],
+            "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}",
+            "newestRunId": newest_run,
+            "attempts": attempts,
+            "interveningFallback": intervening_fallback,
+        }
+
+    @staticmethod
+    def _run_id(event: object) -> str | None:
+        if not isinstance(event, dict):
+            return None
+        value = event.get("runId", event.get("run_id"))
+        return value if isinstance(value, str) and value else None
+
+    @staticmethod
+    def _mission_from_event(event: object) -> dict | None:
+        if not isinstance(event, dict) or event.get("kind") != "MessageEvent" or event.get("source") != "user":
+            return None
+        message = event.get("llm_message")
+        content = message.get("content") if isinstance(message, dict) else None
+        if not isinstance(content, list):
+            return None
+        for item in content:
+            text = item.get("text") if isinstance(item, dict) and item.get("type") == "text" else None
+            if isinstance(text, str) and text.startswith("MISSION\n"):
+                try:
+                    value = json.loads(text.removeprefix("MISSION\n"))
+                except ValueError:
+                    return None
+                return value if isinstance(value, dict) else None
+        return None
 
     def _validate_existing_child(
         self,

@@ -11,6 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider
 from .service import MessagingService
+from .fallback import GitHubCallbackFallbackAdapter
 
 
 TOOLS = [
@@ -23,6 +24,11 @@ TOOLS = [
         "name": "send_to_parent",
         "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
+    },
+    {
+        "name": "send_callback_fallback",
+        "description": "Converge the immutable-Mission-authorized recovery marker after server-observed direct callback retry exhaustion. This Child-only operation has no arguments.",
+        "inputSchema": {"type": "object", "additionalProperties": False},
     },
     {
         "name": "request_user_decision",
@@ -80,6 +86,10 @@ class McpServer:
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
+            elif name == "send_callback_fallback":
+                if args:
+                    raise ValueError("send_callback_fallback accepts no arguments")
+                value = self._service.send_callback_fallback(capability_ref)
             elif name == "request_user_decision":
                 value = self._service.request_user_decision(capability_ref, args["question"], args["options"])
             elif name == "cancel_mission":
@@ -214,16 +224,12 @@ def main() -> int:
     if not all(value.strip() for value in (base_url, api_key, public_url)):
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
     secret = secret_value.encode()
-    server = McpServer(
-        MessagingService(
-            OpenHandsProvider(
-                base_url,
-                api_key,
-                public_url,
-            ),
-            secret,
-        )
-    )
+    fallback_token = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN", "")
+    fallback_login = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN", "")
+    fallback_adapter = None
+    if fallback_token or fallback_login:
+        fallback_adapter = GitHubCallbackFallbackAdapter(fallback_token, fallback_login)
+    server = McpServer(MessagingService(OpenHandsProvider(base_url, api_key, public_url), secret, callback_fallback_adapter=fallback_adapter))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
     else:

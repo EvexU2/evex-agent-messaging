@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from unittest.mock import ANY, MagicMock, Mock, patch
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -20,6 +21,23 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         self._model_patch.stop()
+
+    def test_callback_fallback_context_uses_only_original_mission_and_newest_retryable_events(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        mission = {"owningMainId": "11111111-1111-4111-8111-111111111111", "childId": str(child), "taskKey": "issue-732", "role": "writer", "links": {"issue": "https://github.com/EvexU2/evex-u-workspace/issues/732"}, "allowedMutations": []}
+        provider._request = Mock(return_value={"items": [
+            {"kind": "McpToolEvent", "runId": "newest", "toolName": "send_to_parent", "retryable": True, "result": "same"},
+            {"kind": "McpToolEvent", "runId": "newest", "toolName": "send_to_parent", "retryable": True, "result": "same"},
+            {"kind": "McpToolEvent", "runId": "newest", "toolName": "send_to_parent", "retryable": True, "result": "same"},
+            {"kind": "MessageEvent", "source": "user", "llm_message": {"content": [{"type": "text", "text": "MISSION\n" + json.dumps(mission)}]}},
+        ]})
+
+        context = provider.callback_fallback_context(child)
+
+        self.assertEqual(context["mission"], mission)
+        self.assertEqual(context["newestRunId"], "newest")
+        self.assertEqual(context["attempts"], [{"result": "same", "outcome": "retryable"}] * 3)
 
     def create_provider_child(self, provider, *args, **kwargs):
         kwargs.setdefault("model", "gpt-5.6-sol")

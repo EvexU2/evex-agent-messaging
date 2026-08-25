@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -16,11 +17,13 @@ from .capability import (
     inspect_capability,
     verify_capability,
 )
+from .fallback import CALLBACK_FALLBACK_MUTATION, CallbackFallbackError
 
 
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
+_FALLBACK_LOCKS = tuple(threading.RLock() for _ in range(64))
 
 
 class MessagingProvider(Protocol):
@@ -31,17 +34,19 @@ class MessagingProvider(Protocol):
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def readiness(self) -> bool: ...
+    def callback_fallback_context(self, target_id: uuid.UUID) -> dict[str, Any] | None: ...
 
 
 class MessagingService:
     """Small stateless facade; semantic replay is keyed in the message body, not persisted here."""
 
-    def __init__(self, provider: MessagingProvider, secret: bytes, *, clock=None) -> None:
+    def __init__(self, provider: MessagingProvider, secret: bytes, *, clock=None, callback_fallback_adapter=None) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._callback_fallback_adapter = callback_fallback_adapter
 
     def readiness(self) -> bool:
         """Return whether this configured provider can serve its active role now."""
@@ -92,13 +97,16 @@ class MessagingService:
             raise CapabilityError("runtime environment is limited to QA or repair Children")
         child_id = deterministic_child_id(parent.child_id, task_key)
         now = self._clock()
+        fallback_allowed = mutations.count(CALLBACK_FALLBACK_MUTATION) == 1
         token = capability_token(
             self._secret,
             owning_main_id=parent.child_id,
             child_id=child_id,
             task_key=task_key,
             role=role,
-            allowed_actions={"send_message", "cancel_mission", "resume_mission"},
+            allowed_actions={"send_message", "cancel_mission", "resume_mission"} | (
+                {"callback_fallback"} if fallback_allowed else set()
+            ),
             issued_at=now,
             expires_at=now + timedelta(hours=24),
         )
@@ -296,6 +304,79 @@ class MessagingService:
             raise CapabilityError("result messageKey must be bounded and non-empty")
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
         return self._provider.send_message(capability.owning_main_id, message_key, kind, _compact(envelope))
+
+    def send_callback_fallback(self, token: str) -> dict[str, Any]:
+        """Converge the one Mission-authorized recovery marker after trusted exhaustion."""
+        try:
+            capability = verify_capability(
+                token, self._secret, now=self._clock(), action="callback_fallback",
+                target_id=self._capability_target(token),
+            )
+        except CapabilityError as exc:
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED") from exc
+        if capability.role not in {"spec", "writer", "repair"}:
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        lock = _FALLBACK_LOCKS[capability.child_id.int % len(_FALLBACK_LOCKS)]
+        with lock:
+            context = self._provider.callback_fallback_context(capability.child_id)
+            issue_url, body = self._validated_callback_fallback_context(capability, context)
+            if self._callback_fallback_adapter is None:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+            try:
+                result = self._callback_fallback_adapter.converge_callback(issue_url, body)
+            except CallbackFallbackError:
+                raise
+            except Exception as exc:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE") from exc
+            if not isinstance(result, dict) or result.get("accepted") is not True:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE")
+            return {"accepted": True, "replayed": bool(result.get("replayed"))}
+
+    @staticmethod
+    def _validated_callback_fallback_context(capability, context: object) -> tuple[str, str]:
+        if not isinstance(context, dict):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        mission = context.get("mission")
+        conversation_url = context.get("conversationUrl")
+        attempts = context.get("attempts")
+        if (
+            not isinstance(mission, dict)
+            or mission.get("owningMainId") != str(capability.owning_main_id)
+            or mission.get("childId") != str(capability.child_id)
+            or mission.get("taskKey") != capability.task_key
+            or mission.get("role") != capability.role
+            or not isinstance(conversation_url, str)
+            or not isinstance(attempts, list)
+            or context.get("interveningFallback") is not False
+            or not isinstance(context.get("newestRunId"), str)
+        ):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        links = mission.get("links")
+        mutations = mission.get("allowedMutations")
+        issue_url = links.get("issue") if isinstance(links, dict) else None
+        expected_mutation = (
+            CALLBACK_FALLBACK_MUTATION
+            .replace("<Child Conversation URL>", conversation_url)
+            .replace("<taskKey>", capability.task_key)
+            .replace("<owning Issue URL>", issue_url or "")
+        )
+        if (
+            _WORKSPACE_ISSUE_URL.fullmatch(issue_url or "") is None
+            or not isinstance(mutations, list)
+            or mutations.count(expected_mutation) != 1
+        ):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        if len(attempts) != 3 or any(
+            not isinstance(attempt, dict) or attempt.get("outcome") != "retryable"
+            or not isinstance(attempt.get("result"), str) for attempt in attempts
+        ):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
+        if len({attempt["result"] for attempt in attempts}) != 1:
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
+        body = f"@evexubot callback recovery for {conversation_url} ({capability.task_key})"
+        if "\n" in conversation_url or not conversation_url or context.get("body", body) != body:
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        return issue_url, body
 
     def request_user_decision(self, token: str, question: str, options: list[str]) -> dict[str, Any]:
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:

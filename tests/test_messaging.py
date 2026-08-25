@@ -223,6 +223,24 @@ class MessagingTest(unittest.TestCase):
                 self.mission(),
             )
 
+    def test_paused_write_admission_rejects_spec_and_writer_before_provider_mutation(self):
+        provider = FakeProvider()
+        service = MessagingService(
+            provider, self.secret, clock=lambda: self.now, write_mission_admission_paused=True
+        )
+
+        for role in ("spec", "writer"):
+            with self.subTest(role=role), self.assertRaisesRegex(
+                CapabilityError, "^write_mission_admission_paused$"
+            ):
+                self.create(service, self.main_token(), f"{role}-paused", role, self.mission())
+
+        admitted = self.create(
+            service, self.main_token(), "review-paused", "reviewer", self.read_only_mission()
+        )
+        self.assertTrue(admitted["created"])
+        self.assertEqual([call[0:4] for call in provider.calls], [("create", self.main, uuid.UUID(admitted["childId"]), "reviewer")])
+
     def test_child_can_only_report_to_owning_main_and_request_decision(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

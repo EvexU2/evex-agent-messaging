@@ -88,8 +88,8 @@ class MessagingService:
             or any(value != "runtime_environment" for value in requested_capabilities)
         ):
             raise CapabilityError("unsupported Child capability")
-        if requested_capabilities and role not in {"qa", "repair"}:
-            raise CapabilityError("runtime environment is limited to QA or repair Children")
+        if requested_capabilities and role not in {"writer", "qa", "repair"}:
+            raise CapabilityError("runtime environment is limited to writer, QA, or repair Children")
         child_id = deterministic_child_id(parent.child_id, task_key)
         now = self._clock()
         token = capability_token(

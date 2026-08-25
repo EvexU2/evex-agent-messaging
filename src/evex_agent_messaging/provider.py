@@ -10,6 +10,7 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -546,32 +547,49 @@ class OpenHandsProvider:
 
     def write_mission_inventory(self) -> list[dict]:
         """Return current Spec/Writer facts for the operator cutover procedure."""
-        response = self._request("GET", "/api/conversations?limit=100")
-        values = response.get("items")
-        if not isinstance(values, list):
-            raise ProviderError("OpenHands write Mission inventory is unavailable")
         inventory = []
-        for value in values:
-            if not isinstance(value, dict):
-                raise ProviderError("OpenHands write Mission inventory is invalid")
-            tags = value.get("tags")
-            if not isinstance(tags, dict) or tags.get("project") != "evex-u" or tags.get("evexrole") != "role-child":
-                continue
-            role = tags.get("evexchildrole")
-            if role not in {"spec", "writer"}:
-                continue
-            child_id = value.get("id") or value.get("conversation_id")
-            owner = tags.get("evexparent")
-            task_key = tags.get("evextask")
-            status = value.get("execution_status")
-            try:
-                child = uuid.UUID(str(child_id))
-                owning_main = uuid.UUID(str(owner))
-            except (TypeError, ValueError, AttributeError) as exc:
-                raise ProviderError("OpenHands write Mission inventory is invalid") from exc
-            if not isinstance(task_key, str) or not task_key or not isinstance(status, str):
-                raise ProviderError("OpenHands write Mission inventory is invalid")
-            inventory.append({"childId": str(child), "owningMainId": str(owning_main), "role": role, "taskKey": task_key, "terminal": status in {"finished", "error", "stuck"}})
+        page_id = None
+        seen_page_ids = set()
+        while True:
+            path = "/api/conversations?limit=100"
+            if page_id is not None:
+                path += "&page_id=" + urllib.parse.quote(page_id, safe="")
+            response = self._request("GET", path)
+            if not isinstance(response, dict):
+                raise ProviderError("OpenHands write Mission inventory is incomplete")
+            values = response.get("items")
+            next_page_id = response.get("next_page_id")
+            if not isinstance(values, list) or "next_page_id" not in response:
+                raise ProviderError("OpenHands write Mission inventory is incomplete")
+            if next_page_id is not None and (not isinstance(next_page_id, str) or not next_page_id):
+                raise ProviderError("OpenHands write Mission inventory is incomplete")
+            for value in values:
+                if not isinstance(value, dict):
+                    raise ProviderError("OpenHands write Mission inventory is invalid")
+                tags = value.get("tags")
+                if not isinstance(tags, dict) or tags.get("project") != "evex-u" or tags.get("evexrole") != "role-child":
+                    continue
+                role = tags.get("evexchildrole")
+                if role not in {"spec", "writer"}:
+                    continue
+                child_id = value.get("id") or value.get("conversation_id")
+                owner = tags.get("evexparent")
+                task_key = tags.get("evextask")
+                status = value.get("execution_status")
+                try:
+                    child = uuid.UUID(str(child_id))
+                    owning_main = uuid.UUID(str(owner))
+                except (TypeError, ValueError, AttributeError) as exc:
+                    raise ProviderError("OpenHands write Mission inventory is invalid") from exc
+                if not isinstance(task_key, str) or not task_key or not isinstance(status, str):
+                    raise ProviderError("OpenHands write Mission inventory is invalid")
+                inventory.append({"childId": str(child), "owningMainId": str(owning_main), "role": role, "taskKey": task_key, "terminal": status in {"finished", "error", "stuck"}})
+            if next_page_id is None:
+                break
+            if next_page_id in seen_page_ids:
+                raise ProviderError("OpenHands write Mission inventory is incomplete")
+            seen_page_ids.add(next_page_id)
+            page_id = next_page_id
         return sorted(inventory, key=lambda item: item["childId"])
 
     def request_write_mission_drain(self, mission: dict) -> dict:

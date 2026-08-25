@@ -814,7 +814,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         terminal = {"id": str(child), "tags": tags, "execution_status": "finished"}
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)
         provider._request = Mock(side_effect=[
-            {"items": [active]}, {"items": [terminal]}, active,
+            {"items": [active], "next_page_id": None}, {"items": [terminal], "next_page_id": None}, active,
             {"execution_status": "idle"}, {},
         ])
 
@@ -829,6 +829,48 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(event[0:2], ("POST", f"/api/conversations/{main}/events"))
         self.assertIn("QUIESCE_WRITE_MISSION", event[2]["content"][0]["text"])
         self.assertFalse(any(call.args[1] == f"/api/conversations/{child}/events" for call in provider._request.call_args_list if len(call.args) > 1))
+
+    def test_inventory_exhausts_pages_and_routes_later_page_writer_for_drain(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        tags = {"project": "evex-u", "evexrole": "role-child", "evexchildrole": "writer", "evexparent": str(main), "evextask": "writer-768"}
+        writer = {"id": str(child), "tags": tags, "execution_status": "running"}
+        provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)
+        provider._request = Mock(side_effect=[
+            {"items": [], "next_page_id": "cursor/2"},
+            {"items": [writer], "next_page_id": None},
+            writer, {"execution_status": "idle"}, {},
+        ])
+
+        inventory = provider.write_mission_inventory()
+        self.assertEqual(inventory, [{"childId": str(child), "owningMainId": str(main), "role": "writer", "taskKey": "writer-768", "terminal": False}])
+        provider.request_write_mission_drain(inventory[0])
+
+        self.assertEqual(provider._request.call_args_list[0].args, ("GET", "/api/conversations?limit=100"))
+        self.assertEqual(provider._request.call_args_list[1].args, ("GET", "/api/conversations?limit=100&page_id=cursor%2F2"))
+        self.assertEqual(provider._request.call_args_list[-1].args[0:2], ("POST", f"/api/conversations/{main}/events"))
+
+    def test_inventory_fails_closed_for_incomplete_or_repeated_pagination(self) -> None:
+        malformed = [
+            [],
+            {"items": []},
+            {"items": [], "next_page_id": ""},
+            {"items": [], "next_page_id": 2},
+        ]
+        for response in malformed:
+            with self.subTest(response=response):
+                provider = OpenHandsProvider("http://openhands", "key", "http://public")
+                provider._request = Mock(return_value=response)
+                with self.assertRaisesRegex(ProviderError, "inventory is incomplete"):
+                    provider.write_mission_inventory()
+
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"items": [], "next_page_id": "repeat"},
+            {"items": [], "next_page_id": "repeat"},
+        ])
+        with self.assertRaisesRegex(ProviderError, "inventory is incomplete"):
+            provider.write_mission_inventory()
 
 
 if __name__ == "__main__":

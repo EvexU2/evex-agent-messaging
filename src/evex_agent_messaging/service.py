@@ -375,14 +375,14 @@ class MessagingService:
         """Fail closed if a supported Parent loses an operation from its signed envelope."""
         if capability.role != "main":
             return
-        lifecycle = getattr(self._provider, "parent_lifecycle", None)
-        if callable(lifecycle) and lifecycle(capability.child_id) in {"terminal", "cancelled"}:
-            raise CapabilityError("parent lifecycle is terminal or cancelled")
         if operation not in self._available_parent_operations:
             raise CapabilityError(
                 "PARENT_MESSAGING_OPERATION_UNAVAILABLE:"
                 f"{operation}:{self._retention_boundary}"
             )
+        lifecycle = getattr(self._provider, "parent_lifecycle", None)
+        if callable(lifecycle) and lifecycle(capability.child_id) != "active":
+            raise CapabilityError("parent lifecycle is terminal, cancelled, or unavailable")
 
 
 def _compact(value: dict[str, Any]) -> str:

@@ -196,6 +196,11 @@ class MessagingTest(unittest.TestCase):
                         self.assertTrue(result["accepted"] if "accepted" in result else result)
 
     def test_unavailable_retained_operation_fails_before_dependent_mutation(self):
+        class LifecycleProvider(FakeProvider):
+            def parent_lifecycle(self, parent_id):
+                self.calls.append(("parent-lifecycle", parent_id))
+                return "active"
+
         invocations = {
             "create_child": lambda service, token, child: self.create(service, token, "writer-unavailable", "writer", self.mission()),
             "get_usage": lambda service, token, child: service.get_usage(token, self.main, "root"),
@@ -207,7 +212,7 @@ class MessagingTest(unittest.TestCase):
         for boundary in ("ordinary_wake", "recovery", "tool_refresh", "rollout", "rollback"):
             for missing, invoke in invocations.items():
                 with self.subTest(boundary=boundary, missing=missing):
-                    provider = FakeProvider()
+                    provider = LifecycleProvider()
                     service = MessagingService(
                         provider,
                         self.secret,
@@ -253,7 +258,7 @@ class MessagingTest(unittest.TestCase):
             with self.subTest(token=token[:20]), self.assertRaises(CapabilityError):
                 service.cancel_mission(token, owned_child, "writer-negative", "cancel-negative")
 
-    def test_terminal_or_cancelled_parent_lifecycle_ends_retention(self):
+    def test_terminal_cancelled_or_unavailable_parent_lifecycle_ends_retention(self):
         class LifecycleProvider(FakeProvider):
             def __init__(self, lifecycle):
                 super().__init__()
@@ -262,11 +267,11 @@ class MessagingTest(unittest.TestCase):
             def parent_lifecycle(self, parent_id):
                 return self.lifecycle
 
-        for lifecycle in ("terminal", "cancelled"):
+        for lifecycle in ("terminal", "cancelled", "unavailable"):
             with self.subTest(lifecycle=lifecycle):
                 provider = LifecycleProvider(lifecycle)
                 service = MessagingService(provider, self.secret, clock=lambda: self.now)
-                with self.assertRaisesRegex(CapabilityError, "terminal or cancelled"):
+                with self.assertRaisesRegex(CapabilityError, "terminal, cancelled, or unavailable"):
                     service.get_usage(self.retained_parent_token(), self.main, "root")
                 self.assertEqual(provider.calls, [])
 

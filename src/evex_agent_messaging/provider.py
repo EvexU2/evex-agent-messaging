@@ -115,11 +115,13 @@ class OpenHandsProvider:
         status = self._request("GET", f"/api/conversations/{parent_id}").get(
             "execution_status"
         )
+        if status in {"running", "idle", "paused"}:
+            return "active"
         if status in {"finished", "error", "stuck"}:
             return "terminal"
         if status == "cancelled":
             return "cancelled"
-        return "active"
+        return "unavailable"
 
     def create_child(
         self,

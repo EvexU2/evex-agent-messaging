@@ -67,6 +67,7 @@ class OpenHandsProvider:
     timeout: float = 5.0
     sleeper: object = time.sleep
     workspace_root: str = "/home/openhands/workspace/delivery"
+    write_mission_admission_paused: bool = False
 
     def _request(
         self, method: str, path: str, body: dict | None = None, *, timeout: float | None = None
@@ -120,6 +121,8 @@ class OpenHandsProvider:
         model: str,
         reasoning_effort: str,
     ) -> dict:
+        if role in {"spec", "writer"} and self.write_mission_admission_paused:
+            raise ProviderError("write_mission_admission_paused")
         lock = _CHECKOUT_LOCKS[child_id.int % len(_CHECKOUT_LOCKS)]
         with lock:
             return self._create_child_locked(
@@ -541,6 +544,68 @@ class OpenHandsProvider:
             "disclaimer": "Official Standard API-equivalent estimate; not a subscription invoice.",
         }
 
+    def write_mission_inventory(self) -> list[dict]:
+        """Return current Spec/Writer facts for the operator cutover procedure."""
+        response = self._request("GET", "/api/conversations?limit=100")
+        values = response.get("items")
+        if not isinstance(values, list):
+            raise ProviderError("OpenHands write Mission inventory is unavailable")
+        inventory = []
+        for value in values:
+            if not isinstance(value, dict):
+                raise ProviderError("OpenHands write Mission inventory is invalid")
+            tags = value.get("tags")
+            if not isinstance(tags, dict) or tags.get("project") != "evex-u" or tags.get("evexrole") != "role-child":
+                continue
+            role = tags.get("evexchildrole")
+            if role not in {"spec", "writer"}:
+                continue
+            child_id = value.get("id") or value.get("conversation_id")
+            owner = tags.get("evexparent")
+            task_key = tags.get("evextask")
+            status = value.get("execution_status")
+            try:
+                child = uuid.UUID(str(child_id))
+                owning_main = uuid.UUID(str(owner))
+            except (TypeError, ValueError, AttributeError) as exc:
+                raise ProviderError("OpenHands write Mission inventory is invalid") from exc
+            if not isinstance(task_key, str) or not task_key or not isinstance(status, str):
+                raise ProviderError("OpenHands write Mission inventory is invalid")
+            inventory.append({"childId": str(child), "owningMainId": str(owning_main), "role": role, "taskKey": task_key, "terminal": status in {"finished", "error", "stuck"}})
+        return sorted(inventory, key=lambda item: item["childId"])
+
+    def request_write_mission_drain(self, mission: dict) -> dict:
+        """Route one live write Mission to its owning Main; never control the Child directly."""
+        if not isinstance(mission, dict):
+            raise ProviderError("write Mission drain target is invalid")
+        try:
+            child_id = uuid.UUID(str(mission["childId"]))
+            owning_main_id = uuid.UUID(str(mission["owningMainId"]))
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ProviderError("write Mission drain target is invalid") from exc
+        task_key, role = mission.get("taskKey"), mission.get("role")
+        if not isinstance(task_key, str) or not task_key or role not in {"spec", "writer"}:
+            raise ProviderError("write Mission drain target is invalid")
+        current = self._request("GET", f"/api/conversations/{child_id}")
+        if self._write_mission_facts(current) != (str(owning_main_id), role, task_key):
+            raise ProviderError("write Mission drain target no longer matches live provider facts")
+        if current.get("execution_status") in {"finished", "error", "stuck"}:
+            return {"accepted": True, "terminal": True, "childId": str(child_id)}
+        message_key = f"quiesce:{child_id}"
+        envelope = {"childId": str(child_id), "messageKey": message_key, "owningMainId": str(owning_main_id), "role": role, "taskKey": task_key}
+        self.send_message(owning_main_id, message_key, "QUIESCE_WRITE_MISSION", json.dumps(envelope, sort_keys=True, separators=(",", ":")))
+        return {"accepted": True, "terminal": False, "childId": str(child_id), "messageKey": message_key}
+
+    @staticmethod
+    def _write_mission_facts(value: dict) -> tuple[str, str, str] | None:
+        tags = value.get("tags") if isinstance(value, dict) else None
+        if not isinstance(tags, dict) or tags.get("project") != "evex-u" or tags.get("evexrole") != "role-child":
+            return None
+        role, owner, task_key = tags.get("evexchildrole"), tags.get("evexparent"), tags.get("evextask")
+        if role not in {"spec", "writer"} or not isinstance(owner, str) or not isinstance(task_key, str) or not task_key:
+            return None
+        return owner, role, task_key
+
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict:
         path = f"/api/conversations/{target_id}"
         for _ in range(300):
@@ -601,6 +666,10 @@ class OpenHandsProvider:
         raise ProviderError("OpenHands Child did not become cancellation-wakeable")
 
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict) -> dict:
+        if self.write_mission_admission_paused:
+            current = self._request("GET", f"/api/conversations/{target_id}")
+            if self._write_mission_facts(current) is not None:
+                raise ProviderError("write_mission_admission_paused")
         envelope = {"messageKey": message_key, "taskKey": task_key, "context": context}
         self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
         return {"accepted": True, "messageKey": message_key, "taskKey": task_key}

@@ -28,6 +28,12 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   Standard API-equivalent USD estimate. Main may read itself or a deterministic Child of its task;
   this is stateless observability, never workflow authority or a ChatGPT subscription invoice.
 
+The Platform Operator may set `EVEX_WRITE_MISSION_ADMISSION_PAUSED=true` during a Skills-authority
+cutover. It rejects only new or resumed Spec/Writer work with the stable
+`write_mission_admission_paused` outcome before durable admission; Plan, Review, and QA continue.
+Live write-Mission inventory and drain requests remain provider-adapter controls, not MCP tools: a
+drain request goes to the owning Main, which alone obtains terminal cancellation proof.
+
 Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,
 allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,
 tool output, or child environment variables. There is no persistent state: callers provide a stable

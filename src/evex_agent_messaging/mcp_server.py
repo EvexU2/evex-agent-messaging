@@ -213,6 +213,10 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not all(value.strip() for value in (base_url, api_key, public_url)):
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
+    pause_value = os.environ.get("EVEX_WRITE_MISSION_ADMISSION_PAUSED", "false").strip().lower()
+    if pause_value not in {"true", "false"}:
+        raise SystemExit("EVEX_WRITE_MISSION_ADMISSION_PAUSED must be true or false")
+    write_mission_admission_paused = pause_value == "true"
     secret = secret_value.encode()
     server = McpServer(
         MessagingService(
@@ -220,8 +224,10 @@ def main() -> int:
                 base_url,
                 api_key,
                 public_url,
+                write_mission_admission_paused=write_mission_admission_paused,
             ),
             secret,
+            write_mission_admission_paused=write_mission_admission_paused,
         )
     )
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":

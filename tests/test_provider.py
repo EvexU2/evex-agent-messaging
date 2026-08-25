@@ -775,6 +775,61 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(result["terminal"])
         provider._request.assert_called_once_with("GET", f"/api/conversations/{child}")
 
+    def test_paused_provider_rejects_write_create_and_resume_before_durable_mutation(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public", write_mission_admission_paused=True
+        )
+        provider._request = Mock()
+
+        with self.assertRaisesRegex(ProviderError, "^write_mission_admission_paused$"):
+            self.create_provider_child(
+                provider, parent, child, "writer", "writer-768",
+                {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/768", "headSha": "a" * 40}},
+                "evx1_opaque", frozenset(),
+            )
+        provider._request.assert_not_called()
+
+        provider._request = Mock(return_value={
+            "tags": {"project": "evex-u", "evexrole": "role-child", "evexchildrole": "spec", "evexparent": str(parent), "evextask": "spec-768"},
+        })
+        with self.assertRaisesRegex(ProviderError, "^write_mission_admission_paused$"):
+            provider.resume_mission(child, "resume:768", "spec-768", {"verified": True})
+        self.assertEqual(provider._request.call_args_list[0].args, ("GET", f"/api/conversations/{child}"))
+        self.assertEqual(len(provider._request.call_args_list), 1)
+
+        resumed = OpenHandsProvider("http://openhands", "key", "http://public")
+        resumed._request = Mock(return_value={})
+        self.assertTrue(
+            resumed.resume_mission(child, "resume:after-proof", "spec-768", {"forwardProof": "PASS"})["accepted"]
+        )
+        self.assertEqual(resumed._request.call_args.args[0:2], ("POST", f"/api/conversations/{child}/events"))
+
+    def test_live_inventory_and_main_routed_drain_are_stateless_and_terminal_safe(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        tags = {"project": "evex-u", "evexrole": "role-child", "evexchildrole": "writer", "evexparent": str(main), "evextask": "writer-768"}
+        active = {"id": str(child), "tags": tags, "execution_status": "running"}
+        terminal = {"id": str(child), "tags": tags, "execution_status": "finished"}
+        provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)
+        provider._request = Mock(side_effect=[
+            {"items": [active]}, {"items": [terminal]}, active,
+            {"execution_status": "idle"}, {},
+        ])
+
+        first = provider.write_mission_inventory()
+        second = provider.write_mission_inventory()
+        self.assertFalse(first[0]["terminal"])
+        self.assertTrue(second[0]["terminal"])
+        result = provider.request_write_mission_drain(first[0])
+
+        self.assertEqual(result, {"accepted": True, "terminal": False, "childId": str(child), "messageKey": f"quiesce:{child}"})
+        event = provider._request.call_args_list[-1].args
+        self.assertEqual(event[0:2], ("POST", f"/api/conversations/{main}/events"))
+        self.assertIn("QUIESCE_WRITE_MISSION", event[2]["content"][0]["text"])
+        self.assertFalse(any(call.args[1] == f"/api/conversations/{child}/events" for call in provider._request.call_args_list if len(call.args) > 1))
+
 
 if __name__ == "__main__":
     unittest.main()

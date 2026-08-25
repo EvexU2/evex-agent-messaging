@@ -36,12 +36,22 @@ class MessagingProvider(Protocol):
 class MessagingService:
     """Small stateless facade; semantic replay is keyed in the message body, not persisted here."""
 
-    def __init__(self, provider: MessagingProvider, secret: bytes, *, clock=None) -> None:
+    def __init__(
+        self,
+        provider: MessagingProvider,
+        secret: bytes,
+        *,
+        clock=None,
+        write_mission_admission_paused: bool = False,
+    ) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
+        if not isinstance(write_mission_admission_paused, bool):
+            raise ValueError("write Mission admission pause must be boolean")
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._write_mission_admission_paused = write_mission_admission_paused
 
     def readiness(self) -> bool:
         """Return whether this configured provider can serve its active role now."""
@@ -71,6 +81,8 @@ class MessagingService:
             raise CapabilityError("only a Main may create a Child")
         if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair"}:
             raise CapabilityError("unsupported Child role")
+        if role in {"spec", "writer"} and self._write_mission_admission_paused:
+            raise CapabilityError("write_mission_admission_paused")
         if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)

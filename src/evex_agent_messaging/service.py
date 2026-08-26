@@ -27,7 +27,9 @@ class MessagingProvider(Protocol):
     def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str], model: str, reasoning_effort: str) -> dict[str, Any]: ...
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
-    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
+    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any], owning_main_id: uuid.UUID | None = None) -> dict[str, Any]: ...
+    def send_child_message(self, child_id: uuid.UUID, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
+    def replacement_cancelled(self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID) -> bool: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def readiness(self) -> bool: ...
@@ -69,6 +71,7 @@ class MessagingService:
         capabilities: list[str] | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        replacement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent = verify_capability(
             parent_capability,
@@ -86,6 +89,8 @@ class MessagingService:
         if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
+        if replacement is not None:
+            self._validate_replacement(parent.child_id, task_key, mission_payload, replacement)
         mutations = mission_payload["allowedMutations"]
         if role in {"reviewer", "qa", "plan-author"} and mutations:
             if role == "plan-author":
@@ -245,7 +250,7 @@ class MessagingService:
         message_key: str,
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        self._main_child_control_capability(
+        capability = self._main_child_control_capability(
             token, target_id, task_key, "resume_mission"
         )
         if not isinstance(context, dict) or not context:
@@ -254,7 +259,9 @@ class MessagingService:
             copied_context = json.loads(json.dumps(context, separators=(",", ":")))
         except (TypeError, ValueError) as exc:
             raise CapabilityError("resume context must be JSON") from exc
-        return self._provider.resume_mission(target_id, message_key, task_key, copied_context)
+        return self._provider.resume_mission(
+            target_id, message_key, task_key, copied_context, capability.owning_main_id
+        )
 
     def get_usage(
         self, token: str, target_id: uuid.UUID, task_key: str
@@ -307,7 +314,13 @@ class MessagingService:
         if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
             raise CapabilityError("result messageKey must be bounded and non-empty")
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
-        return self._provider.send_message(capability.owning_main_id, message_key, kind, _compact(envelope))
+        return self._provider.send_child_message(
+            capability.child_id,
+            capability.owning_main_id,
+            message_key,
+            kind,
+            _compact(envelope),
+        )
 
     def request_user_decision(self, token: str, question: str, options: list[str]) -> dict[str, Any]:
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
@@ -318,7 +331,13 @@ class MessagingService:
         import hashlib
         message_key = "decision:" + hashlib.sha256(_compact({"question": question.strip(), "options": options}).encode()).hexdigest()[:24]
         envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
-        return self._provider.send_message(capability.owning_main_id, message_key, "NEEDS_INPUT", _compact(envelope))
+        return self._provider.send_child_message(
+            capability.child_id,
+            capability.owning_main_id,
+            message_key,
+            "NEEDS_INPUT",
+            _compact(envelope),
+        )
 
     def publish_navigation_links(self, token: str, links: dict[str, str]) -> dict[str, Any]:
         if not isinstance(links, dict) or not links or len(links) > 12 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in links.items()):
@@ -331,6 +350,59 @@ class MessagingService:
 
     def _capability_target(self, token: str) -> uuid.UUID:
         return inspect_capability(token, self._secret).child_id
+
+    def _validate_replacement(
+        self,
+        owning_main_id: uuid.UUID,
+        new_task_key: str,
+        mission: dict[str, Any],
+        replacement: object,
+    ) -> None:
+        if not isinstance(replacement, dict) or set(replacement) != {
+            "cancelledChildId", "cancelledTaskKey", "cancellationKey",
+            "postTerminalProjection", "preAdmissionProjection",
+        }:
+            raise CapabilityError("replacement proof is incomplete")
+        try:
+            cancelled_child = uuid.UUID(str(replacement["cancelledChildId"]))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CapabilityError("replacement Child identity is invalid") from exc
+        cancelled_task = replacement["cancelledTaskKey"]
+        cancellation_key = replacement["cancellationKey"]
+        if (
+            not isinstance(cancelled_task, str)
+            or not cancelled_task
+            or cancelled_task == new_task_key
+            or deterministic_child_id(owning_main_id, cancelled_task) != cancelled_child
+            or not isinstance(cancellation_key, str)
+            or not cancellation_key
+            or len(cancellation_key) > 200
+        ):
+            raise CapabilityError("replacement must use a new deterministic Child")
+        projections = (
+            replacement["postTerminalProjection"],
+            replacement["preAdmissionProjection"],
+        )
+        try:
+            encoded = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in projections]
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("replacement projection must be JSON") from exc
+        if any(not isinstance(value, dict) for value in projections):
+            raise CapabilityError("replacement projection must be an object")
+        if encoded[0] != encoded[1]:
+            raise CapabilityError("replacement projection changed; reconcile and restart the two-read gate")
+        projection = projections[0]
+        if (
+            projection.get("branch") != mission["checkout"]["branch"]
+            or projection.get("headSha") != mission["checkout"]["headSha"]
+            or not isinstance(projection.get("draftPullRequest"), str)
+            or not projection["draftPullRequest"].strip()
+        ):
+            raise CapabilityError("replacement projection is not authorized for the Mission checkout")
+        if not self._provider.replacement_cancelled(
+            cancelled_child, cancelled_task, cancellation_key, owning_main_id
+        ):
+            raise CapabilityError("replacement requires native terminal CANCELLED proof")
 
 
 def _compact(value: dict[str, Any]) -> str:

@@ -24,6 +24,8 @@ class ProviderError(RuntimeError):
 
 
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
+_NATIVE_CANCELLED = "cancelled"
+_RESULT_TERMINAL_STATES = frozenset({"finished", "error", "stuck"})
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -455,7 +457,7 @@ class OpenHandsProvider:
         path = f"/api/conversations/{target_id}"
         for _ in range(300):
             status = self._request("GET", path).get("execution_status")
-            if status in {"finished", "error", "stuck"}:
+            if status in _RESULT_TERMINAL_STATES | {_NATIVE_CANCELLED}:
                 return status
             self.sleeper(0.1)
         raise ProviderError("OpenHands Child did not reach terminal state")
@@ -636,6 +638,41 @@ class OpenHandsProvider:
         self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": f"{kind}\n{text}"}], "run": True})
         return {"accepted": True, "messageKey": message_key}
 
+    def send_child_message(
+        self,
+        child_id: uuid.UUID,
+        target_id: uuid.UUID,
+        message_key: str,
+        kind: str,
+        text: str,
+    ) -> dict:
+        """Deliver one Child callback unless native cancellation already won."""
+        with _CHECKOUT_LOCKS[child_id.int % len(_CHECKOUT_LOCKS)]:
+            status = self._request(
+                "GET", f"/api/conversations/{child_id}"
+            ).get("execution_status")
+            if status == _NATIVE_CANCELLED:
+                return {
+                    "accepted": False,
+                    "messageKey": message_key,
+                    "outcome": "CANCELLED",
+                }
+            try:
+                envelope = json.loads(text)
+                task_key = envelope["taskKey"]
+            except (KeyError, TypeError, ValueError):
+                raise ProviderError("OpenHands Child callback envelope is invalid") from None
+            result_key = self._terminal_result_key(target_id, child_id, task_key)
+            if status in _RESULT_TERMINAL_STATES:
+                return self._settled(message_key, task_key, "RESULT")
+            if result_key is not None:
+                if result_key == message_key:
+                    return {"accepted": True, "messageKey": message_key, "outcome": "RESULT"}
+                return self._settled(message_key, task_key, "RESULT")
+            if self._has_resume(child_id, task_key):
+                return self._settled(message_key, task_key, "RESUMED")
+            return self.send_message(target_id, message_key, kind, text)
+
     def cancel_mission(
         self,
         target_id: uuid.UUID,
@@ -644,50 +681,177 @@ class OpenHandsProvider:
         owning_main_id: uuid.UUID,
     ) -> dict:
         path = f"/api/conversations/{target_id}"
-        current = self._request("GET", path)
-        status = current.get("execution_status")
-        if status in {"finished", "error", "stuck"}:
-            return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "terminal": True}
-        if status == "running":
-            self._request("POST", f"{path}/interrupt", {})
-        for _ in range(20):
+        with _CHECKOUT_LOCKS[target_id.int % len(_CHECKOUT_LOCKS)]:
             current = self._request("GET", path)
             status = current.get("execution_status")
-            if status in {"finished", "error", "stuck"}:
-                return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "terminal": True}
-            if status in {"paused", "idle"}:
-                envelope = {
-                    "childId": str(target_id),
-                    "messageKey": message_key,
-                    "owningMainId": str(owning_main_id),
-                    "targetId": str(target_id),
-                    "taskKey": task_key,
-                }
-                self._request(
-                    "POST",
-                    f"{path}/events",
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "text",
-                                "text": "CANCEL_MISSION\n"
-                                + json.dumps(envelope, sort_keys=True, separators=(",", ":")),
-                            }
-                        ],
-                        "run": True,
-                    },
+            if status == _NATIVE_CANCELLED:
+                return self._cancellation_replay(
+                    target_id, task_key, message_key, owning_main_id
                 )
-                self.wait_until_terminal(target_id)
-                return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "terminal": True}
-            self.sleeper(0.1)
+            if status in _RESULT_TERMINAL_STATES or self._has_terminal_result(
+                owning_main_id, target_id, task_key
+            ):
+                return self._settled(message_key, task_key, "RESULT")
+            if owning_main_id is not None and self._has_resume(target_id, task_key):
+                return self._settled(message_key, task_key, "RESUMED")
+            if status == "running":
+                self._request("POST", f"{path}/interrupt", {})
+            for _ in range(20):
+                current = self._request("GET", path)
+                status = current.get("execution_status")
+                if status == _NATIVE_CANCELLED:
+                    return self._cancelled(message_key, task_key)
+                if status in _RESULT_TERMINAL_STATES:
+                    return self._settled(message_key, task_key, "RESULT")
+                if status in {"paused", "idle"}:
+                    envelope = {
+                        "childId": str(target_id),
+                        "messageKey": message_key,
+                        "owningMainId": str(owning_main_id),
+                        "targetId": str(target_id),
+                        "taskKey": task_key,
+                    }
+                    self._request(
+                        "POST",
+                        f"{path}/events",
+                        {
+                            "role": "user",
+                            "content": [{"type": "text", "text": "CANCEL_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}],
+                            "run": True,
+                        },
+                    )
+                    if self.wait_until_terminal(target_id) == _NATIVE_CANCELLED:
+                        return self._cancelled(message_key, task_key)
+                    return self._settled(message_key, task_key, "RESULT")
+                self.sleeper(0.1)
         raise ProviderError("OpenHands Child did not become cancellation-wakeable")
 
-    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict) -> dict:
-        if self.write_mission_admission_paused:
+    def resume_mission(
+        self,
+        target_id: uuid.UUID,
+        message_key: str,
+        task_key: str,
+        context: dict,
+        owning_main_id: uuid.UUID | None = None,
+    ) -> dict:
+        with _CHECKOUT_LOCKS[target_id.int % len(_CHECKOUT_LOCKS)]:
             current = self._request("GET", f"/api/conversations/{target_id}")
-            if self._write_mission_facts(current) is not None:
-                raise ProviderError("write_mission_admission_paused")
-        envelope = {"messageKey": message_key, "taskKey": task_key, "context": context}
-        self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
-        return {"accepted": True, "messageKey": message_key, "taskKey": task_key}
+            if current.get("execution_status") == _NATIVE_CANCELLED:
+                return self._settled(message_key, task_key, "CANCELLED")
+            if current.get("execution_status") in _RESULT_TERMINAL_STATES or (
+                owning_main_id is not None
+                and self._has_terminal_result(owning_main_id, target_id, task_key)
+            ):
+                return self._settled(message_key, task_key, "RESULT")
+            if owning_main_id is not None and self._has_resume(target_id, task_key):
+                return self._settled(message_key, task_key, "RESUMED")
+            if self.write_mission_admission_paused:
+                if self._write_mission_facts(current) is not None:
+                    raise ProviderError("write_mission_admission_paused")
+            envelope = {"messageKey": message_key, "taskKey": task_key, "context": context}
+            self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
+            return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "outcome": "RESUMED"}
+
+    def replacement_cancelled(
+        self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
+    ) -> bool:
+        with _CHECKOUT_LOCKS[target_id.int % len(_CHECKOUT_LOCKS)]:
+            status = self._request(
+                "GET", f"/api/conversations/{target_id}"
+            ).get("execution_status")
+            return status == _NATIVE_CANCELLED and self._has_cancel(
+                target_id, task_key, message_key, owning_main_id
+            )
+
+    @staticmethod
+    def _cancelled(message_key: str, task_key: str) -> dict:
+        return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "outcome": "CANCELLED"}
+
+    @staticmethod
+    def _settled(message_key: str, task_key: str, outcome: str) -> dict:
+        return {"accepted": False, "messageKey": message_key, "taskKey": task_key, "outcome": outcome}
+
+    def _cancellation_replay(
+        self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
+    ) -> dict:
+        if self._has_cancel(target_id, task_key, message_key, owning_main_id):
+            return self._cancelled(message_key, task_key)
+        return self._settled(message_key, task_key, "CANCELLED")
+
+    def _has_resume(self, target_id: uuid.UUID, task_key: str) -> bool:
+        return self._has_control_event(target_id, "RESUME_MISSION", task_key)
+
+    def _has_cancel(
+        self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
+    ) -> bool:
+        return self._has_control_event(
+            target_id, "CANCEL_MISSION", task_key, message_key, owning_main_id
+        )
+
+    def _has_terminal_result(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> bool:
+        return self._terminal_result_key(owning_main_id, child_id, task_key) is not None
+
+    def _terminal_result_key(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> str | None:
+        for text in self._event_texts(owning_main_id):
+            if not text.startswith("RESULT\n"):
+                continue
+            try:
+                envelope = json.loads(text.removeprefix("RESULT\n"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                envelope.get("childId") == str(child_id)
+                and envelope.get("taskKey") == task_key
+                and envelope.get("kind") == "RESULT"
+                and isinstance(envelope.get("messageKey"), str)
+            ):
+                return envelope["messageKey"]
+        return None
+
+    def _has_control_event(
+        self,
+        target_id: uuid.UUID,
+        kind: str,
+        task_key: str,
+        message_key: str | None = None,
+        owning_main_id: uuid.UUID | None = None,
+    ) -> bool:
+        prefix = kind + "\n"
+        for text in self._event_texts(target_id):
+            if not text.startswith(prefix):
+                continue
+            try:
+                envelope = json.loads(text.removeprefix(prefix))
+            except (TypeError, ValueError):
+                continue
+            if envelope.get("taskKey") != task_key:
+                continue
+            if message_key is not None and envelope.get("messageKey") != message_key:
+                continue
+            if owning_main_id is not None and envelope.get("owningMainId") != str(owning_main_id):
+                continue
+            return True
+        return False
+
+    def _event_texts(self, conversation_id: uuid.UUID) -> list[str]:
+        response = self._request(
+            "GET", f"/api/conversations/{conversation_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC"
+        )
+        values = response.get("items") if isinstance(response, dict) else None
+        if not isinstance(values, list):
+            raise ProviderError("OpenHands control history is unavailable")
+        texts = []
+        for event in values:
+            message = event.get("llm_message") if isinstance(event, dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            texts.extend(
+                item["text"] for item in content
+                if isinstance(item, dict) and isinstance(item.get("text"), str)
+            )
+        return texts

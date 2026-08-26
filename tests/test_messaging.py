@@ -32,9 +32,17 @@ class FakeProvider:
         self.calls.append(("cancel", target_id, message_key, task_key, owning_main_id))
         return {"accepted": True}
 
-    def resume_mission(self, target_id, message_key, task_key, context):
-        self.calls.append(("resume", target_id, message_key, task_key, context))
+    def resume_mission(self, target_id, message_key, task_key, context, owning_main_id=None):
+        self.calls.append(("resume", target_id, message_key, task_key, context, owning_main_id))
         return {"accepted": True}
+
+    def send_child_message(self, child_id, target_id, message_key, kind, text):
+        self.calls.append(("child-send", child_id, target_id, message_key, kind, text))
+        return {"accepted": True, "messageKey": message_key}
+
+    def replacement_cancelled(self, target_id, task_key, message_key, owning_main_id):
+        self.calls.append(("replacement-cancelled", target_id, task_key, message_key, owning_main_id))
+        return True
 
     def wait_until_terminal(self, target_id):
         self.calls.append(("wait-terminal", target_id))
@@ -165,6 +173,59 @@ class MessagingTest(unittest.TestCase):
                 self.main_token(), foreign_child, "writer-604", "cancel-foreign"
             )
 
+    def test_replacement_requires_terminal_proof_new_identity_and_stable_authorized_projection(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        cancelled_task = "writer-604"
+        cancelled_child = deterministic_child_id(self.main, cancelled_task)
+        mission = self.mission()
+        mission["checkout"] = {**mission["checkout"], "branch": "fix/605", "headSha": "b" * 40}
+        projection = {
+            "branch": "fix/605",
+            "headSha": "b" * 40,
+            "draftPullRequest": "https://github.com/EvexU2/evex-agent-messaging/pull/34",
+        }
+        proof = {
+            "cancelledChildId": str(cancelled_child),
+            "cancelledTaskKey": cancelled_task,
+            "cancellationKey": "cancel:604",
+            "postTerminalProjection": projection,
+            "preAdmissionProjection": dict(projection),
+        }
+
+        replacement = self.create(
+            service, self.main_token(), "writer-605", "writer", mission, replacement=proof
+        )
+
+        self.assertNotEqual(replacement["childId"], str(cancelled_child))
+        self.assertEqual(provider.calls[0][0], "replacement-cancelled")
+        self.assertEqual(provider.calls[1][0], "create")
+
+        changed = {**proof, "preAdmissionProjection": {**projection, "headSha": "c" * 40}}
+        with self.assertRaisesRegex(CapabilityError, "reconcile and restart"):
+            self.create(service, self.main_token(), "writer-606", "writer", mission, replacement=changed)
+        self.assertEqual(len(provider.calls), 2)
+
+    def test_replacement_requires_provider_native_cancellation_proof(self):
+        provider = FakeProvider()
+        provider.replacement_cancelled = lambda *_args: False
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        task = "writer-604"
+        projection = {
+            "branch": "fix/604", "headSha": "a" * 40,
+            "draftPullRequest": "https://github.com/EvexU2/evex-agent-messaging/pull/34",
+        }
+        proof = {
+            "cancelledChildId": str(deterministic_child_id(self.main, task)),
+            "cancelledTaskKey": task,
+            "cancellationKey": "cancel:604",
+            "postTerminalProjection": projection,
+            "preAdmissionProjection": dict(projection),
+        }
+
+        with self.assertRaisesRegex(CapabilityError, "native terminal CANCELLED"):
+            self.create(service, self.main_token(), "writer-605", "writer", self.mission(), replacement=proof)
+
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
@@ -248,7 +309,11 @@ class MessagingTest(unittest.TestCase):
         self.assertTrue(service.send_to_parent(child["capabilityRef"], {"messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
         self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
-        self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main, self.main, self.main])
+        self.assertEqual(
+            [call[2] for call in provider.calls if call[0] == "child-send"],
+            [self.main, self.main],
+        )
+        self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main])
 
     def test_send_to_parent_derives_transport_fields_from_bound_result(self):
         provider = FakeProvider()
@@ -264,9 +329,9 @@ class MessagingTest(unittest.TestCase):
 
         self.assertTrue(first["accepted"])
         self.assertEqual(first["messageKey"], second["messageKey"])
-        sent = [call for call in provider.calls if call[0] == "send"]
-        self.assertEqual(sent[-1][3], "RESULT")
-        envelope = json.loads(sent[-1][4])
+        sent = [call for call in provider.calls if call[0] == "child-send"]
+        self.assertEqual(sent[-1][4], "RESULT")
+        envelope = json.loads(sent[-1][5])
         self.assertEqual(envelope["kind"], "RESULT")
         self.assertEqual(json.loads(envelope["text"])["outcome"], "PASS")
 
@@ -295,8 +360,8 @@ class MessagingTest(unittest.TestCase):
         )
 
         self.assertTrue(result["accepted"])
-        self.assertEqual(provider.calls[-1][1], self.main)
-        self.assertEqual(provider.calls[-1][3], "RESULT")
+        self.assertEqual(provider.calls[-1][2], self.main)
+        self.assertEqual(provider.calls[-1][4], "RESULT")
 
     def test_deputy_specialist_reports_to_the_creating_deputy(self):
         provider = FakeProvider()
@@ -334,7 +399,7 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(reviewer_capability.owning_main_id, deputy)
         self.assertEqual(provider.calls[0][5]["owningMainId"], str(deputy))
         self.assertTrue(sent["accepted"])
-        self.assertEqual(provider.calls[-1][1], deputy)
+        self.assertEqual(provider.calls[-1][2], deputy)
 
     def test_expired_or_wrong_role_capability_fails(self):
         provider = FakeProvider()

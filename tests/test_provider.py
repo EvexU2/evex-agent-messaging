@@ -9,7 +9,7 @@ import tempfile
 import uuid
 import unittest
 
-from evex_agent_messaging.provider import OpenHandsProvider, ProviderError
+from evex_agent_messaging.provider import OpenHandsProvider, ProviderError, _compact_json
 
 
 class OpenHandsProviderTest(unittest.TestCase):
@@ -979,8 +979,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"execution_status": "idle"},
             {"items": []},
             {"items": [{"llm_message": {"content": [{"text": first_resume}, {"text": mission}]}}]},
-            {"items": [{"llm_message": {"content": [{"text": waiting}]}}]},
             {"items": [{"llm_message": {"content": [{"text": first_resume}, {"text": mission}]}}]},
+            {"items": [{"llm_message": {"content": [{"text": waiting}]}}]},
             {},
         ])
 
@@ -991,6 +991,88 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(result["accepted"])
         self.assertEqual(result["outcome"], "RESUMED")
         self.assertIn(provider._resumed_callback_generation(first, "resume:second"), provider._request.call_args.args[2]["content"][0]["text"])
+
+    def test_current_result_after_resume_ignores_authenticated_prior_input(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "spec-614"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        first = provider._initial_callback_generation(main, child, task_key)
+        second = provider._resumed_callback_generation(first, "resume:first")
+        mission = "MISSION\n" + _compact_json(provider._signed_control_envelope("MISSION", {
+            "callbackGeneration": first, "childId": str(child),
+            "owningMainId": str(main), "taskKey": task_key,
+        }))
+        resume = "RESUME_MISSION\n" + _compact_json(provider._signed_control_envelope("RESUME_MISSION", {
+            "callbackGeneration": second, "childId": str(child), "context": {"answer": "A"},
+            "messageKey": "resume:first", "owningMainId": str(main), "taskKey": task_key,
+        }))
+        prior_wait = "NEEDS_INPUT\n" + _compact_json(provider._signed_control_envelope("NEEDS_INPUT", {
+            "callbackGeneration": first, "childId": str(child), "kind": "NEEDS_INPUT",
+            "messageKey": "decision:first", "owningMainId": str(main), "taskKey": task_key,
+        }))
+        callback = _compact_json({
+            "callbackGeneration": second, "childId": str(child), "kind": "RESULT",
+            "messageKey": "result:second", "owningMainId": str(main), "taskKey": task_key,
+            "text": "{}",
+        })
+        provider._request = Mock(side_effect=[
+            {"execution_status": "idle"}, {"execution_status": "idle"}, {},
+        ])
+        provider._event_texts = Mock(side_effect=[
+            [resume, mission], [], [resume, mission], [prior_wait],
+        ])
+
+        self.assertEqual(
+            provider.send_child_message(child, main, "result:second", "RESULT", callback),
+            {"accepted": True, "messageKey": "result:second"},
+        )
+        self.assertEqual(
+            provider._request.call_args_list[-1].args[0:2],
+            ("POST", f"/api/conversations/{main}/events"),
+        )
+
+    def test_two_resume_chain_ignores_prior_inputs_and_rejects_ambiguous_current_input(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "spec-614"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        first = provider._initial_callback_generation(main, child, task_key)
+        second = provider._resumed_callback_generation(first, "resume:first")
+        third = provider._resumed_callback_generation(second, "resume:second")
+
+        def control(kind, envelope):
+            return kind + "\n" + _compact_json(provider._signed_control_envelope(kind, envelope))
+
+        mission = control("MISSION", {
+            "callbackGeneration": first, "childId": str(child),
+            "owningMainId": str(main), "taskKey": task_key,
+        })
+        resume_one = control("RESUME_MISSION", {
+            "callbackGeneration": second, "childId": str(child), "context": {"answer": "A"},
+            "messageKey": "resume:first", "owningMainId": str(main), "taskKey": task_key,
+        })
+        resume_two = control("RESUME_MISSION", {
+            "callbackGeneration": third, "childId": str(child), "context": {"answer": "B"},
+            "messageKey": "resume:second", "owningMainId": str(main), "taskKey": task_key,
+        })
+
+        def waiting(generation, key):
+            return control("NEEDS_INPUT", {
+                "callbackGeneration": generation, "childId": str(child), "kind": "NEEDS_INPUT",
+                "messageKey": key, "owningMainId": str(main), "taskKey": task_key,
+            })
+
+        chain = [resume_two, resume_one, mission]
+        provider._event_texts = Mock(side_effect=[chain, [waiting(first, "decision:one"), waiting(second, "decision:two")]])
+        self.assertFalse(provider._has_waiting_input(main, child, task_key))
+
+        provider._event_texts = Mock(side_effect=[chain, [waiting(third, "decision:three")]])
+        self.assertTrue(provider._has_waiting_input(main, child, task_key))
+
+        provider._event_texts = Mock(side_effect=[chain, [waiting(third, "decision:three"), waiting(third, "decision:four")]])
+        with self.assertRaisesRegex(ProviderError, "history is ambiguous"):
+            provider._has_waiting_input(main, child, task_key)
 
     def test_terminal_cancellation_rejects_late_child_callback_and_resume(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -1106,7 +1188,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"execution_status": "idle"},
         ])
         provider._event_texts = Mock(side_effect=[
-            [mission, resume], [], [mission, resume], [mission, resume], [result_event], [mission, resume],
+            [mission, resume], [], [mission, resume], [], [mission, resume], [result_event], [mission, resume],
         ])
 
         self.assertEqual(

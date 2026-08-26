@@ -941,9 +941,9 @@ class OpenHandsProvider:
             {"messageKey": message_key, "previous": previous, "kind": "resume"}
         )
 
-    def _current_callback_generation(
+    def _callback_generation_chain(
         self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
-    ) -> str:
+    ) -> list[str]:
         initial = self._initial_callback_generation(owning_main_id, child_id, task_key)
         missions = []
         resumes = []
@@ -971,7 +971,7 @@ class OpenHandsProvider:
             or not hmac.compare_digest(str(missions[0].get("callbackGeneration")), initial)
         ):
             raise ProviderError("OpenHands Child callback generation history is incomplete")
-        generation = initial
+        generations = [initial]
         for envelope in reversed(resumes):
             message_key = envelope.get("messageKey")
             next_generation = envelope.get("callbackGeneration")
@@ -984,12 +984,17 @@ class OpenHandsProvider:
                 or not _CALLBACK_GENERATION.fullmatch(next_generation)
                 or not hmac.compare_digest(
                     next_generation,
-                    self._resumed_callback_generation(generation, message_key),
+                    self._resumed_callback_generation(generations[-1], message_key),
                 )
             ):
                 raise ProviderError("OpenHands Child callback generation history is incomplete")
-            generation = next_generation
-        return generation
+            generations.append(next_generation)
+        return generations
+
+    def _current_callback_generation(
+        self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
+    ) -> str:
+        return self._callback_generation_chain(child_id, owning_main_id, task_key)[-1]
 
     def _has_resume(
         self, target_id: uuid.UUID, task_key: str, owning_main_id: uuid.UUID
@@ -1067,6 +1072,11 @@ class OpenHandsProvider:
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> bool:
+        generations = self._callback_generation_chain(
+            child_id, owning_main_id, task_key
+        )
+        current_generation = generations[-1]
+        current = []
         for envelope in self._control_envelopes(owning_main_id, "NEEDS_INPUT"):
             if (
                 envelope.get("childId") == str(child_id)
@@ -1074,19 +1084,22 @@ class OpenHandsProvider:
                 and envelope.get("owningMainId") == str(owning_main_id)
                 and envelope.get("taskKey") == task_key
             ):
-                current_generation = self._current_callback_generation(
-                    child_id, owning_main_id, task_key
-                )
                 if (
                     not self._valid_control_signature("NEEDS_INPUT", envelope)
                     or not isinstance(envelope.get("callbackGeneration"), str)
-                    or not hmac.compare_digest(
-                        envelope["callbackGeneration"], current_generation
-                    )
                 ):
                     raise ProviderError("OpenHands control history is unauthenticated")
-                return True
-        return False
+                matches_chain = any(
+                    hmac.compare_digest(envelope["callbackGeneration"], generation)
+                    for generation in generations
+                )
+                if not matches_chain:
+                    raise ProviderError("OpenHands control history is unauthenticated")
+                if hmac.compare_digest(envelope["callbackGeneration"], current_generation):
+                    current.append(envelope)
+        if len(current) > 1:
+            raise ProviderError("OpenHands control history is ambiguous")
+        return bool(current)
 
     def _event_texts(self, conversation_id: uuid.UUID) -> list[str]:
         texts = []

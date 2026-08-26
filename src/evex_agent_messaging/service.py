@@ -21,22 +21,31 @@ from .capability import (
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
+_SPECIFICATION_PR_URL = re.compile(
+    r"https://github\.com/(EvexU2/[A-Za-z0-9_-]+)/pull/([1-9][0-9]*)"
+)
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 _RESUME_AUTHORITY_KEYS = frozenset(
     {
         "allowedmutations",
         "authority",
         "branch",
+        "callback",
+        "candidate",
         "capabilities",
         "checkout",
+        "head",
         "headsha",
         "mission",
         "model",
         "prohibitions",
+        "pullrequest",
+        "ref",
         "reasoningeffort",
         "repository",
         "role",
         "skills",
+        "specificationpr",
     }
 )
 
@@ -107,6 +116,8 @@ class MessagingService:
         if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
+        if role == "reviewer":
+            self._validate_reviewer_specification_pr(mission_payload)
         if replacement is not None:
             self._validate_replacement(parent.child_id, task_key, mission_payload, replacement)
         mutations = mission_payload["allowedMutations"]
@@ -240,6 +251,22 @@ class MessagingService:
             copied["displayTitle"] = display_title
         return copied
 
+    @staticmethod
+    def _validate_reviewer_specification_pr(mission: dict[str, Any]) -> None:
+        links = mission["links"]
+        if "specificationPr" not in links:
+            return
+        specification_pr = links.get("specificationPr")
+        match = (
+            _SPECIFICATION_PR_URL.fullmatch(specification_pr)
+            if isinstance(specification_pr, str)
+            else None
+        )
+        if match is None or match.group(1) != mission["checkout"]["repository"]:
+            raise CapabilityError(
+                "reviewer mission requires a canonical specificationPr in its checkout repository"
+            )
+
     def send_message(
         self, token: str, target_id: uuid.UUID, message_key: str, kind: str, text: str
     ) -> dict[str, Any]:
@@ -291,7 +318,16 @@ class MessagingService:
             raise CapabilityError("resume context must be JSON") from exc
         if len(_compact(copied_context).encode()) > 20000:
             raise CapabilityError("resume context must be bounded")
-        if self._contains_resume_authority(copied_context):
+        current_revision = copied_context.get("currentRevision")
+        if current_revision is not None and (
+            not isinstance(current_revision, str)
+            or len(current_revision) != 40
+            or any(character not in "0123456789abcdef" for character in current_revision)
+        ):
+            raise CapabilityError("resume currentRevision must be an exact commit SHA")
+        if self._contains_resume_authority(
+            copied_context
+        ) or self._contains_noncanonical_revision(copied_context):
             raise CapabilityError("resume context cannot expand Mission authority")
         return self._provider.resume_mission(
             target_id, message_key, task_key, copied_context, capability.owning_main_id
@@ -307,6 +343,26 @@ class MessagingService:
             )
         if isinstance(value, list):
             return any(cls._contains_resume_authority(item) for item in value)
+        return False
+
+    @classmethod
+    def _contains_noncanonical_revision(
+        cls, value: Any, *, root: bool = True
+    ) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key).replace("_", "").lower()
+                if normalized == "currentrevision" and not (
+                    root and key == "currentRevision"
+                ):
+                    return True
+                if cls._contains_noncanonical_revision(item, root=False):
+                    return True
+        elif isinstance(value, list):
+            return any(
+                cls._contains_noncanonical_revision(item, root=False)
+                for item in value
+            )
         return False
 
     def get_usage(

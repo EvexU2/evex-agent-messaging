@@ -89,6 +89,13 @@ class MessagingTest(unittest.TestCase):
         value["allowedMutations"] = []
         return value
 
+    def reviewer_mission(self):
+        value = self.read_only_mission()
+        value["links"]["specificationPr"] = (
+            "https://github.com/EvexU2/evex-u-core/pull/836"
+        )
+        return value
+
     def create(self, service, *args, **kwargs):
         kwargs.setdefault("model", "gpt-5.6-luna")
         kwargs.setdefault("reasoning_effort", "medium")
@@ -139,6 +146,86 @@ class MessagingTest(unittest.TestCase):
                     self.main_token(), child, "writer-604", "resume-authority", context
                 )
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
+
+    def test_reviewer_candidate_authority_is_one_canonical_mission_pr(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        admitted = self.create(
+            service,
+            self.main_token(),
+            "reviewer-836",
+            "reviewer",
+            self.reviewer_mission(),
+        )
+
+        self.assertEqual(
+            provider.calls[0][5]["links"]["specificationPr"],
+            "https://github.com/EvexU2/evex-u-core/pull/836",
+        )
+        child = uuid.UUID(admitted["childId"])
+        service.resume_mission(
+            self.main_token(),
+            child,
+            "reviewer-836",
+            "resume:repaired",
+            {"currentRevision": "b" * 40, "findings": ["P2-1"]},
+        )
+        self.assertEqual(provider.calls[-1][4]["currentRevision"], "b" * 40)
+
+        for value in (
+            "http://github.com/EvexU2/evex-u-core/pull/836",
+            "https://github.com/evexu2/evex-u-core/pull/836",
+            "https://github.com/EvexU2/evex-u-core/pull/836/",
+            "https://github.com/EvexU2/foreign/pull/836",
+        ):
+            mission = self.reviewer_mission()
+            mission["links"]["specificationPr"] = value
+            with self.subTest(value=value), self.assertRaisesRegex(
+                CapabilityError, "canonical specificationPr"
+            ):
+                self.create(
+                    service,
+                    self.main_token(),
+                    "reviewer-invalid-pr-836",
+                    "reviewer",
+                    mission,
+                )
+
+    def test_resume_candidate_context_is_equality_only(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        admitted = self.create(
+            service,
+            self.main_token(),
+            "reviewer-836",
+            "reviewer",
+            self.reviewer_mission(),
+        )
+        child = uuid.UUID(admitted["childId"])
+
+        for context in (
+            {"currentRevision": "not-a-sha"},
+            {"specificationPr": "https://github.com/EvexU2/evex-u-core/pull/837"},
+            {"pullRequest": "https://github.com/EvexU2/evex-u-core/pull/837"},
+            {"candidate": "b" * 40},
+            {"ref": "refs/pull/837/head"},
+            {"head": "b" * 40},
+            {"current_revision": "b" * 40},
+        ):
+            with self.subTest(context=context), self.assertRaises(CapabilityError):
+                service.resume_mission(
+                    self.main_token(),
+                    child,
+                    "reviewer-836",
+                    "resume:authority-expansion",
+                    context,
+                )
+
+        self.assertEqual(
+            [call[0] for call in provider.calls],
+            ["create"],
+        )
 
     def test_main_reads_own_and_deterministic_child_usage_only(self):
         provider = FakeProvider()

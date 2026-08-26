@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import hashlib
 import hmac
 import http.client
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -65,6 +66,24 @@ _LONG_CONTEXT_INPUT_THRESHOLD = 272_000
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/([1-9][0-9]*)"
 )
+_SPECIFICATION_PR_URL = re.compile(
+    r"https://github\.com/(EvexU2/[A-Za-z0-9_-]+)/pull/([1-9][0-9]*)"
+)
+_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
+_RESUME_CANDIDATE_KEYS = frozenset(
+    {
+        "branch",
+        "candidate",
+        "checkout",
+        "head",
+        "headsha",
+        "pullrequest",
+        "ref",
+        "repository",
+        "specificationpr",
+        "url",
+    }
+)
 _ISSUE_TASK_KEY = re.compile(r"(?:^|-)issue-([1-9][0-9]*)(?:-|$)")
 _ROLE_TITLES = {
     "spec": "Spec",
@@ -89,6 +108,7 @@ class OpenHandsProvider:
     sleeper: object = time.sleep
     workspace_root: str = "/home/openhands/workspace/delivery"
     write_mission_admission_paused: bool = False
+    github_token: str | None = field(default=None, repr=False)
 
     def _request(
         self, method: str, path: str, body: dict | None = None, *, timeout: float | None = None
@@ -128,6 +148,77 @@ class OpenHandsProvider:
         if not isinstance(value, dict):
             raise ProviderError("OpenHands returned an invalid response")
         return value
+
+    def _read_specification_pr(self, canonical_url: str, repository: str) -> dict:
+        """Read the one Mission-bound PR through the provider-held credential."""
+        match = _SPECIFICATION_PR_URL.fullmatch(canonical_url)
+        if match is None or match.group(1) != repository:
+            raise ProviderError(
+                "Reviewer Mission specification PR does not match checkout authority"
+            )
+        token = self.github_token
+        if token is None:
+            token = os.environ.get("GITHUB_TOKEN", "")
+        if not isinstance(token, str) or not token.strip():
+            raise ProviderError("Provider GitHub credential is unavailable")
+        token = token.strip()
+        number = int(match.group(2))
+        request = urllib.request.Request(
+            f"https://api.github.com/repos/{repository}/pulls/{number}",
+            method="GET",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"Bearer {token}",
+                "User-Agent": "evex-agent-messaging",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                declared_size = response.headers.get("Content-Length")
+                if isinstance(declared_size, str) and (
+                    not declared_size.isdecimal()
+                    or int(declared_size) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES
+                ):
+                    raise ProviderError("GitHub specification PR response is invalid")
+                raw = response.read(_CONTROL_HISTORY_MAX_RESPONSE_BYTES + 1)
+                if (
+                    not isinstance(raw, bytes)
+                    or len(raw) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES
+                    or (
+                        isinstance(declared_size, str)
+                        and len(raw) != int(declared_size)
+                    )
+                ):
+                    raise ProviderError("GitHub specification PR response is invalid")
+                value = json.loads(raw)
+        except ProviderError:
+            raise
+        except (http.client.IncompleteRead, OSError, TypeError, ValueError) as exc:
+            raise ProviderError("GitHub specification PR read failed") from exc
+        if not isinstance(value, dict):
+            raise ProviderError("GitHub specification PR response is invalid")
+        base = value.get("base")
+        base_repo = base.get("repo") if isinstance(base, dict) else None
+        head = value.get("head")
+        head_sha = head.get("sha") if isinstance(head, dict) else None
+        if (
+            value.get("html_url") != canonical_url
+            or value.get("number") != number
+            or not isinstance(base_repo, dict)
+            or base_repo.get("full_name") != repository
+        ):
+            raise ProviderError("GitHub specification PR identity is invalid")
+        if value.get("state") != "open" or value.get("draft") is not True:
+            raise ProviderError("GitHub specification PR must be open and Draft")
+        if not isinstance(head_sha, str) or _COMMIT_SHA.fullmatch(head_sha) is None:
+            raise ProviderError("GitHub specification PR head is invalid")
+        return {
+            "headSha": head_sha,
+            "number": number,
+            "repository": repository,
+            "url": canonical_url,
+        }
 
     def readiness(self) -> bool:
         """Perform the single, bounded read required by the readiness probe."""
@@ -215,6 +306,21 @@ class OpenHandsProvider:
         except ProviderError as exc:
             if exc.status != 404:
                 raise
+            if role == "reviewer":
+                links = mission.get("links")
+                specification_pr = (
+                    links.get("specificationPr") if isinstance(links, dict) else None
+                )
+                if specification_pr is not None:
+                    checkout = mission.get("checkout")
+                    repository = (
+                        checkout.get("repository")
+                        if isinstance(checkout, dict)
+                        else ""
+                    )
+                    self._read_specification_pr(
+                        specification_pr, str(repository)
+                    )
             self._ensure_checkout(child_id, mission.get("checkout"))
             created = True
             profiles = self._request("GET", "/api/agent-profiles")
@@ -521,6 +627,181 @@ class OpenHandsProvider:
         if value.count("/") != 1:
             raise ProviderError("Child checkout origin is invalid")
         return value
+
+    @staticmethod
+    def _contains_candidate_authority(value: object) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).replace("_", "").lower() in _RESUME_CANDIDATE_KEYS
+                or OpenHandsProvider._contains_candidate_authority(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(
+                OpenHandsProvider._contains_candidate_authority(item)
+                for item in value
+            )
+        return False
+
+    @staticmethod
+    def _contains_noncanonical_revision(value: object, *, root: bool = True) -> bool:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                normalized = str(key).replace("_", "").lower()
+                if normalized == "currentrevision" and not (
+                    root and key == "currentRevision"
+                ):
+                    return True
+                if OpenHandsProvider._contains_noncanonical_revision(item, root=False):
+                    return True
+        elif isinstance(value, list):
+            return any(
+                OpenHandsProvider._contains_noncanonical_revision(item, root=False)
+                for item in value
+            )
+        return False
+
+    def _reviewer_resume_mission(
+        self,
+        target_id: uuid.UUID,
+        task_key: str,
+        owning_main_id: uuid.UUID,
+        context: dict,
+    ) -> dict | None:
+        missions = [
+            envelope
+            for envelope in self._control_envelopes(target_id, "MISSION")
+            if self._matches_control_identity(
+                envelope, target_id, owning_main_id, task_key
+            )
+        ]
+        if len(missions) != 1:
+            raise ProviderError("OpenHands Reviewer Mission history is ambiguous")
+        mission = missions[0]
+        if (
+            not self._valid_control_schema("MISSION", mission)
+            or not self._valid_control_signature("MISSION", mission)
+        ):
+            raise ProviderError("OpenHands Reviewer Mission is unauthenticated")
+        if mission.get("role") != "reviewer":
+            return None
+        links = mission.get("links")
+        specification_pr = (
+            links.get("specificationPr") if isinstance(links, dict) else None
+        )
+        if specification_pr is None:
+            if "currentRevision" in context:
+                raise ProviderError(
+                    "Reviewer repaired-head resume requires a canonical Mission specification PR"
+                )
+            return None
+        checkout = mission.get("checkout")
+        callback = mission.get("callback")
+        if (
+            not isinstance(checkout, dict)
+            or set(checkout) != {"repository", "branch", "headSha"}
+            or not isinstance(checkout.get("repository"), str)
+            or not isinstance(checkout.get("branch"), str)
+            or not isinstance(checkout.get("headSha"), str)
+            or _COMMIT_SHA.fullmatch(checkout["headSha"]) is None
+            or mission.get("allowedMutations") != []
+            or mission.get("capabilities") != []
+            or not isinstance(callback, dict)
+            or callback.get("tool") != "send_to_parent"
+        ):
+            raise ProviderError("Reviewer repaired-head Mission authority is invalid")
+        match = (
+            _SPECIFICATION_PR_URL.fullmatch(specification_pr)
+            if isinstance(specification_pr, str)
+            else None
+        )
+        if match is None or match.group(1) != checkout["repository"]:
+            raise ProviderError(
+                "Reviewer Mission specification PR does not match checkout authority"
+            )
+        if self._contains_candidate_authority(context) or self._contains_noncanonical_revision(
+            context
+        ):
+            raise ProviderError("Reviewer resume context cannot select candidate authority")
+        assertion = context.get("currentRevision")
+        if assertion is not None and (
+            not isinstance(assertion, str) or _COMMIT_SHA.fullmatch(assertion) is None
+        ):
+            raise ProviderError("Reviewer currentRevision assertion is invalid")
+        return mission
+
+    @staticmethod
+    def _git_is_ancestor(path: Path, ancestor: str, descendant: str) -> bool:
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "--no-optional-locks",
+                    "-C",
+                    str(path),
+                    "merge-base",
+                    "--is-ancestor",
+                    ancestor,
+                    descendant,
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ProviderError("Reviewer checkout ancestry validation failed") from exc
+        if result.returncode == 0:
+            return True
+        if result.returncode == 1:
+            return False
+        raise ProviderError("Reviewer checkout ancestry validation failed")
+
+    def _readmit_reviewer(self, target_id: uuid.UUID, mission: dict, context: dict) -> None:
+        checkout = mission["checkout"]
+        canonical_url = mission["links"]["specificationPr"]
+        repository = checkout["repository"]
+        original = checkout["headSha"]
+        initial_pr = self._read_specification_pr(canonical_url, repository)
+        repaired = initial_pr["headSha"]
+        assertion = context.get("currentRevision")
+        if assertion is not None and not hmac.compare_digest(assertion, repaired):
+            raise ProviderError(
+                "Reviewer currentRevision does not match authenticated Draft PR head"
+            )
+
+        path = self._checkout_path(target_id)
+        self._validate_existing_checkout(path, checkout, exact=False)
+        current = self._git(path, "rev-parse", "HEAD")
+        if self._git(path, "status", "--porcelain"):
+            raise ProviderError("Reviewer checkout must be clean before re-admission")
+        self._git(path, "cat-file", "-e", f"{original}^{{commit}}")
+        self._git(path, "cat-file", "-e", f"{repaired}^{{commit}}")
+        if not self._git_is_ancestor(path, original, current):
+            raise ProviderError("Reviewer checkout does not descend from original Mission head")
+        if not self._git_is_ancestor(path, current, repaired):
+            raise ProviderError("Draft PR head does not descend from Reviewer checkout")
+        if current != repaired:
+            self._git(
+                path,
+                "-c",
+                "core.hooksPath=/dev/null",
+                "merge",
+                "--ff-only",
+                "--no-edit",
+                repaired,
+            )
+
+        final_pr = self._read_specification_pr(canonical_url, repository)
+        if final_pr != initial_pr:
+            raise ProviderError("GitHub specification PR changed during re-admission")
+        self._validate_existing_checkout(path, checkout, exact=False)
+        if (
+            self._git(path, "rev-parse", "HEAD") != repaired
+            or self._git(path, "status", "--porcelain")
+            or not self._git_is_ancestor(path, original, repaired)
+        ):
+            raise ProviderError("Reviewer checkout changed during final re-admission")
 
     def wait_until_terminal(self, target_id: uuid.UUID) -> str:
         path = f"/api/conversations/{target_id}"
@@ -922,6 +1203,12 @@ class OpenHandsProvider:
                     owning_main_id, target_id, task_key
                 ):
                     return self._settled(message_key, task_key, "NEEDS_INPUT")
+            if status in _RESULT_TERMINAL_STATES:
+                reviewer_mission = self._reviewer_resume_mission(
+                    target_id, task_key, owning_main_id, context
+                )
+                if reviewer_mission is not None:
+                    self._readmit_reviewer(target_id, reviewer_mission, context)
             envelope = {
                 "callbackGeneration": self._resumed_callback_generation(
                     current_generation, message_key

@@ -6,6 +6,8 @@ from pathlib import Path
 import json
 import subprocess
 import tempfile
+import threading
+import urllib.error
 import uuid
 import unittest
 
@@ -28,6 +30,106 @@ class OpenHandsProviderTest(unittest.TestCase):
         kwargs.setdefault("model", "gpt-5.6-sol")
         kwargs.setdefault("reasoning_effort", "medium")
         return provider.create_child(*args, **kwargs)
+
+    @staticmethod
+    def _git_run(path: Path, *arguments: str) -> str:
+        return subprocess.run(
+            ["git", "-C", str(path), *arguments],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    def _reviewer_git_history(self, workspace: Path, child: uuid.UUID) -> dict[str, str | Path]:
+        source = workspace / "source"
+        source.mkdir()
+        self._git_run(source, "init")
+        self._git_run(source, "config", "user.name", "EVEX Test")
+        self._git_run(source, "config", "user.email", "test@evex.local")
+        self._git_run(source, "remote", "add", "origin", "https://github.com/EvexU2/evex-agent-messaging.git")
+        candidate = source / "candidate.txt"
+        candidate.write_text("original\n")
+        self._git_run(source, "add", "candidate.txt")
+        self._git_run(source, "commit", "-m", "original")
+        original = self._git_run(source, "rev-parse", "HEAD")
+        candidate.write_text("reviewed\n")
+        self._git_run(source, "commit", "-am", "reviewed")
+        reviewed = self._git_run(source, "rev-parse", "HEAD")
+        candidate.write_text("repaired\n")
+        self._git_run(source, "commit", "-am", "repaired")
+        repaired = self._git_run(source, "rev-parse", "HEAD")
+        checkout = workspace / f"child-{child}"
+        self._git_run(
+            source,
+            "worktree",
+            "add",
+            "-b",
+            "review/issue-836",
+            str(checkout),
+            reviewed,
+        )
+        return {
+            "source": source,
+            "checkout": checkout,
+            "original": original,
+            "reviewed": reviewed,
+            "repaired": repaired,
+        }
+
+    def _reviewer_resume_provider(
+        self, workspace: Path, child: uuid.UUID, main: uuid.UUID, task_key: str
+    ) -> tuple[OpenHandsProvider, dict[str, str | Path], list[str], list[str]]:
+        history = self._reviewer_git_history(workspace, child)
+        provider = OpenHandsProvider(
+            "http://openhands",
+            "key",
+            "http://public",
+            workspace_root=str(workspace),
+            github_token=" provider-held-token ",
+        )
+        initial = provider._initial_callback_generation(main, child, task_key)
+        mission = provider._signed_control_envelope(
+            "MISSION",
+            {
+                "callbackGeneration": initial,
+                "childId": str(child),
+                "owningMainId": str(main),
+                "taskKey": task_key,
+                "role": "reviewer",
+                "links": {
+                    "issue": "https://github.com/EvexU2/evex-u-workspace/issues/836",
+                    "specificationPr": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                },
+                "checkout": {
+                    "repository": "EvexU2/evex-agent-messaging",
+                    "branch": "review/issue-836",
+                    "headSha": history["original"],
+                },
+                "allowedMutations": [],
+                "capabilities": [],
+                "callback": {"tool": "send_to_parent"},
+            },
+        )
+        result = provider._signed_control_envelope(
+            "RESULT",
+            {
+                "callbackGeneration": initial,
+                "childId": str(child),
+                "kind": "RESULT",
+                "messageKey": "result:reviewed",
+                "owningMainId": str(main),
+                "taskKey": task_key,
+                "text": "{}",
+            },
+        )
+        child_events = ["MISSION\n" + _compact_json(mission)]
+        main_events = ["RESULT\n" + _compact_json(result)]
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: (
+                list(child_events) if conversation_id == child else list(main_events)
+            )
+        )
+        return provider, history, child_events, main_events
 
     def test_child_model_is_switched_and_verified_before_mission(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -2079,6 +2181,503 @@ class OpenHandsProviderTest(unittest.TestCase):
         ])
         with self.assertRaisesRegex(ProviderError, "inventory is incomplete"):
             provider.write_mission_inventory()
+
+    def test_authenticated_pr_boundary_returns_only_exact_admission_facts(self) -> None:
+        provider = OpenHandsProvider(
+            "http://openhands",
+            "key",
+            "http://public",
+            github_token="provider-held-token",
+        )
+        payload = {
+            "html_url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            "number": 42,
+            "state": "open",
+            "draft": True,
+            "base": {"repo": {"full_name": "EvexU2/evex-agent-messaging"}},
+            "head": {"sha": "b" * 40},
+        }
+        response = MagicMock()
+        response.headers = {"Content-Length": str(len(json.dumps(payload).encode()))}
+        response.read.return_value = json.dumps(payload).encode()
+        context = MagicMock()
+        context.__enter__.return_value = response
+
+        with patch(
+            "evex_agent_messaging.provider.urllib.request.urlopen",
+            return_value=context,
+        ) as opened:
+            facts = provider._read_specification_pr(
+                "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                "EvexU2/evex-agent-messaging",
+            )
+
+        request = opened.call_args.args[0]
+        self.assertEqual(
+            request.full_url,
+            "https://api.github.com/repos/EvexU2/evex-agent-messaging/pulls/42",
+        )
+        self.assertEqual(request.get_header("Authorization"), "Bearer provider-held-token")
+        self.assertEqual(
+            facts,
+            {
+                "headSha": "b" * 40,
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            },
+        )
+        self.assertNotIn("provider-held-token", repr(facts))
+
+        response.read.side_effect = http.client.IncompleteRead(b"{", 2)
+        with patch(
+            "evex_agent_messaging.provider.urllib.request.urlopen",
+            return_value=context,
+        ):
+            with self.assertRaisesRegex(ProviderError, "PR read failed"):
+                provider._read_specification_pr(
+                    "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                    "EvexU2/evex-agent-messaging",
+                )
+
+    def test_new_reviewer_admission_authenticates_bound_pr_before_checkout_mutation(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands",
+            "key",
+            "http://public",
+            github_token="provider-held-token",
+        )
+        order = []
+        provider._request = Mock(
+            side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {},
+                {},
+                {},
+            ]
+        )
+        provider._read_specification_pr = Mock(
+            side_effect=lambda *_args: order.append("pr")
+            or {
+                "headSha": "a" * 40,
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            }
+        )
+        provider._ensure_checkout = Mock(
+            side_effect=lambda *_args: order.append("checkout")
+        )
+        provider._validate_existing_checkout = Mock()
+        mission = {
+            "links": {
+                "issue": "https://github.com/EvexU2/evex-u-workspace/issues/836",
+                "specificationPr": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            },
+            "checkout": {
+                "repository": "EvexU2/evex-agent-messaging",
+                "branch": "review/issue-836",
+                "headSha": "a" * 40,
+            },
+            "skills": ["evex-delivery-reviewer"],
+        }
+
+        self.create_provider_child(
+            provider,
+            parent,
+            child,
+            "reviewer",
+            "issue-836-reviewer",
+            mission,
+            "evx1_opaque",
+            frozenset(),
+        )
+
+        self.assertEqual(order, ["pr", "checkout"])
+
+    def test_authenticated_pr_boundary_rejects_ineligible_or_foreign_responses(self) -> None:
+        canonical = "https://github.com/EvexU2/evex-agent-messaging/pull/42"
+        repository = "EvexU2/evex-agent-messaging"
+        valid = {
+            "html_url": canonical,
+            "number": 42,
+            "state": "open",
+            "draft": True,
+            "base": {"repo": {"full_name": repository}},
+            "head": {"sha": "b" * 40},
+        }
+        invalid = {
+            "closed": {**valid, "state": "closed"},
+            "non-draft": {**valid, "draft": False},
+            "foreign-repository": {
+                **valid,
+                "base": {"repo": {"full_name": "EvexU2/foreign"}},
+            },
+            "foreign-identity": {**valid, "html_url": canonical.replace("42", "43")},
+            "unreachable-shape": {**valid, "head": {"sha": "not-a-commit"}},
+        }
+        provider = OpenHandsProvider(
+            "http://openhands",
+            "key",
+            "http://public",
+            github_token="provider-held-token",
+        )
+        for name, payload in invalid.items():
+            with self.subTest(name=name):
+                raw = json.dumps(payload).encode()
+                response = MagicMock()
+                response.headers = {"Content-Length": str(len(raw))}
+                response.read.return_value = raw
+                context = MagicMock()
+                context.__enter__.return_value = response
+                with patch(
+                    "evex_agent_messaging.provider.urllib.request.urlopen",
+                    return_value=context,
+                ):
+                    with self.assertRaises(ProviderError):
+                        provider._read_specification_pr(canonical, repository)
+
+        missing = urllib.error.HTTPError(canonical, 404, "missing", {}, None)
+        with patch(
+            "evex_agent_messaging.provider.urllib.request.urlopen",
+            side_effect=missing,
+        ):
+            with self.assertRaisesRegex(ProviderError, "PR read failed"):
+                provider._read_specification_pr(canonical, repository)
+
+        without_credential = OpenHandsProvider(
+            "http://openhands", "key", "http://public", github_token=""
+        )
+        with self.assertRaisesRegex(ProviderError, "credential is unavailable"):
+            without_credential._read_specification_pr(canonical, repository)
+
+    def test_reviewer_resume_fast_forwards_to_authenticated_head_and_replays_once(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "issue-836-reviewer"
+        with tempfile.TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            provider, history, child_events, _ = self._reviewer_resume_provider(
+                workspace, child, main, task_key
+            )
+            pr = {
+                "headSha": history["repaired"],
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            }
+            provider._read_specification_pr = Mock(side_effect=[pr, pr])
+
+            def request(method, path, body=None, **_kwargs):
+                if method == "GET":
+                    return {"execution_status": "finished"}
+                child_events.insert(0, body["content"][0]["text"])
+                return {}
+
+            provider._request = Mock(side_effect=request)
+            context = {
+                "currentRevision": history["repaired"],
+                "findings": ["P2-1"],
+            }
+
+            first = provider.resume_mission(
+                child, "resume:repaired", task_key, context, main
+            )
+
+            self.assertEqual(first["outcome"], "RESUMED")
+            self.assertEqual(
+                self._git_run(history["checkout"], "rev-parse", "HEAD"),
+                history["repaired"],
+            )
+            self.assertEqual(
+                (history["checkout"] / "candidate.txt").read_text(), "repaired\n"
+            )
+            posts = [call for call in provider._request.call_args_list if call.args[0] == "POST"]
+            self.assertEqual(len(posts), 1)
+            envelope = json.loads(
+                posts[0].args[2]["content"][0]["text"].removeprefix("RESUME_MISSION\n")
+            )
+            self.assertTrue(provider._valid_control_signature("RESUME_MISSION", envelope))
+
+            provider._request.reset_mock()
+            provider._read_specification_pr.reset_mock()
+            replay = provider.resume_mission(
+                child, "resume:repaired", task_key, context, main
+            )
+
+            self.assertEqual(replay, first)
+            self.assertFalse(
+                any(call.args[0] == "POST" for call in provider._request.call_args_list)
+            )
+            provider._read_specification_pr.assert_not_called()
+
+    def test_reviewer_resume_interruption_and_uncertain_delivery_converge_statelessly(self) -> None:
+        for uncertain in (False, True):
+            with self.subTest(uncertain=uncertain), tempfile.TemporaryDirectory() as temporary:
+                child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+                main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+                task_key = "issue-836-reviewer"
+                provider, history, child_events, _ = self._reviewer_resume_provider(
+                    Path(temporary), child, main, task_key
+                )
+                pr = {
+                    "headSha": history["repaired"],
+                    "number": 42,
+                    "repository": "EvexU2/evex-agent-messaging",
+                    "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                }
+                provider._read_specification_pr = Mock(return_value=pr)
+                first_post = True
+
+                def request(method, path, body=None, **_kwargs):
+                    nonlocal first_post
+                    if method == "GET":
+                        return {"execution_status": "finished"}
+                    if first_post:
+                        first_post = False
+                        if uncertain:
+                            child_events.insert(0, body["content"][0]["text"])
+                        raise ProviderError("interrupted event delivery")
+                    child_events.insert(0, body["content"][0]["text"])
+                    return {}
+
+                provider._request = Mock(side_effect=request)
+                context = {"currentRevision": history["repaired"]}
+                with self.assertRaisesRegex(ProviderError, "interrupted"):
+                    provider.resume_mission(
+                        child, "resume:repaired", task_key, context, main
+                    )
+                self.assertEqual(
+                    self._git_run(history["checkout"], "rev-parse", "HEAD"),
+                    history["repaired"],
+                )
+
+                result = provider.resume_mission(
+                    child, "resume:repaired", task_key, context, main
+                )
+
+                self.assertTrue(result["accepted"])
+                posts = [
+                    call for call in provider._request.call_args_list
+                    if call.args[0] == "POST"
+                ]
+                self.assertEqual(len(posts), 1 if uncertain else 2)
+
+    def test_reviewer_resume_final_pr_flip_fails_before_turn_delivery(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "issue-836-reviewer"
+        with tempfile.TemporaryDirectory() as temporary:
+            provider, history, _, _ = self._reviewer_resume_provider(
+                Path(temporary), child, main, task_key
+            )
+            pr = {
+                "headSha": history["repaired"],
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            }
+            provider._read_specification_pr = Mock(
+                side_effect=[pr, ProviderError("GitHub specification PR must be open and Draft")]
+            )
+            provider._request = Mock(return_value={"execution_status": "finished"})
+
+            with self.assertRaisesRegex(ProviderError, "open and Draft"):
+                provider.resume_mission(
+                    child,
+                    "resume:eligibility-flip",
+                    task_key,
+                    {"currentRevision": history["repaired"]},
+                    main,
+                )
+
+            self.assertFalse(
+                any(call.args[0] == "POST" for call in provider._request.call_args_list)
+            )
+
+    def test_concurrent_reviewer_resumes_emit_one_event_and_conflicts_fail_closed(self) -> None:
+        for conflicting in (False, True):
+            with self.subTest(conflicting=conflicting), tempfile.TemporaryDirectory() as temporary:
+                child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+                main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+                task_key = "issue-836-reviewer"
+                provider, history, child_events, _ = self._reviewer_resume_provider(
+                    Path(temporary), child, main, task_key
+                )
+                pr = {
+                    "headSha": history["repaired"],
+                    "number": 42,
+                    "repository": "EvexU2/evex-agent-messaging",
+                    "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                }
+                provider._read_specification_pr = Mock(return_value=pr)
+                posted = []
+
+                def request(method, path, body=None, **_kwargs):
+                    if method == "GET":
+                        return {"execution_status": "finished"}
+                    posted.append(body["content"][0]["text"])
+                    child_events.insert(0, body["content"][0]["text"])
+                    return {}
+
+                provider._request = Mock(side_effect=request)
+                barrier = threading.Barrier(2)
+                outcomes = []
+
+                def resume(revision):
+                    barrier.wait()
+                    try:
+                        outcomes.append(
+                            provider.resume_mission(
+                                child,
+                                "resume:concurrent",
+                                task_key,
+                                {"currentRevision": revision},
+                                main,
+                            )
+                        )
+                    except ProviderError as exc:
+                        outcomes.append(exc)
+
+                revisions = [history["repaired"], history["repaired"]]
+                if conflicting:
+                    revisions[1] = history["reviewed"]
+                threads = [
+                    threading.Thread(target=resume, args=(revision,))
+                    for revision in revisions
+                ]
+                for thread in threads:
+                    thread.start()
+                for thread in threads:
+                    thread.join()
+
+                self.assertEqual(len(posted), 1)
+                accepted = [
+                    value for value in outcomes
+                    if isinstance(value, dict) and value.get("accepted")
+                ]
+                self.assertEqual(len(accepted), 2 if not conflicting else 1)
+                if conflicting:
+                    self.assertEqual(
+                        len([value for value in outcomes if isinstance(value, ProviderError)]),
+                        1,
+                    )
+
+    def test_reviewer_resume_fail_closed_matrix_delivers_no_turn(self) -> None:
+        cases = (
+            "missing-pr",
+            "unreachable-head",
+            "stale-final-head",
+            "closed-pr",
+            "non-draft-pr",
+            "foreign-pr",
+            "non-descendant",
+            "dirty-checkout",
+            "mismatched-branch",
+            "mismatched-origin",
+            "revision-mismatch",
+            "unauthorized-context",
+            "ambiguous-event",
+        )
+        for case in cases:
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+                child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+                main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+                task_key = "issue-836-reviewer"
+                provider, history, child_events, _ = self._reviewer_resume_provider(
+                    Path(temporary), child, main, task_key
+                )
+                good = {
+                    "headSha": history["repaired"],
+                    "number": 42,
+                    "repository": "EvexU2/evex-agent-messaging",
+                    "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+                }
+                context = {"currentRevision": history["repaired"]}
+                provider._read_specification_pr = Mock(return_value=good)
+                if case == "missing-pr":
+                    mission = json.loads(child_events[0].removeprefix("MISSION\n"))
+                    mission.pop("controlSignature")
+                    mission["links"].pop("specificationPr")
+                    child_events[0] = "MISSION\n" + _compact_json(
+                        provider._signed_control_envelope("MISSION", mission)
+                    )
+                elif case == "unreachable-head":
+                    provider._read_specification_pr.return_value = {
+                        **good, "headSha": "f" * 40
+                    }
+                    context["currentRevision"] = "f" * 40
+                elif case == "stale-final-head":
+                    provider._read_specification_pr = Mock(
+                        side_effect=[good, {**good, "headSha": history["reviewed"]}]
+                    )
+                elif case in {"closed-pr", "non-draft-pr", "foreign-pr"}:
+                    provider._read_specification_pr.side_effect = ProviderError(
+                        f"GitHub specification PR rejected: {case}"
+                    )
+                elif case == "non-descendant":
+                    source = history["source"]
+                    self._git_run(source, "switch", "-c", "divergent", history["original"])
+                    (source / "candidate.txt").write_text("divergent\n")
+                    self._git_run(source, "commit", "-am", "divergent")
+                    divergent = self._git_run(source, "rev-parse", "HEAD")
+                    provider._read_specification_pr.return_value = {
+                        **good, "headSha": divergent
+                    }
+                    context["currentRevision"] = divergent
+                elif case == "dirty-checkout":
+                    (history["checkout"] / "candidate.txt").write_text("dirty\n")
+                elif case == "mismatched-branch":
+                    mission = json.loads(child_events[0].removeprefix("MISSION\n"))
+                    mission.pop("controlSignature")
+                    mission["checkout"]["branch"] = "review/other"
+                    child_events[0] = "MISSION\n" + _compact_json(
+                        provider._signed_control_envelope("MISSION", mission)
+                    )
+                elif case == "mismatched-origin":
+                    self._git_run(
+                        history["checkout"],
+                        "remote",
+                        "set-url",
+                        "origin",
+                        "https://github.com/EvexU2/foreign.git",
+                    )
+                elif case == "revision-mismatch":
+                    context["currentRevision"] = history["reviewed"]
+                elif case == "unauthorized-context":
+                    context["url"] = (
+                        "https://github.com/EvexU2/evex-agent-messaging/pull/43"
+                    )
+                elif case == "ambiguous-event":
+                    initial = provider._initial_callback_generation(main, child, task_key)
+                    resume = provider._signed_control_envelope(
+                        "RESUME_MISSION",
+                        {
+                            "callbackGeneration": provider._resumed_callback_generation(
+                                initial, "resume:repaired"
+                            ),
+                            "childId": str(child),
+                            "context": context,
+                            "messageKey": "resume:repaired",
+                            "owningMainId": str(main),
+                            "taskKey": task_key,
+                        },
+                    )
+                    event = "RESUME_MISSION\n" + _compact_json(resume)
+                    child_events[0:0] = [event, event]
+                provider._request = Mock(return_value={"execution_status": "finished"})
+
+                with self.assertRaises(ProviderError):
+                    provider.resume_mission(
+                        child, "resume:repaired", task_key, context, main
+                    )
+
+                self.assertFalse(
+                    any(call.args[0] == "POST" for call in provider._request.call_args_list)
+                )
 
 
 if __name__ == "__main__":

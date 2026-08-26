@@ -34,7 +34,13 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   context cannot expand its immutable Mission authority and is rejected after terminal cancellation.
   After an accepted terminal result, one fresh deterministic finding key re-admits the same Specialist
   once and advances its opaque callback generation. Exact key/context replay is a no-op; changed
-  context and later fresh-key cycles remain fail-closed and repeatable respectively.
+  context and later fresh-key cycles remain fail-closed and repeatable respectively. For a read-only
+  Reviewer whose signed Mission canonically binds `links.specificationPr`, the provider uses its
+  server-held GitHub credential to derive the same open Draft PR's current head. Under the Child lock
+  it permits only an optional `context.currentRevision` equality assertion, verifies clean monotonic
+  Mission-head/checkout/PR-head ancestry, performs a guarded fast-forward, and revalidates the PR and
+  checkout immediately before emitting one signed resume event. It never fetches, resets, changes
+  Reviewer identity/callback, or exposes a generic GitHub operation.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 - `get_usage`: read live per-Conversation model, reasoning effort, uncached/cached/cache-write input,
   output with reasoning as a subset, cache-hit rate, long-context turns, and a versioned official
@@ -48,9 +54,10 @@ Live write-Mission inventory and drain requests remain provider-adapter controls
 drain request goes to the owning Main, which alone obtains terminal cancellation proof.
 
 Capabilities are compact opaque `evx1_` HMAC-SHA256 references. They bind the owning Main, Child, task key, role,
-allowed action, and expiry. The server holds the OpenHands credential; it never appears in tool input,
-tool output, or child environment variables. There is no persistent state: callers provide a stable
-message key and the Main deduplicates semantic replays.
+allowed action, and expiry. The server holds the OpenHands credential and the optional platform
+`GITHUB_TOKEN` used only by the exact Reviewer PR-read boundary; neither credential appears in tool
+input, tool output, or child environment variables. There is no persistent state: callers provide a
+stable message key and the Main deduplicates semantic replays.
 
 Children must complete one accepted `send_to_parent` call before they finish. There is no provider
 Stop hook, completion endpoint, poller, receipt store, or second callback channel. If a process crash
@@ -88,6 +95,8 @@ export EVEX_MESSAGING_SECRET='long-random-secret'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_API_KEY='server-only-key'
 export OPENHANDS_PUBLIC_URL='http://openhands.example/canvas'
+# Required only for Reviewer Missions that bind links.specificationPr.
+export GITHUB_TOKEN='server-only-platform-token'
 export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```

@@ -127,6 +127,12 @@ class McpServerTest(unittest.TestCase):
         )
         resume = next(tool for tool in listed["result"]["tools"] if tool["name"] == "resume_mission")
         self.assertIn("context", resume["inputSchema"]["required"])
+        self.assertEqual(
+            set(resume["inputSchema"]["properties"]),
+            {"targetId", "taskKey", "messageKey", "context"},
+        )
+        self.assertNotIn("specificationPr", resume["inputSchema"]["properties"])
+        self.assertNotIn("currentRevision", resume["inputSchema"]["properties"])
         for tool in listed["result"]["tools"]:
             self.assertNotIn("capabilityRef", tool["inputSchema"].get("properties", {}))
 

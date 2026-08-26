@@ -249,7 +249,7 @@ class CallbackFallbackTest(unittest.TestCase):
                     token="test-token",
                 )
 
-    @patch("evex_agent_messaging.fallback.GithubIntegration")
+    @patch("evex_agent_messaging.fallback.GithubIntegration", autospec=True)
     @patch("evex_agent_messaging.fallback.Auth.AppAuth")
     def test_app_provider_mints_one_scoped_token_per_attempt(
         self, app_auth, github_integration
@@ -267,7 +267,7 @@ class CallbackFallbackTest(unittest.TestCase):
         )
         integration.close.assert_called_once_with()
 
-    @patch("evex_agent_messaging.fallback.GithubIntegration")
+    @patch("evex_agent_messaging.fallback.GithubIntegration", autospec=True)
     @patch("evex_agent_messaging.fallback.Auth.AppAuth")
     def test_app_preflight_proves_identity_repository_and_write_scope(
         self, _app_auth, github_integration
@@ -275,17 +275,25 @@ class CallbackFallbackTest(unittest.TestCase):
         integration = github_integration.return_value
         integration.get_app.return_value.slug = "messaging-fallback"
         github = integration.get_github_for_installation.return_value
-        github.get_repo.return_value.full_name = "EvexU2/evex-u-workspace"
+        repository = MagicMock(full_name="EvexU2/evex-u-workspace")
+        github.get_repos.return_value = iter([repository])
         provider = GitHubAppInstallationTokenProvider(123, 456, "private-key")
 
         provider.preflight("messaging-fallback[bot]")
 
         integration.get_github_for_installation.assert_called_once_with(
-            456, permissions={"issues": "write"}
+            456, token_permissions={"issues": "write"}
         )
-        github.get_repo.assert_called_once_with("EvexU2/evex-u-workspace")
+        github.get_repos.assert_called_once_with()
         github.close.assert_called_once_with()
         integration.close.assert_called_once_with()
+
+        second_repository = MagicMock(full_name="EvexU2/other")
+        github.get_repos.return_value = iter([repository, second_repository])
+        with self.assertRaisesRegex(
+            CallbackFallbackError, "CALLBACK_FALLBACK_NOT_AUTHORIZED"
+        ):
+            provider.preflight("messaging-fallback[bot]")
 
     def test_fallback_writes_are_serialized_per_child(self):
         child = self.create()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from itertools import islice
 import re
 import urllib.error
 import urllib.parse
@@ -203,10 +204,14 @@ class GitHubAppInstallationTokenProvider:
             if f"{getattr(app, 'slug', '')}[bot]" != expected_login:
                 raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
             github = integration.get_github_for_installation(
-                self._installation_id, permissions={"issues": "write"}
+                self._installation_id, token_permissions={"issues": "write"}
             )
-            repository = github.get_repo("EvexU2/evex-u-workspace")
-            if getattr(repository, "full_name", None) != "EvexU2/evex-u-workspace":
+            repositories = list(islice(github.get_repos(), 2))
+            if (
+                len(repositories) != 1
+                or getattr(repositories[0], "full_name", None)
+                != "EvexU2/evex-u-workspace"
+            ):
                 raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         except CallbackFallbackError:
             raise

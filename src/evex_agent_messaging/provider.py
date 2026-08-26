@@ -900,10 +900,18 @@ class OpenHandsProvider:
                     owning_main_id, target_id, task_key
                 )
                 if terminal_result is None:
-                    return self._settled(message_key, task_key, "RESULT")
-                current_generation = self._current_callback_generation(
-                    target_id, owning_main_id, task_key
-                )
+                    current_generation = self._recovery_callback_generation(
+                        target_id,
+                        owning_main_id,
+                        task_key,
+                        message_key,
+                    )
+                    if current_generation is None:
+                        return self._settled(message_key, task_key, "RESULT")
+                else:
+                    current_generation = self._current_callback_generation(
+                        target_id, owning_main_id, task_key
+                    )
             else:
                 if self._has_terminal_result(owning_main_id, target_id, task_key):
                     return self._settled(message_key, task_key, "RESULT")
@@ -1169,6 +1177,34 @@ class OpenHandsProvider:
         self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
     ) -> str:
         return self._callback_generation_chain(child_id, owning_main_id, task_key)[-1]
+
+    def _recovery_callback_generation(
+        self,
+        child_id: uuid.UUID,
+        owning_main_id: uuid.UUID,
+        task_key: str,
+        message_key: str,
+    ) -> str | None:
+        if not message_key.startswith("recovery-mode-"):
+            return None
+        resumes = [
+            envelope
+            for envelope in self._control_envelopes(child_id, "RESUME_MISSION")
+            if self._matches_control_identity(
+                envelope, child_id, owning_main_id, task_key
+            )
+        ]
+        generations = self._callback_generation_chain(
+            child_id, owning_main_id, task_key
+        )
+        if len(generations) < 2 or not resumes:
+            return None
+        latest_message_key = resumes[0].get("messageKey")
+        if not isinstance(latest_message_key, str) or latest_message_key.startswith(
+            "recovery-mode-"
+        ):
+            return None
+        return generations[-1]
 
     def _has_resume(
         self, target_id: uuid.UUID, task_key: str, owning_main_id: uuid.UUID

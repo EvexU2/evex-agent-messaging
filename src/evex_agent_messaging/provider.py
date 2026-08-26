@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
+import http.client
 import json
 from pathlib import Path
 import re
@@ -35,6 +36,7 @@ _CONTROL_HISTORY_MAX_TEXT_BYTES = 1_000_000
 _CONTROL_HISTORY_MAX_CURSOR_BYTES = 1_024
 _CONTROL_HISTORY_MAX_RESPONSE_BYTES = 1_048_576
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
+_CONTROL_SIGNATURE = re.compile(r"^evxs1_[0-9a-f]{64}$")
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -71,6 +73,10 @@ _ROLE_TITLES = {
 }
 
 
+def _compact_json(value: dict) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 @dataclass
 class OpenHandsProvider:
     base_url: str
@@ -96,17 +102,21 @@ class OpenHandsProvider:
                 request, timeout=self.timeout if timeout is None else timeout
             ) as response:
                 declared_size = response.headers.get("Content-Length")
+                expected_size = None
                 if isinstance(declared_size, str):
-                    try:
-                        if int(declared_size) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
-                            raise ProviderError(
-                                "OpenHands response exceeds bounded byte budget"
-                            )
-                    except ValueError:
+                    if not declared_size.isdecimal():
                         raise ProviderError("OpenHands response is invalid") from None
-                raw = response.read(_CONTROL_HISTORY_MAX_RESPONSE_BYTES + 1)
+                    expected_size = int(declared_size)
+                    if expected_size > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
+                        raise ProviderError("OpenHands response exceeds bounded byte budget")
+                try:
+                    raw = response.read(_CONTROL_HISTORY_MAX_RESPONSE_BYTES + 1)
+                except http.client.IncompleteRead as exc:
+                    raise ProviderError("OpenHands response is truncated") from exc
                 if not isinstance(raw, bytes) or len(raw) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
                     raise ProviderError("OpenHands response exceeds bounded byte budget")
+                if expected_size is not None and len(raw) != expected_size:
+                    raise ProviderError("OpenHands response is truncated")
                 value = json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
             raise ProviderError("OpenHands messaging transport failed", status=exc.code) from exc
@@ -178,6 +188,7 @@ class OpenHandsProvider:
                 parent_id, child_id, task_key
             ),
         }
+        delivered_mission = self._signed_control_envelope("MISSION", delivered_mission)
         mission_text = "MISSION\n" + json.dumps(
             delivered_mission, sort_keys=True, separators=(",", ":")
         )
@@ -744,7 +755,12 @@ class OpenHandsProvider:
                 target_id, child_id, task_key
             ):
                 return self._settled(message_key, task_key, "NEEDS_INPUT")
-            return self.send_message(target_id, message_key, kind, text)
+            return self.send_message(
+                target_id,
+                message_key,
+                kind,
+                _compact_json(self._signed_control_envelope(kind, envelope)),
+            )
 
     def cancel_mission(
         self,
@@ -777,19 +793,24 @@ class OpenHandsProvider:
                 if status in _RESULT_TERMINAL_STATES:
                     return self._settled(message_key, task_key, "RESULT")
                 if status in {"paused", "idle"}:
+                    current_generation = self._current_callback_generation(
+                        target_id, owning_main_id, task_key
+                    )
                     envelope = {
+                        "callbackGeneration": current_generation,
                         "childId": str(target_id),
                         "messageKey": message_key,
                         "owningMainId": str(owning_main_id),
                         "targetId": str(target_id),
                         "taskKey": task_key,
                     }
+                    envelope = self._signed_control_envelope("CANCEL_MISSION", envelope)
                     self._request(
                         "POST",
                         f"{path}/events",
                         {
                             "role": "user",
-                            "content": [{"type": "text", "text": "CANCEL_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}],
+                            "content": [{"type": "text", "text": "CANCEL_MISSION\n" + _compact_json(envelope)}],
                             "run": True,
                         },
                     )
@@ -818,21 +839,23 @@ class OpenHandsProvider:
                     raise ProviderError("write_mission_admission_paused")
             if self._has_terminal_result(owning_main_id, target_id, task_key):
                 return self._settled(message_key, task_key, "RESULT")
-            if self._has_resume(target_id, task_key, owning_main_id):
-                return self._settled(message_key, task_key, "RESUMED")
             current_generation = self._current_callback_generation(
                 target_id, owning_main_id, task_key
             )
+            if not self._has_waiting_input(owning_main_id, target_id, task_key):
+                return self._settled(message_key, task_key, "NEEDS_INPUT")
             envelope = {
                 "callbackGeneration": self._resumed_callback_generation(
                     current_generation, message_key
                 ),
+                "childId": str(target_id),
                 "messageKey": message_key,
                 "owningMainId": str(owning_main_id),
                 "taskKey": task_key,
                 "context": context,
             }
-            self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
+            envelope = self._signed_control_envelope("RESUME_MISSION", envelope)
+            self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + _compact_json(envelope)}], "run": True})
             return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "outcome": "RESUMED"}
 
     def replacement_cancelled(
@@ -862,10 +885,44 @@ class OpenHandsProvider:
         return self._settled(message_key, task_key, "CANCELLED")
 
     def _generation(self, value: dict) -> str:
-        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        payload = _compact_json(value).encode()
         return "evxg1_" + hmac.new(
             self.api_key.encode(), payload, hashlib.sha256
         ).hexdigest()
+
+    def _control_signature(self, kind: str, envelope: dict) -> str:
+        unsigned = {key: value for key, value in envelope.items() if key != "controlSignature"}
+        payload = _compact_json({"envelope": unsigned, "kind": kind}).encode()
+        return "evxs1_" + hmac.new(
+            self.api_key.encode(), payload, hashlib.sha256
+        ).hexdigest()
+
+    def _signed_control_envelope(self, kind: str, envelope: dict) -> dict:
+        signed = dict(envelope)
+        signed["controlSignature"] = self._control_signature(kind, signed)
+        return signed
+
+    def _valid_control_signature(self, kind: str, envelope: dict) -> bool:
+        signature = envelope.get("controlSignature")
+        return (
+            isinstance(signature, str)
+            and _CONTROL_SIGNATURE.fullmatch(signature) is not None
+            and hmac.compare_digest(signature, self._control_signature(kind, envelope))
+        )
+
+    def _control_envelopes(self, conversation_id: uuid.UUID, kind: str) -> list[dict]:
+        prefix = kind + "\n"
+        envelopes = []
+        for text in self._event_texts(conversation_id):
+            if not text.startswith(prefix):
+                continue
+            try:
+                envelope = json.loads(text.removeprefix(prefix))
+            except (TypeError, ValueError):
+                continue
+            if isinstance(envelope, dict):
+                envelopes.append(envelope)
+        return envelopes
 
     def _initial_callback_generation(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
@@ -891,59 +948,91 @@ class OpenHandsProvider:
         missions = []
         resumes = []
         for text in self._event_texts(child_id):
-            if text.startswith("MISSION\n"):
-                try:
-                    envelope = json.loads(text.removeprefix("MISSION\n"))
-                except (TypeError, ValueError):
+            for kind, values in (("MISSION", missions), ("RESUME_MISSION", resumes)):
+                prefix = kind + "\n"
+                if not text.startswith(prefix):
                     continue
+                try:
+                    envelope = json.loads(text.removeprefix(prefix))
+                except (TypeError, ValueError):
+                    break
                 if (
-                    envelope.get("childId") == str(child_id)
+                    isinstance(envelope, dict)
+                    and envelope.get("childId") == str(child_id)
                     and envelope.get("owningMainId") == str(owning_main_id)
                     and envelope.get("taskKey") == task_key
                 ):
-                    missions.append(envelope)
-            elif text.startswith("RESUME_MISSION\n"):
-                try:
-                    envelope = json.loads(text.removeprefix("RESUME_MISSION\n"))
-                except (TypeError, ValueError):
-                    continue
-                if (
-                    envelope.get("owningMainId") == str(owning_main_id)
-                    and envelope.get("taskKey") == task_key
-                ):
-                    resumes.append(envelope)
-        if len(missions) != 1 or len(resumes) > 1:
+                    values.append(envelope)
+                break
+        if len(missions) != 1:
             raise ProviderError("OpenHands Child callback generation history is ambiguous")
-        if missions[0].get("callbackGeneration") != initial:
-            raise ProviderError("OpenHands Child callback generation history is incomplete")
-        if not resumes:
-            return initial
-        message_key = resumes[0].get("messageKey")
-        generation = resumes[0].get("callbackGeneration")
         if (
-            not isinstance(message_key, str)
-            or not isinstance(generation, str)
-            or not _CALLBACK_GENERATION.fullmatch(generation)
-            or not hmac.compare_digest(
-                generation, self._resumed_callback_generation(initial, message_key)
-            )
+            not self._valid_control_signature("MISSION", missions[0])
+            or not hmac.compare_digest(str(missions[0].get("callbackGeneration")), initial)
         ):
             raise ProviderError("OpenHands Child callback generation history is incomplete")
+        generation = initial
+        for envelope in reversed(resumes):
+            message_key = envelope.get("messageKey")
+            next_generation = envelope.get("callbackGeneration")
+            if (
+                not self._valid_control_signature("RESUME_MISSION", envelope)
+                or not isinstance(message_key, str)
+                or not message_key
+                or not isinstance(envelope.get("context"), dict)
+                or not isinstance(next_generation, str)
+                or not _CALLBACK_GENERATION.fullmatch(next_generation)
+                or not hmac.compare_digest(
+                    next_generation,
+                    self._resumed_callback_generation(generation, message_key),
+                )
+            ):
+                raise ProviderError("OpenHands Child callback generation history is incomplete")
+            generation = next_generation
         return generation
 
     def _has_resume(
         self, target_id: uuid.UUID, task_key: str, owning_main_id: uuid.UUID
     ) -> bool:
-        return self._has_control_event(
-            target_id, "RESUME_MISSION", task_key, owning_main_id=owning_main_id
-        )
+        resumes = [
+            envelope
+            for envelope in self._control_envelopes(target_id, "RESUME_MISSION")
+            if (
+                envelope.get("childId") == str(target_id)
+                and envelope.get("owningMainId") == str(owning_main_id)
+                and envelope.get("taskKey") == task_key
+            )
+        ]
+        if resumes:
+            self._current_callback_generation(target_id, owning_main_id, task_key)
+        return bool(resumes)
 
     def _has_cancel(
         self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
     ) -> bool:
-        return self._has_control_event(
-            target_id, "CANCEL_MISSION", task_key, message_key, owning_main_id
-        )
+        for envelope in self._control_envelopes(target_id, "CANCEL_MISSION"):
+            if (
+                envelope.get("childId") == str(target_id)
+                and envelope.get("owningMainId") == str(owning_main_id)
+                and envelope.get("taskKey") == task_key
+                and envelope.get("messageKey") == message_key
+            ):
+                if not self._valid_control_signature("CANCEL_MISSION", envelope):
+                    raise ProviderError("OpenHands control history is unauthenticated")
+                generation = envelope.get("callbackGeneration")
+                if (
+                    not isinstance(generation, str)
+                    or not _CALLBACK_GENERATION.fullmatch(generation)
+                    or not hmac.compare_digest(
+                        generation,
+                        self._current_callback_generation(
+                            target_id, owning_main_id, task_key
+                        ),
+                    )
+                ):
+                    raise ProviderError("OpenHands control history is unauthenticated")
+                return True
+        return False
 
     def _has_terminal_result(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
@@ -953,13 +1042,7 @@ class OpenHandsProvider:
     def _terminal_result_key(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> str | None:
-        for text in self._event_texts(owning_main_id):
-            if not text.startswith("RESULT\n"):
-                continue
-            try:
-                envelope = json.loads(text.removeprefix("RESULT\n"))
-            except (TypeError, ValueError):
-                continue
+        for envelope in self._control_envelopes(owning_main_id, "RESULT"):
             if (
                 envelope.get("childId") == str(child_id)
                 and envelope.get("owningMainId") == str(owning_main_id)
@@ -967,53 +1050,42 @@ class OpenHandsProvider:
                 and envelope.get("kind") == "RESULT"
                 and isinstance(envelope.get("messageKey"), str)
             ):
+                current_generation = self._current_callback_generation(
+                    child_id, owning_main_id, task_key
+                )
+                if (
+                    not self._valid_control_signature("RESULT", envelope)
+                    or not isinstance(envelope.get("callbackGeneration"), str)
+                    or not hmac.compare_digest(
+                        envelope["callbackGeneration"], current_generation
+                    )
+                ):
+                    raise ProviderError("OpenHands control history is unauthenticated")
                 return envelope["messageKey"]
         return None
 
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> bool:
-        if self._has_resume(child_id, task_key, owning_main_id):
-            return False
-        for text in self._event_texts(owning_main_id):
-            if not text.startswith("NEEDS_INPUT\n"):
-                continue
-            try:
-                envelope = json.loads(text.removeprefix("NEEDS_INPUT\n"))
-            except (TypeError, ValueError):
-                continue
+        for envelope in self._control_envelopes(owning_main_id, "NEEDS_INPUT"):
             if (
                 envelope.get("childId") == str(child_id)
                 and envelope.get("kind") == "NEEDS_INPUT"
                 and envelope.get("owningMainId") == str(owning_main_id)
                 and envelope.get("taskKey") == task_key
             ):
+                current_generation = self._current_callback_generation(
+                    child_id, owning_main_id, task_key
+                )
+                if (
+                    not self._valid_control_signature("NEEDS_INPUT", envelope)
+                    or not isinstance(envelope.get("callbackGeneration"), str)
+                    or not hmac.compare_digest(
+                        envelope["callbackGeneration"], current_generation
+                    )
+                ):
+                    raise ProviderError("OpenHands control history is unauthenticated")
                 return True
-        return False
-
-    def _has_control_event(
-        self,
-        target_id: uuid.UUID,
-        kind: str,
-        task_key: str,
-        message_key: str | None = None,
-        owning_main_id: uuid.UUID | None = None,
-    ) -> bool:
-        prefix = kind + "\n"
-        for text in self._event_texts(target_id):
-            if not text.startswith(prefix):
-                continue
-            try:
-                envelope = json.loads(text.removeprefix(prefix))
-            except (TypeError, ValueError):
-                continue
-            if envelope.get("taskKey") != task_key:
-                continue
-            if message_key is not None and envelope.get("messageKey") != message_key:
-                continue
-            if owning_main_id is not None and envelope.get("owningMainId") != str(owning_main_id):
-                continue
-            return True
         return False
 
     def _event_texts(self, conversation_id: uuid.UUID) -> list[str]:

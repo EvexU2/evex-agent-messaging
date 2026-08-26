@@ -26,8 +26,8 @@ TOOLS = [
     },
     {
         "name": "request_user_decision",
-        "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+        "description": "Ask the human a bounded A/B/C-style question through the owning Main using the current opaque callback generation.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options", "callbackGeneration"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}, "callbackGeneration": {"type": "string", "pattern": "^evxg1_[0-9a-f]{64}$"}}},
     },
     {
         "name": "cancel_mission",
@@ -81,7 +81,7 @@ class McpServer:
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
             elif name == "request_user_decision":
-                value = self._service.request_user_decision(capability_ref, args["question"], args["options"])
+                value = self._service.request_user_decision(capability_ref, args["question"], args["options"], args["callbackGeneration"])
             elif name == "cancel_mission":
                 value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "resume_mission":

@@ -307,7 +307,7 @@ class MessagingTest(unittest.TestCase):
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         child = self.create(service, self.main_token(), "qa-604", "qa", self.read_only_mission())
         self.assertTrue(service.send_to_parent(child["capabilityRef"], {"callbackGeneration": "evxg1_" + "0" * 64, "messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
-        self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
+        self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"], "evxg1_" + "0" * 64)["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
         self.assertEqual(
             [call[2] for call in provider.calls if call[0] == "child-send"],

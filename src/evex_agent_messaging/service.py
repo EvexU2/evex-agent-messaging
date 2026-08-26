@@ -333,15 +333,21 @@ class MessagingService:
             _compact(envelope),
         )
 
-    def request_user_decision(self, token: str, question: str, options: list[str]) -> dict[str, Any]:
+    def request_user_decision(
+        self, token: str, question: str, options: list[str], callback_generation: str
+    ) -> dict[str, Any]:
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise CapabilityError("question must be non-empty and bounded")
         if not isinstance(options, list) or not 2 <= len(options) <= 5 or any(not isinstance(x, str) or not x.strip() for x in options):
             raise CapabilityError("options must contain 2-5 non-empty strings")
+        if not isinstance(callback_generation, str) or not _CALLBACK_GENERATION.fullmatch(
+            callback_generation
+        ):
+            raise CapabilityError("callbackGeneration must be a provider-derived generation")
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
         import hashlib
         message_key = "decision:" + hashlib.sha256(_compact({"question": question.strip(), "options": options}).encode()).hexdigest()[:24]
-        envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
+        envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
         return self._provider.send_child_message(
             capability.child_id,
             capability.owning_main_id,

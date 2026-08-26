@@ -21,9 +21,11 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   provider-derived opaque `callbackGeneration`; `send_to_parent.result.callbackGeneration` must echo
   that exact current value. Messaging re-derives it from bounded provider event history and rejects
   stale, foreign, missing, malformed, ambiguous, incomplete, or truncated evidence before delivery.
-  This required field is a compatibility change for Child result callers. A native terminal `CANCELLED`
-  Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
-- `request_user_decision`: deliver an A/B/C-style question to the owning Main.
+  Provider-emitted control records are HMAC-authenticated before they can win a result, input, resume,
+  cancellation-replay, or replacement decision. This required field is a compatibility change for Child
+  result callers. A native terminal `CANCELLED` Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
+- `request_user_decision`: deliver an A/B/C-style question to the owning Main. It likewise requires the
+  exact current `callbackGeneration`, so an earlier continuation cannot recreate a cleared input gate.
 - `cancel_mission`: stop the exact Child task. The owning Main must provide its deterministic Child,
   task, and stable cancellation key. Cancellation serializes against a terminal result and resume;
   it succeeds only after OpenHands reports native terminal `cancelled`, and an identical key replays

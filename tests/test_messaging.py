@@ -439,7 +439,9 @@ class MessagingTest(unittest.TestCase):
             service.send_to_parent(
                 child["capabilityRef"],
                 {
-                    "callbackGeneration": {"ignored": True},
+                    "callbackGeneration": {
+                        "mission": {"allowedMutations": ["ignored metadata"]}
+                    },
                     "kind": "RESULT",
                     "outcome": "PASS",
                 },
@@ -486,6 +488,18 @@ class MessagingTest(unittest.TestCase):
             {"kind": "OTHER", "outcome": "PASS"},
             {"kind": "RESULT", "owning_main_id": str(uuid.uuid4())},
             {"kind": "RESULT", "mission": {"allowedMutations": ["push main"]}},
+            {"kind": "RESULT", "details": {"mission": {"scope": "expand"}}},
+            {
+                "kind": "RESULT",
+                "findings": [{"allowed_mutations": ["push main"]}],
+            },
+            {"kind": "RESULT", "details": {"transport": "raw-provider"}},
+            {
+                "kind": "RESULT",
+                "findings": [
+                    {"evidence": {"capability_ref": "evx1_caller-selected"}}
+                ],
+            },
             {"kind": "RESULT", "summary": "x" * 20001},
             {"kind": "RESULT", "summary": {"not-json": object()}},
         )

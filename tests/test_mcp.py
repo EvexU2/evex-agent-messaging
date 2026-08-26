@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
+import json
 import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
 import unittest
-from unittest.mock import patch
+import uuid
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -19,6 +22,9 @@ from evex_agent_messaging.mcp_server import (  # noqa: E402
     main,
     make_http_server,
 )
+from evex_agent_messaging.capability import capability_token  # noqa: E402
+from evex_agent_messaging.provider import OpenHandsProvider  # noqa: E402
+from evex_agent_messaging.service import MessagingService  # noqa: E402
 
 
 class FakeService:
@@ -166,6 +172,110 @@ class McpServerTest(unittest.TestCase):
         }, capability_ref="evx1_parent")
         self.assertNotIn("capabilityRef", result["result"]["structuredContent"])
         self.assertEqual(self.service.calls[0][1][0], "evx1_parent")
+
+    def test_bound_mcp_result_sequence_wakes_once_per_distinct_payload(self):
+        secret = b"test-secret"
+        now = datetime(2026, 8, 26, tzinfo=timezone.utc)
+        main_id = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child_id = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        task_key = "writer-846"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(
+            main_id, child_id, task_key
+        )
+        mission = "MISSION\n" + json.dumps(
+            provider._signed_control_envelope(
+                "MISSION",
+                {
+                    "callbackGeneration": generation,
+                    "childId": str(child_id),
+                    "owningMainId": str(main_id),
+                    "taskKey": task_key,
+                },
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        events = {child_id: [mission], main_id: []}
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: list(events[conversation_id])
+        )
+        parent_posts = []
+
+        def request(method, path, body=None, **_kwargs):
+            if method == "GET":
+                if path == f"/api/conversations/{child_id}":
+                    return {"execution_status": "finished"}
+                if path == f"/api/conversations/{main_id}":
+                    return {"execution_status": "idle"}
+            if method == "POST" and path == f"/api/conversations/{main_id}/events":
+                text = body["content"][0]["text"]
+                parent_posts.append(text)
+                events[main_id].insert(0, text)
+                return {}
+            raise AssertionError(f"unexpected provider request: {method} {path}")
+
+        provider._request = Mock(side_effect=request)
+        server = McpServer(
+            MessagingService(provider, secret, clock=lambda: now)
+        )
+        child_capability = capability_token(
+            secret,
+            owning_main_id=main_id,
+            child_id=child_id,
+            task_key=task_key,
+            role="writer",
+            allowed_actions={"send_message"},
+            issued_at=now - timedelta(minutes=1),
+            expires_at=now + timedelta(hours=1),
+        )
+
+        def send(result):
+            response = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": len(parent_posts) + 1,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "send_to_parent",
+                        "arguments": {"result": result},
+                    },
+                },
+                capability_ref=child_capability,
+            )
+            self.assertNotIn("error", response)
+            return response["result"]["structuredContent"]
+
+        first = send({"outcome": "PASS", "summary": "A"})
+        self.assertEqual(len(parent_posts), 1)
+        replay = send({
+            "callbackGeneration": "changed-legacy-bytes",
+            "messageKey": "caller-selected",
+            "summary": "A",
+            "outcome": "PASS",
+        })
+        self.assertEqual(len(parent_posts), 1)
+        second = send({"outcome": "PASS", "summary": "B"})
+
+        self.assertEqual(first, replay)
+        self.assertTrue(second["accepted"])
+        self.assertEqual(len(parent_posts), 2)
+        delivered = [
+            json.loads(text.removeprefix("RESULT\n")) for text in parent_posts
+        ]
+        self.assertEqual(
+            [envelope["owningMainId"] for envelope in delivered],
+            [str(main_id), str(main_id)],
+        )
+        self.assertEqual(
+            [envelope["childId"] for envelope in delivered],
+            [str(child_id), str(child_id)],
+        )
+        self.assertEqual(
+            [envelope["taskKey"] for envelope in delivered],
+            [task_key, task_key],
+        )
+        self.assertNotEqual(first["messageKey"], second["messageKey"])
 
     def test_tool_call_without_transport_capability_fails_closed(self):
         result = self.server.handle({

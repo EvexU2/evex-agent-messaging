@@ -1777,6 +1777,72 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         self.assertEqual(len(events[main]), 2)
 
+    def test_pre_upgrade_multi_generation_results_converge_to_one_replay(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "writer-846"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        initial = provider._initial_callback_generation(main, child, task_key)
+        resumed = provider._resumed_callback_generation(initial, "resume:legacy")
+
+        def control(kind, envelope):
+            return kind + "\n" + _compact_json(
+                provider._signed_control_envelope(kind, envelope)
+            )
+
+        mission = control("MISSION", {
+            "callbackGeneration": initial,
+            "childId": str(child),
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        })
+        resume = control("RESUME_MISSION", {
+            "callbackGeneration": resumed,
+            "childId": str(child),
+            "context": {"finding": "legacy"},
+            "messageKey": "resume:legacy",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        })
+        legacy_payloads = [
+            control("RESULT", {
+                "callbackGeneration": generation,
+                "childId": str(child),
+                "kind": "RESULT",
+                "messageKey": message_key,
+                "owningMainId": str(main),
+                "taskKey": task_key,
+                "text": '{"outcome":"PASS","summary":"A"}',
+            })
+            for generation, message_key in (
+                (initial, "legacy:a:first"),
+                (resumed, "legacy:a:second"),
+            )
+        ]
+        events = {child: [resume, mission], main: legacy_payloads}
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: list(events[conversation_id])
+        )
+        provider._request = Mock(return_value={"execution_status": "finished"})
+        provider.send_message = Mock()
+        callback = _compact_json({
+            "callbackGeneration": "ignored-transition-bytes",
+            "childId": str(child),
+            "kind": "RESULT",
+            "messageKey": "result:new-canonical-key",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+            "text": '{"kind":"RESULT","outcome":"PASS","summary":"A"}',
+        })
+
+        self.assertEqual(
+            provider.send_child_message(
+                child, main, "result:new-canonical-key", "RESULT", callback
+            ),
+            {"accepted": True, "messageKey": "result:new-canonical-key"},
+        )
+        provider.send_message.assert_not_called()
+
     def test_needs_input_pause_failure_never_delivers_to_parent(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")

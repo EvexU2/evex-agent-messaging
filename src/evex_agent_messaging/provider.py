@@ -1043,7 +1043,11 @@ class OpenHandsProvider:
             )
             if kind == "RESULT":
                 replay = self._result_replay(
-                    target_id, child_id, task_key, envelope.get("text")
+                    target_id,
+                    child_id,
+                    task_key,
+                    message_key,
+                    envelope.get("text"),
                 )
                 if replay is not None:
                     return replay
@@ -1582,6 +1586,7 @@ class OpenHandsProvider:
         owning_main_id: uuid.UUID,
         child_id: uuid.UUID,
         task_key: str,
+        message_key: str,
         text: object,
     ) -> dict | None:
         canonical_text = self._canonical_result_text(text)
@@ -1594,13 +1599,16 @@ class OpenHandsProvider:
                 self._canonical_result_text(envelope["text"]), canonical_text
             )
         ]
-        if len(matching) > 1:
-            raise ProviderError("OpenHands result replay history is ambiguous")
         if not matching:
             return None
         return {
             "accepted": True,
-            "messageKey": matching[0]["messageKey"],
+            # A pre-upgrade history can contain equivalent records under multiple
+            # callback generations. They form one replay class; use the new stable
+            # semantic key when no single historical response is canonical.
+            "messageKey": (
+                matching[0]["messageKey"] if len(matching) == 1 else message_key
+            ),
         }
 
     def _result_envelopes(

@@ -422,16 +422,14 @@ class MessagingService:
         kind = result.get("kind", "RESULT")
         if kind not in {"RESULT", "NEEDS_INPUT"}:
             raise CapabilityError("result kind must be RESULT or NEEDS_INPUT")
-        if any(
-            str(key).replace("_", "").lower() in _RESULT_AUTHORITY_KEYS
-            for key in result
-        ):
-            raise CapabilityError("result cannot select callback authority or transport")
-        canonical_result = {"kind": kind, **{
+        logical_result = {
             key: value
             for key, value in result.items()
             if key not in {"kind", "messageKey", "callbackGeneration"}
-        }}
+        }
+        if self._contains_result_authority(logical_result):
+            raise CapabilityError("result cannot select callback authority or transport")
+        canonical_result = {"kind": kind, **logical_result}
         try:
             text = _compact(canonical_result)
         except (TypeError, ValueError) as exc:
@@ -453,6 +451,18 @@ class MessagingService:
             kind,
             _compact(envelope),
         )
+
+    @classmethod
+    def _contains_result_authority(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).replace("_", "").lower() in _RESULT_AUTHORITY_KEYS
+                or cls._contains_result_authority(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(cls._contains_result_authority(item) for item in value)
+        return False
 
     def request_user_decision(
         self, token: str, question: str, options: list[str], callback_generation: str

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import ANY, MagicMock, Mock, patch
 from pathlib import Path
+import json
 import subprocess
 import tempfile
 import uuid
@@ -116,13 +117,17 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_resume_mission_carries_verified_context_as_canonical_json(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
-        provider._request = Mock(return_value={})
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "idle"}, {"items": []}, {"items": []}, {},
+        ])
 
         provider.resume_mission(
             child,
             "resume:plan-reviewed",
             "spec-author-604",
             {"reviewOutcome": "PASS", "planCommit": "a" * 40},
+            main,
         )
 
         body = provider._request.call_args.args[2]
@@ -131,7 +136,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             text,
             'RESUME_MISSION\n{"context":{"planCommit":"'
             + "a" * 40
-            + '","reviewOutcome":"PASS"},"messageKey":"resume:plan-reviewed","taskKey":"spec-author-604"}',
+            + '","reviewOutcome":"PASS"},"messageKey":"resume:plan-reviewed","owningMainId":"11111111-1111-4111-8111-111111111111","taskKey":"spec-author-604"}',
         )
 
     def test_child_creation_starts_mission_without_bootstrap_wait(self) -> None:
@@ -805,11 +810,11 @@ class OpenHandsProviderTest(unittest.TestCase):
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         result = (
             "RESULT\n"
-            '{"childId":"22222222-2222-4222-8222-222222222222","kind":"RESULT","messageKey":"result:one","taskKey":"spec-614"}'
+            '{"childId":"22222222-2222-4222-8222-222222222222","kind":"RESULT","messageKey":"result:one","owningMainId":"11111111-1111-4111-8111-111111111111","taskKey":"spec-614"}'
         )
         cases = (
             ("result", [{"execution_status": "running"}, {"items": [{"llm_message": {"content": [{"text": result}]}}]}], "RESULT"),
-            ("resume", [{"execution_status": "running"}, {"items": []}, {"items": [{"llm_message": {"content": [{"text": 'RESUME_MISSION\n{"taskKey":"spec-614"}'}]}}]}], "RESUMED"),
+            ("resume", [{"execution_status": "running"}, {"items": []}, {"items": [{"llm_message": {"content": [{"text": 'RESUME_MISSION\n{"owningMainId":"11111111-1111-4111-8111-111111111111","taskKey":"spec-614"}'}]}}]}], "RESUMED"),
         )
         for name, requests, expected in cases:
             with self.subTest(name=name):
@@ -830,12 +835,128 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider._request = Mock(return_value={"execution_status": "cancelled"})
 
         late_result = provider.send_child_message(child, uuid.uuid4(), "result:late", "RESULT", "{}")
-        late_resume = provider.resume_mission(child, "resume:late", "spec-614", {"answer": "A"})
+        late_resume = provider.resume_mission(child, "resume:late", "spec-614", {"answer": "A"}, uuid.uuid4())
 
         self.assertEqual(late_result["outcome"], "CANCELLED")
         self.assertFalse(late_result["accepted"])
         self.assertEqual(late_resume["outcome"], "CANCELLED")
         self.assertFalse(late_resume["accepted"])
+
+    def test_paused_child_waiting_for_bound_input_rejects_late_result(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        waiting = (
+            "NEEDS_INPUT\n"
+            '{"childId":"22222222-2222-4222-8222-222222222222","kind":"NEEDS_INPUT","messageKey":"decision:one","owningMainId":"11111111-1111-4111-8111-111111111111","taskKey":"spec-614"}'
+        )
+        callback = json.dumps({
+            "childId": str(child), "kind": "RESULT", "messageKey": "result:late",
+            "owningMainId": str(main), "taskKey": "spec-614", "text": "{}",
+        })
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "paused"},
+            {"items": []},
+            {"items": []},
+            {"items": [{"llm_message": {"content": [{"text": waiting}]}}]},
+        ])
+
+        result = provider.send_child_message(child, main, "result:late", "RESULT", callback)
+
+        self.assertEqual(
+            result,
+            {"accepted": False, "messageKey": "result:late", "taskKey": "spec-614", "outcome": "NEEDS_INPUT"},
+        )
+
+    def test_foreign_result_or_resume_evidence_cannot_block_owned_cancellation(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        foreign = "33333333-3333-4333-8333-333333333333"
+        result = (
+            "RESULT\n"
+            + json.dumps({"childId": str(child), "kind": "RESULT", "messageKey": "result:foreign", "owningMainId": foreign, "taskKey": "spec-614"}, sort_keys=True, separators=(",", ":"))
+        )
+        resume = "RESUME_MISSION\n" + json.dumps(
+            {"messageKey": "resume:foreign", "owningMainId": foreign, "taskKey": "spec-614"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        for name, parent_events, child_events in (
+            ("result", [result], []),
+            ("resume", [], [resume]),
+        ):
+            with self.subTest(name=name):
+                provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)
+                provider._request = Mock(side_effect=[
+                    {"execution_status": "running"},
+                    {"items": [{"llm_message": {"content": [{"text": text}]}} for text in parent_events]},
+                    {"items": [{"llm_message": {"content": [{"text": text}]}} for text in child_events]},
+                    {},
+                    {"execution_status": "paused"},
+                    {},
+                    {"execution_status": "cancelled"},
+                ])
+
+                outcome = provider.cancel_mission(child, "cancel:one", "spec-614", main)
+
+                self.assertTrue(outcome["accepted"])
+                self.assertEqual(outcome["outcome"], "CANCELLED")
+                self.assertTrue(any(
+                    len(call.args) > 1 and call.args[1].endswith("/interrupt")
+                    for call in provider._request.call_args_list
+                ))
+
+    def test_resume_evidence_carries_owning_main_identity(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "idle"}, {"items": []}, {"items": []}, {},
+        ])
+
+        provider.resume_mission(
+            child, "resume:plan-reviewed", "spec-author-604",
+            {"reviewOutcome": "PASS", "planCommit": "a" * 40}, main,
+        )
+
+        self.assertEqual(
+            provider._request.call_args.args[2]["content"][0]["text"],
+            'RESUME_MISSION\n{"context":{"planCommit":"' + "a" * 40
+            + '","reviewOutcome":"PASS"},"messageKey":"resume:plan-reviewed","owningMainId":"11111111-1111-4111-8111-111111111111","taskKey":"spec-author-604"}',
+        )
+
+    def test_cancellation_replay_and_replacement_proof_page_past_one_hundred_events(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        cancel = "CANCEL_MISSION\n" + json.dumps(
+            {"messageKey": "cancel:one", "owningMainId": str(main), "taskKey": "spec-614"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        noise = [{"llm_message": {"content": [{"text": f"noise:{index}"}]}} for index in range(100)]
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "cancelled"},
+            {"items": noise, "next_page_id": "older"},
+            {"items": [{"llm_message": {"content": [{"text": cancel}]}}], "next_page_id": None},
+            {"execution_status": "cancelled"},
+            {"items": noise, "next_page_id": "older"},
+            {"items": [{"llm_message": {"content": [{"text": cancel}]}}], "next_page_id": None},
+        ])
+
+        replay = provider.cancel_mission(child, "cancel:one", "spec-614", main)
+        replacement_proof = provider.replacement_cancelled(
+            child, "spec-614", "cancel:one", main
+        )
+
+        self.assertTrue(replay["accepted"])
+        self.assertTrue(replacement_proof)
+        self.assertEqual(
+            provider._request.call_args_list[2].args,
+            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&page_id=older"),
+        )
+        self.assertEqual(
+            provider._request.call_args_list[5].args,
+            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&page_id=older"),
+        )
 
     def test_paused_provider_rejects_write_create_and_resume_before_durable_mutation(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -857,14 +978,16 @@ class OpenHandsProviderTest(unittest.TestCase):
             "tags": {"project": "evex-u", "evexrole": "role-child", "evexchildrole": "spec", "evexparent": str(parent), "evextask": "spec-768"},
         })
         with self.assertRaisesRegex(ProviderError, "^write_mission_admission_paused$"):
-            provider.resume_mission(child, "resume:768", "spec-768", {"verified": True})
+            provider.resume_mission(child, "resume:768", "spec-768", {"verified": True}, parent)
         self.assertEqual(provider._request.call_args_list[0].args, ("GET", f"/api/conversations/{child}"))
         self.assertEqual(len(provider._request.call_args_list), 1)
 
         resumed = OpenHandsProvider("http://openhands", "key", "http://public")
-        resumed._request = Mock(return_value={})
+        resumed._request = Mock(side_effect=[
+            {"execution_status": "idle"}, {"items": []}, {"items": []}, {},
+        ])
         self.assertTrue(
-            resumed.resume_mission(child, "resume:after-proof", "spec-768", {"forwardProof": "PASS"})["accepted"]
+            resumed.resume_mission(child, "resume:after-proof", "spec-768", {"forwardProof": "PASS"}, parent)["accepted"]
         )
         self.assertEqual(resumed._request.call_args.args[0:2], ("POST", f"/api/conversations/{child}/events"))
 

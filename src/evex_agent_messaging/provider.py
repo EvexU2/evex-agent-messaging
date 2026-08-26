@@ -662,6 +662,12 @@ class OpenHandsProvider:
                 task_key = envelope["taskKey"]
             except (KeyError, TypeError, ValueError):
                 raise ProviderError("OpenHands Child callback envelope is invalid") from None
+            if (
+                envelope.get("childId") != str(child_id)
+                or envelope.get("owningMainId") != str(target_id)
+                or envelope.get("messageKey") != message_key
+            ):
+                raise ProviderError("OpenHands Child callback identity is invalid")
             result_key = self._terminal_result_key(target_id, child_id, task_key)
             if status in _RESULT_TERMINAL_STATES:
                 return self._settled(message_key, task_key, "RESULT")
@@ -669,8 +675,12 @@ class OpenHandsProvider:
                 if result_key == message_key:
                     return {"accepted": True, "messageKey": message_key, "outcome": "RESULT"}
                 return self._settled(message_key, task_key, "RESULT")
-            if self._has_resume(child_id, task_key):
+            if self._has_resume(child_id, task_key, target_id):
                 return self._settled(message_key, task_key, "RESUMED")
+            if kind == "RESULT" and self._has_waiting_input(
+                target_id, child_id, task_key
+            ):
+                return self._settled(message_key, task_key, "NEEDS_INPUT")
             return self.send_message(target_id, message_key, kind, text)
 
     def cancel_mission(
@@ -692,7 +702,7 @@ class OpenHandsProvider:
                 owning_main_id, target_id, task_key
             ):
                 return self._settled(message_key, task_key, "RESULT")
-            if owning_main_id is not None and self._has_resume(target_id, task_key):
+            if self._has_resume(target_id, task_key, owning_main_id):
                 return self._settled(message_key, task_key, "RESUMED")
             if status == "running":
                 self._request("POST", f"{path}/interrupt", {})
@@ -732,23 +742,27 @@ class OpenHandsProvider:
         message_key: str,
         task_key: str,
         context: dict,
-        owning_main_id: uuid.UUID | None = None,
+        owning_main_id: uuid.UUID,
     ) -> dict:
         with _CHECKOUT_LOCKS[target_id.int % len(_CHECKOUT_LOCKS)]:
             current = self._request("GET", f"/api/conversations/{target_id}")
             if current.get("execution_status") == _NATIVE_CANCELLED:
                 return self._settled(message_key, task_key, "CANCELLED")
-            if current.get("execution_status") in _RESULT_TERMINAL_STATES or (
-                owning_main_id is not None
-                and self._has_terminal_result(owning_main_id, target_id, task_key)
-            ):
+            if current.get("execution_status") in _RESULT_TERMINAL_STATES:
                 return self._settled(message_key, task_key, "RESULT")
-            if owning_main_id is not None and self._has_resume(target_id, task_key):
-                return self._settled(message_key, task_key, "RESUMED")
             if self.write_mission_admission_paused:
                 if self._write_mission_facts(current) is not None:
                     raise ProviderError("write_mission_admission_paused")
-            envelope = {"messageKey": message_key, "taskKey": task_key, "context": context}
+            if self._has_terminal_result(owning_main_id, target_id, task_key):
+                return self._settled(message_key, task_key, "RESULT")
+            if self._has_resume(target_id, task_key, owning_main_id):
+                return self._settled(message_key, task_key, "RESUMED")
+            envelope = {
+                "messageKey": message_key,
+                "owningMainId": str(owning_main_id),
+                "taskKey": task_key,
+                "context": context,
+            }
             self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + json.dumps(envelope, sort_keys=True, separators=(",", ":"))}], "run": True})
             return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "outcome": "RESUMED"}
 
@@ -778,8 +792,12 @@ class OpenHandsProvider:
             return self._cancelled(message_key, task_key)
         return self._settled(message_key, task_key, "CANCELLED")
 
-    def _has_resume(self, target_id: uuid.UUID, task_key: str) -> bool:
-        return self._has_control_event(target_id, "RESUME_MISSION", task_key)
+    def _has_resume(
+        self, target_id: uuid.UUID, task_key: str, owning_main_id: uuid.UUID
+    ) -> bool:
+        return self._has_control_event(
+            target_id, "RESUME_MISSION", task_key, owning_main_id=owning_main_id
+        )
 
     def _has_cancel(
         self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
@@ -805,12 +823,32 @@ class OpenHandsProvider:
                 continue
             if (
                 envelope.get("childId") == str(child_id)
+                and envelope.get("owningMainId") == str(owning_main_id)
                 and envelope.get("taskKey") == task_key
                 and envelope.get("kind") == "RESULT"
                 and isinstance(envelope.get("messageKey"), str)
             ):
                 return envelope["messageKey"]
         return None
+
+    def _has_waiting_input(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> bool:
+        for text in self._event_texts(owning_main_id):
+            if not text.startswith("NEEDS_INPUT\n"):
+                continue
+            try:
+                envelope = json.loads(text.removeprefix("NEEDS_INPUT\n"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                envelope.get("childId") == str(child_id)
+                and envelope.get("kind") == "NEEDS_INPUT"
+                and envelope.get("owningMainId") == str(owning_main_id)
+                and envelope.get("taskKey") == task_key
+            ):
+                return True
+        return False
 
     def _has_control_event(
         self,
@@ -838,20 +876,36 @@ class OpenHandsProvider:
         return False
 
     def _event_texts(self, conversation_id: uuid.UUID) -> list[str]:
-        response = self._request(
-            "GET", f"/api/conversations/{conversation_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC"
-        )
-        values = response.get("items") if isinstance(response, dict) else None
-        if not isinstance(values, list):
-            raise ProviderError("OpenHands control history is unavailable")
         texts = []
-        for event in values:
-            message = event.get("llm_message") if isinstance(event, dict) else None
-            content = message.get("content") if isinstance(message, dict) else None
-            if not isinstance(content, list):
-                continue
-            texts.extend(
-                item["text"] for item in content
-                if isinstance(item, dict) and isinstance(item.get("text"), str)
+        page_id = None
+        seen_page_ids = set()
+        while True:
+            path = (
+                f"/api/conversations/{conversation_id}/events/search?limit=100"
+                "&sort_order=TIMESTAMP_DESC"
             )
-        return texts
+            if page_id is not None:
+                path += "&page_id=" + urllib.parse.quote(page_id, safe="")
+            response = self._request("GET", path)
+            values = response.get("items") if isinstance(response, dict) else None
+            next_page_id = response.get("next_page_id") if isinstance(response, dict) else None
+            if not isinstance(values, list) or (
+                next_page_id is not None
+                and (not isinstance(next_page_id, str) or not next_page_id)
+            ):
+                raise ProviderError("OpenHands control history is unavailable")
+            for event in values:
+                message = event.get("llm_message") if isinstance(event, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                if not isinstance(content, list):
+                    continue
+                texts.extend(
+                    item["text"] for item in content
+                    if isinstance(item, dict) and isinstance(item.get("text"), str)
+                )
+            if next_page_id is None:
+                return texts
+            if next_page_id in seen_page_ids:
+                raise ProviderError("OpenHands control history is unavailable")
+            seen_page_ids.add(next_page_id)
+            page_id = next_page_id

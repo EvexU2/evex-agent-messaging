@@ -10,6 +10,7 @@ import uuid
 import unittest
 
 from evex_agent_messaging.provider import OpenHandsProvider, ProviderError, _compact_json
+from evex_agent_messaging.capability import deterministic_child_id
 
 
 class OpenHandsProviderTest(unittest.TestCase):
@@ -993,9 +994,10 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn(provider._resumed_callback_generation(first, "resume:second"), provider._request.call_args.args[2]["content"][0]["text"])
 
     def test_current_result_after_resume_ignores_authenticated_prior_input(self) -> None:
-        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         task_key = "spec-614"
+        child = deterministic_child_id(main, task_key)
+        self.assertEqual(child.version, 5)
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         first = provider._initial_callback_generation(main, child, task_key)
         second = provider._resumed_callback_generation(first, "resume:first")
@@ -1150,6 +1152,65 @@ class OpenHandsProviderTest(unittest.TestCase):
                     self.assertFalse(provider._valid_control_schema(
                         kind, provider._signed_control_envelope(kind, invalid)
                     ))
+
+    def test_deterministic_uuid5_child_control_chain_is_canonical_and_foreign_ids_fail(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = deterministic_child_id(main, "spec-614")
+        foreign_child = deterministic_child_id(main, "spec-615")
+        foreign_main = uuid.UUID("33333333-3333-4333-8333-333333333333")
+        self.assertEqual(child.version, 5)
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, "spec-614")
+        common = {
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "owningMainId": str(main),
+            "taskKey": "spec-614",
+        }
+        controls = {
+            "MISSION": common,
+            "RESULT": {**common, "kind": "RESULT", "messageKey": "result:one", "text": "{}"},
+            "NEEDS_INPUT": {**common, "kind": "NEEDS_INPUT", "messageKey": "decision:one", "text": "{}"},
+            "RESUME_MISSION": {**common, "context": {"answer": "A"}, "messageKey": "resume:one"},
+            "CANCEL_MISSION": {**common, "messageKey": "cancel:one", "targetId": str(child)},
+        }
+        for kind, envelope in controls.items():
+            with self.subTest(kind=kind):
+                self.assertTrue(provider._valid_control_schema(
+                    kind, provider._signed_control_envelope(kind, envelope)
+                ))
+                foreign = {**envelope, "childId": str(foreign_child)}
+                if kind == "CANCEL_MISSION":
+                    foreign["targetId"] = str(foreign_child)
+                self.assertTrue(provider._valid_control_schema(
+                    kind,
+                    provider._signed_control_envelope(
+                        kind, foreign
+                    ),
+                ))
+        self.assertFalse(provider._valid_control_schema(
+            "MISSION",
+            provider._signed_control_envelope(
+                "MISSION", {**common, "childId": "not-a-uuid"}
+            ),
+        ))
+        mission = "MISSION\n" + _compact_json(
+            provider._signed_control_envelope("MISSION", common)
+        )
+        foreign_wait = "NEEDS_INPUT\n" + _compact_json(
+            provider._signed_control_envelope("NEEDS_INPUT", {
+                **common, "childId": str(foreign_child), "kind": "NEEDS_INPUT",
+                "messageKey": "decision:foreign-child", "text": "{}",
+            })
+        )
+        foreign_owner_wait = "NEEDS_INPUT\n" + _compact_json(
+            provider._signed_control_envelope("NEEDS_INPUT", {
+                **common, "kind": "NEEDS_INPUT", "messageKey": "decision:foreign-main",
+                "owningMainId": str(foreign_main), "text": "{}",
+            })
+        )
+        provider._event_texts = Mock(side_effect=[[mission], [foreign_wait, foreign_owner_wait]])
+        self.assertFalse(provider._has_waiting_input(main, child, "spec-614"))
 
     def test_terminal_cancellation_rejects_late_child_callback_and_resume(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -1432,8 +1493,9 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(provider._valid_control_signature("RESUME_MISSION", envelope))
 
     def test_cancellation_replay_and_replacement_proof_page_past_one_hundred_events(self) -> None:
-        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = deterministic_child_id(main, "spec-614")
+        self.assertEqual(child.version, 5)
         noise = [{"llm_message": {"content": [{"text": f"noise:{index}"}]}} for index in range(100)]
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         generation = provider._initial_callback_generation(main, child, "spec-614")

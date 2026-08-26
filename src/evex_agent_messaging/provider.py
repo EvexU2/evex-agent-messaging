@@ -960,9 +960,7 @@ class OpenHandsProvider:
         except (TypeError, ValueError, AttributeError):
             return False
         if (
-            child_id.version != 4
-            or owning_main_id.version != 4
-            or not self._bounded_string(envelope.get("taskKey"), _CONTROL_TASK_MAX_BYTES)
+            not self._bounded_string(envelope.get("taskKey"), _CONTROL_TASK_MAX_BYTES)
             or not isinstance(envelope.get("callbackGeneration"), str)
             or _CALLBACK_GENERATION.fullmatch(envelope["callbackGeneration"]) is None
             or not isinstance(envelope.get("controlSignature"), str)
@@ -995,6 +993,19 @@ class OpenHandsProvider:
                 and self._bounded_string(envelope.get("messageKey"), _CONTROL_KEY_MAX_BYTES)
             )
         return True
+
+    @staticmethod
+    def _matches_control_identity(
+        envelope: dict, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
+    ) -> bool:
+        try:
+            return (
+                uuid.UUID(envelope["childId"]) == child_id
+                and uuid.UUID(envelope["owningMainId"]) == owning_main_id
+                and envelope.get("taskKey") == task_key
+            )
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
 
     def _control_envelopes(self, conversation_id: uuid.UUID, kind: str) -> list[dict]:
         prefix = kind + "\n"
@@ -1042,11 +1053,8 @@ class OpenHandsProvider:
                     envelope = json.loads(text.removeprefix(prefix))
                 except (TypeError, ValueError):
                     break
-                if (
-                    isinstance(envelope, dict)
-                    and envelope.get("childId") == str(child_id)
-                    and envelope.get("owningMainId") == str(owning_main_id)
-                    and envelope.get("taskKey") == task_key
+                if isinstance(envelope, dict) and self._matches_control_identity(
+                    envelope, child_id, owning_main_id, task_key
                 ):
                     values.append(envelope)
                 break
@@ -1088,10 +1096,8 @@ class OpenHandsProvider:
         resumes = [
             envelope
             for envelope in self._control_envelopes(target_id, "RESUME_MISSION")
-            if (
-                envelope.get("childId") == str(target_id)
-                and envelope.get("owningMainId") == str(owning_main_id)
-                and envelope.get("taskKey") == task_key
+            if self._matches_control_identity(
+                envelope, target_id, owning_main_id, task_key
             )
         ]
         if resumes:
@@ -1103,9 +1109,9 @@ class OpenHandsProvider:
     ) -> bool:
         for envelope in self._control_envelopes(target_id, "CANCEL_MISSION"):
             if (
-                envelope.get("childId") == str(target_id)
-                and envelope.get("owningMainId") == str(owning_main_id)
-                and envelope.get("taskKey") == task_key
+                self._matches_control_identity(
+                    envelope, target_id, owning_main_id, task_key
+                )
                 and envelope.get("messageKey") == message_key
             ):
                 if (
@@ -1138,9 +1144,9 @@ class OpenHandsProvider:
     ) -> str | None:
         for envelope in self._control_envelopes(owning_main_id, "RESULT"):
             if (
-                envelope.get("childId") == str(child_id)
-                and envelope.get("owningMainId") == str(owning_main_id)
-                and envelope.get("taskKey") == task_key
+                self._matches_control_identity(
+                    envelope, child_id, owning_main_id, task_key
+                )
                 and envelope.get("kind") == "RESULT"
                 and isinstance(envelope.get("messageKey"), str)
             ):
@@ -1169,10 +1175,10 @@ class OpenHandsProvider:
         current = []
         for envelope in self._control_envelopes(owning_main_id, "NEEDS_INPUT"):
             if (
-                envelope.get("childId") == str(child_id)
+                self._matches_control_identity(
+                    envelope, child_id, owning_main_id, task_key
+                )
                 and envelope.get("kind") == "NEEDS_INPUT"
-                and envelope.get("owningMainId") == str(owning_main_id)
-                and envelope.get("taskKey") == task_key
             ):
                 if (
                     not self._valid_control_schema("NEEDS_INPUT", envelope)

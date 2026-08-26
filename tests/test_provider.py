@@ -973,7 +973,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         }), sort_keys=True, separators=(",", ":"))
         waiting = "NEEDS_INPUT\n" + json.dumps(provider._signed_control_envelope("NEEDS_INPUT", {
             "callbackGeneration": first, "childId": str(child), "kind": "NEEDS_INPUT",
-            "messageKey": "decision:second", "owningMainId": str(main), "taskKey": "spec-614",
+            "messageKey": "decision:second", "owningMainId": str(main), "taskKey": "spec-614", "text": "{}",
         }), sort_keys=True, separators=(",", ":"))
         provider._request = Mock(side_effect=[
             {"execution_status": "idle"},
@@ -1009,7 +1009,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         }))
         prior_wait = "NEEDS_INPUT\n" + _compact_json(provider._signed_control_envelope("NEEDS_INPUT", {
             "callbackGeneration": first, "childId": str(child), "kind": "NEEDS_INPUT",
-            "messageKey": "decision:first", "owningMainId": str(main), "taskKey": task_key,
+            "messageKey": "decision:first", "owningMainId": str(main), "taskKey": task_key, "text": "{}",
         }))
         callback = _compact_json({
             "callbackGeneration": second, "childId": str(child), "kind": "RESULT",
@@ -1060,7 +1060,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         def waiting(generation, key):
             return control("NEEDS_INPUT", {
                 "callbackGeneration": generation, "childId": str(child), "kind": "NEEDS_INPUT",
-                "messageKey": key, "owningMainId": str(main), "taskKey": task_key,
+                "messageKey": key, "owningMainId": str(main), "taskKey": task_key, "text": "{}",
             })
 
         chain = [resume_two, resume_one, mission]
@@ -1073,6 +1073,83 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider._event_texts = Mock(side_effect=[chain, [waiting(third, "decision:three"), waiting(third, "decision:four")]])
         with self.assertRaisesRegex(ProviderError, "history is ambiguous"):
             provider._has_waiting_input(main, child, task_key)
+
+    def test_signed_incomplete_current_input_fails_closed_before_result_delivery(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "spec-614"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, task_key)
+        mission = "MISSION\n" + _compact_json(provider._signed_control_envelope("MISSION", {
+            "callbackGeneration": generation, "childId": str(child),
+            "owningMainId": str(main), "taskKey": task_key,
+        }))
+        malformed = "NEEDS_INPUT\n" + _compact_json(provider._signed_control_envelope("NEEDS_INPUT", {
+            "callbackGeneration": generation, "childId": str(child), "kind": "NEEDS_INPUT",
+            "messageKey": "decision:missing-text", "owningMainId": str(main), "taskKey": task_key,
+        }))
+        callback = _compact_json({
+            "callbackGeneration": generation, "childId": str(child), "kind": "RESULT",
+            "messageKey": "result:after-malformed-input", "owningMainId": str(main),
+            "taskKey": task_key, "text": "{}",
+        })
+        provider._request = Mock(return_value={"execution_status": "idle"})
+        provider._event_texts = Mock(side_effect=[[mission], [], [mission], [malformed]])
+
+        with self.assertRaisesRegex(ProviderError, "control envelope is invalid"):
+            provider.send_child_message(
+                child, main, "result:after-malformed-input", "RESULT", callback
+            )
+        self.assertFalse(any(
+            len(call.args) > 1 and call.args[0] == "POST"
+            for call in provider._request.call_args_list
+        ))
+
+    def test_signed_control_schema_rejects_invalid_fields_for_every_control_kind(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, "spec-614")
+        common = {
+            "callbackGeneration": generation, "childId": str(child),
+            "owningMainId": str(main), "taskKey": "spec-614",
+        }
+        valid = {
+            "MISSION": dict(common),
+            "RESUME_MISSION": {**common, "context": {"answer": "A"}, "messageKey": "resume:one"},
+            "RESULT": {**common, "kind": "RESULT", "messageKey": "result:one", "text": "{}"},
+            "NEEDS_INPUT": {**common, "kind": "NEEDS_INPUT", "messageKey": "decision:one", "text": "{}"},
+            "CANCEL_MISSION": {**common, "messageKey": "cancel:one", "targetId": str(child)},
+        }
+        for kind, envelope in valid.items():
+            with self.subTest(kind=kind, case="canonical"):
+                self.assertTrue(provider._valid_control_schema(
+                    kind, provider._signed_control_envelope(kind, envelope)
+                ))
+            cases = [
+                {key: value for key, value in envelope.items() if key != "taskKey"},
+                {**envelope, "taskKey": ""},
+                {**envelope, "taskKey": 1},
+            ]
+            if kind != "MISSION":
+                cases.append({**envelope, "unexpected": True})
+            if kind in {"RESULT", "NEEDS_INPUT"}:
+                cases.extend([
+                    {key: value for key, value in envelope.items() if key != "text"},
+                    {**envelope, "text": ""},
+                    {**envelope, "text": {}},
+                    {**envelope, "text": "x" * 100_001},
+                    {**envelope, "kind": "RESULT" if kind == "NEEDS_INPUT" else "NEEDS_INPUT"},
+                ])
+            if kind == "RESUME_MISSION":
+                cases.extend([{**envelope, "context": {}}, {**envelope, "context": []}])
+            if kind == "CANCEL_MISSION":
+                cases.append({**envelope, "targetId": str(uuid.uuid4())})
+            for index, invalid in enumerate(cases):
+                with self.subTest(kind=kind, case=index):
+                    self.assertFalse(provider._valid_control_schema(
+                        kind, provider._signed_control_envelope(kind, invalid)
+                    ))
 
     def test_terminal_cancellation_rejects_late_child_callback_and_resume(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

@@ -37,6 +37,9 @@ _CONTROL_HISTORY_MAX_CURSOR_BYTES = 1_024
 _CONTROL_HISTORY_MAX_RESPONSE_BYTES = 1_048_576
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 _CONTROL_SIGNATURE = re.compile(r"^evxs1_[0-9a-f]{64}$")
+_CONTROL_TEXT_MAX_BYTES = 100_000
+_CONTROL_TASK_MAX_BYTES = 200
+_CONTROL_KEY_MAX_BYTES = 200
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -755,11 +758,25 @@ class OpenHandsProvider:
                 target_id, child_id, task_key
             ):
                 return self._settled(message_key, task_key, "NEEDS_INPUT")
+            delivered = self._signed_control_envelope(
+                kind,
+                {
+                    "callbackGeneration": callback_generation,
+                    "childId": str(child_id),
+                    "kind": kind,
+                    "messageKey": message_key,
+                    "owningMainId": str(target_id),
+                    "taskKey": task_key,
+                    "text": envelope.get("text"),
+                },
+            )
+            if not self._valid_control_schema(kind, delivered):
+                raise ProviderError("OpenHands Child callback envelope is invalid")
             return self.send_message(
                 target_id,
                 message_key,
                 kind,
-                _compact_json(self._signed_control_envelope(kind, envelope)),
+                _compact_json(delivered),
             )
 
     def cancel_mission(
@@ -910,6 +927,75 @@ class OpenHandsProvider:
             and hmac.compare_digest(signature, self._control_signature(kind, envelope))
         )
 
+    @staticmethod
+    def _bounded_string(value: object, maximum: int) -> bool:
+        return (
+            isinstance(value, str)
+            and bool(value)
+            and len(value.encode()) <= maximum
+        )
+
+    def _valid_control_schema(self, kind: str, envelope: dict) -> bool:
+        if not isinstance(envelope, dict):
+            return False
+        common = {
+            "callbackGeneration", "childId", "controlSignature", "owningMainId", "taskKey"
+        }
+        fields = {
+            "MISSION": common,
+            "RESUME_MISSION": common | {"context", "messageKey"},
+            "RESULT": common | {"kind", "messageKey", "text"},
+            "NEEDS_INPUT": common | {"kind", "messageKey", "text"},
+            "CANCEL_MISSION": common | {"messageKey", "targetId"},
+        }.get(kind)
+        if fields is None or not fields.issubset(envelope):
+            return False
+        # A Mission intentionally carries a caller-defined structured payload. Every
+        # subsequent control kind is closed to unknown fields.
+        if kind != "MISSION" and set(envelope) != fields:
+            return False
+        try:
+            child_id = uuid.UUID(envelope["childId"])
+            owning_main_id = uuid.UUID(envelope["owningMainId"])
+        except (TypeError, ValueError, AttributeError):
+            return False
+        if (
+            child_id.version != 4
+            or owning_main_id.version != 4
+            or not self._bounded_string(envelope.get("taskKey"), _CONTROL_TASK_MAX_BYTES)
+            or not isinstance(envelope.get("callbackGeneration"), str)
+            or _CALLBACK_GENERATION.fullmatch(envelope["callbackGeneration"]) is None
+            or not isinstance(envelope.get("controlSignature"), str)
+            or _CONTROL_SIGNATURE.fullmatch(envelope["controlSignature"]) is None
+        ):
+            return False
+        if kind in {"RESULT", "NEEDS_INPUT"}:
+            return (
+                envelope.get("kind") == kind
+                and self._bounded_string(envelope.get("messageKey"), _CONTROL_KEY_MAX_BYTES)
+                and self._bounded_string(envelope.get("text"), _CONTROL_TEXT_MAX_BYTES)
+            )
+        if kind == "RESUME_MISSION":
+            if not self._bounded_string(envelope.get("messageKey"), _CONTROL_KEY_MAX_BYTES):
+                return False
+            context = envelope.get("context")
+            if not isinstance(context, dict) or not context:
+                return False
+            try:
+                return len(_compact_json(context).encode()) <= _CONTROL_TEXT_MAX_BYTES
+            except (TypeError, ValueError):
+                return False
+        if kind == "CANCEL_MISSION":
+            try:
+                target_id = uuid.UUID(envelope["targetId"])
+            except (TypeError, ValueError, AttributeError):
+                return False
+            return (
+                target_id == child_id
+                and self._bounded_string(envelope.get("messageKey"), _CONTROL_KEY_MAX_BYTES)
+            )
+        return True
+
     def _control_envelopes(self, conversation_id: uuid.UUID, kind: str) -> list[dict]:
         prefix = kind + "\n"
         envelopes = []
@@ -967,7 +1053,8 @@ class OpenHandsProvider:
         if len(missions) != 1:
             raise ProviderError("OpenHands Child callback generation history is ambiguous")
         if (
-            not self._valid_control_signature("MISSION", missions[0])
+            not self._valid_control_schema("MISSION", missions[0])
+            or not self._valid_control_signature("MISSION", missions[0])
             or not hmac.compare_digest(str(missions[0].get("callbackGeneration")), initial)
         ):
             raise ProviderError("OpenHands Child callback generation history is incomplete")
@@ -976,10 +1063,9 @@ class OpenHandsProvider:
             message_key = envelope.get("messageKey")
             next_generation = envelope.get("callbackGeneration")
             if (
-                not self._valid_control_signature("RESUME_MISSION", envelope)
+                not self._valid_control_schema("RESUME_MISSION", envelope)
+                or not self._valid_control_signature("RESUME_MISSION", envelope)
                 or not isinstance(message_key, str)
-                or not message_key
-                or not isinstance(envelope.get("context"), dict)
                 or not isinstance(next_generation, str)
                 or not _CALLBACK_GENERATION.fullmatch(next_generation)
                 or not hmac.compare_digest(
@@ -1022,8 +1108,11 @@ class OpenHandsProvider:
                 and envelope.get("taskKey") == task_key
                 and envelope.get("messageKey") == message_key
             ):
-                if not self._valid_control_signature("CANCEL_MISSION", envelope):
-                    raise ProviderError("OpenHands control history is unauthenticated")
+                if (
+                    not self._valid_control_schema("CANCEL_MISSION", envelope)
+                    or not self._valid_control_signature("CANCEL_MISSION", envelope)
+                ):
+                    raise ProviderError("OpenHands control envelope is invalid")
                 generation = envelope.get("callbackGeneration")
                 if (
                     not isinstance(generation, str)
@@ -1059,7 +1148,8 @@ class OpenHandsProvider:
                     child_id, owning_main_id, task_key
                 )
                 if (
-                    not self._valid_control_signature("RESULT", envelope)
+                    not self._valid_control_schema("RESULT", envelope)
+                    or not self._valid_control_signature("RESULT", envelope)
                     or not isinstance(envelope.get("callbackGeneration"), str)
                     or not hmac.compare_digest(
                         envelope["callbackGeneration"], current_generation
@@ -1085,10 +1175,11 @@ class OpenHandsProvider:
                 and envelope.get("taskKey") == task_key
             ):
                 if (
-                    not self._valid_control_signature("NEEDS_INPUT", envelope)
+                    not self._valid_control_schema("NEEDS_INPUT", envelope)
+                    or not self._valid_control_signature("NEEDS_INPUT", envelope)
                     or not isinstance(envelope.get("callbackGeneration"), str)
                 ):
-                    raise ProviderError("OpenHands control history is unauthenticated")
+                    raise ProviderError("OpenHands control envelope is invalid")
                 matches_chain = any(
                     hmac.compare_digest(envelope["callbackGeneration"], generation)
                     for generation in generations

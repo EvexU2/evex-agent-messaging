@@ -22,6 +22,23 @@ _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
+_RESUME_AUTHORITY_KEYS = frozenset(
+    {
+        "allowedmutations",
+        "authority",
+        "branch",
+        "capabilities",
+        "checkout",
+        "headsha",
+        "mission",
+        "model",
+        "prohibitions",
+        "reasoningeffort",
+        "repository",
+        "role",
+        "skills",
+    }
+)
 
 
 class MessagingProvider(Protocol):
@@ -256,13 +273,31 @@ class MessagingService:
         )
         if not isinstance(context, dict) or not context:
             raise CapabilityError("resume context must contain verified facts")
+        if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
+            raise CapabilityError("messageKey must be bounded and non-empty")
         try:
             copied_context = json.loads(json.dumps(context, separators=(",", ":")))
         except (TypeError, ValueError) as exc:
             raise CapabilityError("resume context must be JSON") from exc
+        if len(_compact(copied_context).encode()) > 20000:
+            raise CapabilityError("resume context must be bounded")
+        if self._contains_resume_authority(copied_context):
+            raise CapabilityError("resume context cannot expand Mission authority")
         return self._provider.resume_mission(
             target_id, message_key, task_key, copied_context, capability.owning_main_id
         )
+
+    @classmethod
+    def _contains_resume_authority(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).replace("_", "").lower() in _RESUME_AUTHORITY_KEYS
+                or cls._contains_resume_authority(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(cls._contains_resume_authority(item) for item in value)
+        return False
 
     def get_usage(
         self, token: str, target_id: uuid.UUID, task_key: str

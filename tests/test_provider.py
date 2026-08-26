@@ -1068,6 +1068,127 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(result["outcome"], "RESUMED")
         self.assertIn(provider._resumed_callback_generation(first, "resume:second"), provider._request.call_args.args[2]["content"][0]["text"])
 
+    def test_terminal_result_accepts_repeatable_fresh_key_resume_and_exact_replay(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        task_key = "plan-796"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        initial = provider._initial_callback_generation(main, child, task_key)
+
+        def control(kind, envelope):
+            return kind + "\n" + _compact_json(
+                provider._signed_control_envelope(kind, envelope)
+            )
+
+        mission = control("MISSION", {
+            "callbackGeneration": initial,
+            "childId": str(child),
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        })
+        first_result = control("RESULT", {
+            "callbackGeneration": initial,
+            "childId": str(child),
+            "kind": "RESULT",
+            "messageKey": "result:first",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+            "text": "{}",
+        })
+        child_events = [mission]
+        main_events = [first_result]
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: (
+                list(child_events) if conversation_id == child else list(main_events)
+            )
+        )
+        provider._request = Mock(
+            side_effect=lambda method, path, *args: (
+                {"execution_status": "finished"} if method == "GET" else {}
+            )
+        )
+
+        first = provider.resume_mission(
+            child,
+            "review:first",
+            task_key,
+            {"findings": ["P2-1"]},
+            main,
+        )
+        self.assertEqual(first["outcome"], "RESUMED")
+        self.assertTrue(first["accepted"])
+        first_resume = provider._request.call_args_list[-1].args[2]["content"][0]["text"]
+        child_events.insert(0, first_resume)
+
+        provider._request.reset_mock()
+        replay = provider.resume_mission(
+            child,
+            "review:first",
+            task_key,
+            {"findings": ["P2-1"]},
+            main,
+        )
+        self.assertEqual(replay["outcome"], "RESUMED")
+        self.assertTrue(replay["accepted"])
+        self.assertFalse(any(call.args[0] == "POST" for call in provider._request.call_args_list))
+
+        with self.assertRaisesRegex(ProviderError, "changed context"):
+            provider.resume_mission(
+                child,
+                "review:first",
+                task_key,
+                {"findings": ["P2-2"]},
+                main,
+            )
+
+        second_generation = provider._resumed_callback_generation(
+            initial, "review:first"
+        )
+        main_events.insert(0, control("RESULT", {
+            "callbackGeneration": second_generation,
+            "childId": str(child),
+            "kind": "RESULT",
+            "messageKey": "result:second",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+            "text": "{}",
+        }))
+        provider._request.reset_mock()
+        second = provider.resume_mission(
+            child,
+            "review:second",
+            task_key,
+            {"findings": ["P1-2"]},
+            main,
+        )
+        self.assertEqual(second["outcome"], "RESUMED")
+        self.assertTrue(second["accepted"])
+        second_resume = provider._request.call_args_list[-1].args[2]["content"][0]["text"]
+        self.assertIn(
+            provider._resumed_callback_generation(second_generation, "review:second"),
+            second_resume,
+        )
+
+    def test_terminal_result_resume_rejects_cancelled_child(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={"execution_status": "cancelled"})
+
+        self.assertEqual(
+            provider.resume_mission(
+                child, "review:first", "plan-796", {"findings": ["P2"]}, main
+            ),
+            {
+                "accepted": False,
+                "messageKey": "review:first",
+                "taskKey": "plan-796",
+                "outcome": "CANCELLED",
+            },
+        )
+        provider._event_texts = Mock()
+        provider._event_texts.assert_not_called()
+
     def test_current_result_after_resume_ignores_authenticated_prior_input(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         task_key = "spec-614"

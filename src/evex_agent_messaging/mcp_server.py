@@ -36,7 +36,7 @@ TOOLS = [
     },
     {
         "name": "resume_mission",
-        "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
+        "description": "Resume the exact Child mission with verified delta context, including a fresh focused finding after an accepted terminal result; exact replay is a no-op and authority never expands.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey", "context"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}, "context": {"type": "object", "minProperties": 1}}},
     },
     {

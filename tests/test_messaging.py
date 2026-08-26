@@ -127,6 +127,17 @@ class MessagingTest(unittest.TestCase):
             service.resume_mission(
                 self.main_token(), child, "writer-604", "resume-empty", {}
             )
+        for context in (
+            {"allowedMutations": ["push main"]},
+            {"finding": {"checkout": {"branch": "main"}}},
+            {"capabilities": ["runtime_environment"]},
+        ):
+            with self.subTest(context=context), self.assertRaisesRegex(
+                CapabilityError, "cannot expand Mission authority"
+            ):
+                service.resume_mission(
+                    self.main_token(), child, "writer-604", "resume-authority", context
+                )
         self.assertEqual([call[0] for call in provider.calls], ["create", "create", "send", "cancel", "resume"])
 
     def test_main_reads_own_and_deterministic_child_usage_only(self):

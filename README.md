@@ -24,6 +24,11 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   Provider-emitted control records are HMAC-authenticated before they can win a result, input, resume,
   cancellation-replay, or replacement decision. This required field is a compatibility change for Child
   result callers. A native terminal `CANCELLED` Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
+- `send_callback_fallback`: after exactly three current-generation, canonical, byte-identical
+  `send_to_parent` inputs receive provider-classified retryable transport errors, converge the one
+  immutable-Mission-authorized recovery marker with the server-held repository-scoped GitHub App
+  credential. The no-argument tool derives target, body, retry evidence, and credential server-side;
+  an exact App-authored marker replay is a no-op and never proves Mission completion.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main. It likewise requires the
   exact current `callbackGeneration`, so an earlier continuation cannot recreate a cleared input gate.
 - `cancel_mission`: stop the exact Child task. The owning Main must provide its deterministic Child,
@@ -52,10 +57,11 @@ allowed action, and expiry. The server holds the OpenHands credential; it never 
 tool output, or child environment variables. There is no persistent state: callers provide a stable
 message key and the Main deduplicates semantic replays.
 
-Children must complete one accepted `send_to_parent` call before they finish. There is no provider
-Stop hook, completion endpoint, poller, receipt store, or second callback channel. If a process crash
-prevents that callback, the owning Issue remains incomplete and an operator restarts its deterministic
-Main in Recovery Mode; the Main reuses current Issues, branches, pull requests, and verified evidence.
+Children must complete one accepted `send_to_parent` call before they finish. The fallback marker is
+wake-only and cannot replace that evidence. There is no completion endpoint, poller, receipt store, or
+generic second callback channel. If a process crash prevents both callback and authorized fallback,
+the owning Issue remains incomplete and an operator restarts its deterministic Main in Recovery Mode;
+the Main reuses current Issues, branches, pull requests, and verified evidence.
 
 The trusted Event Gateway/host mints the short-lived Main capability with
 `main_capability_token(...)` and binds it to that Conversation's MCP transport as Bearer auth. Child
@@ -88,6 +94,8 @@ export EVEX_MESSAGING_SECRET='long-random-secret'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_API_KEY='server-only-key'
 export OPENHANDS_PUBLIC_URL='http://openhands.example/canvas'
+export EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN='repository-scoped-app-token'
+export EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN='messaging-fallback[bot]'
 export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```

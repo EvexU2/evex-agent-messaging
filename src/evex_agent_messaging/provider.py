@@ -28,6 +28,14 @@ class ProviderError(RuntimeError):
         self.status = status
 
 
+class RetryableProviderError(ProviderError):
+    """Transient provider transport failure that may be retried safely."""
+
+
+RETRYABLE_MCP_ERROR_CODE = -32001
+RETRYABLE_MCP_ERROR_MESSAGE = "EVEX_RETRYABLE_MESSAGING_TRANSPORT"
+
+
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _NATIVE_CANCELLED = "cancelled"
 _RESULT_TERMINAL_STATES = frozenset({"finished", "error", "stuck"})
@@ -124,9 +132,16 @@ class OpenHandsProvider:
                     raise ProviderError("OpenHands response is truncated")
                 value = json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
-            raise ProviderError("OpenHands messaging transport failed", status=exc.code) from exc
+            error_type = (
+                RetryableProviderError
+                if exc.code in {408, 429} or exc.code >= 500
+                else ProviderError
+            )
+            raise error_type(
+                "OpenHands messaging transport failed", status=exc.code
+            ) from exc
         except OSError as exc:
-            raise ProviderError("OpenHands messaging transport failed") from exc
+            raise RetryableProviderError("OpenHands messaging transport failed") from exc
         if not isinstance(value, dict):
             raise ProviderError("OpenHands returned an invalid response")
         return value
@@ -401,7 +416,7 @@ class OpenHandsProvider:
                 continue
             if title != "mcp.evex_agent_messaging.send_to_parent":
                 continue
-            if event.get("kind") != "ACPToolCallEvent" or event.get("status") != "completed":
+            if event.get("kind") != "ACPToolCallEvent" or event.get("status") != "failed":
                 continue
             raw_input = event.get("raw_input")
             arguments = raw_input.get("arguments") if isinstance(raw_input, dict) else None
@@ -419,7 +434,12 @@ class OpenHandsProvider:
                 continue
             raw_output = event.get("raw_output")
             error = raw_output.get("error") if isinstance(raw_output, dict) else None
-            if not isinstance(error, dict) or error.get("code") != -32000:
+            message = error.get("message") if isinstance(error, dict) else None
+            retryable_marker = (
+                f"Mcp error: {RETRYABLE_MCP_ERROR_CODE}: "
+                f"{RETRYABLE_MCP_ERROR_MESSAGE}"
+            )
+            if not isinstance(message, str) or retryable_marker not in message:
                 return None
             attempts.append(
                 {

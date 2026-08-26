@@ -9,7 +9,12 @@ import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .provider import OpenHandsProvider
+from .provider import (
+    OpenHandsProvider,
+    RETRYABLE_MCP_ERROR_CODE,
+    RETRYABLE_MCP_ERROR_MESSAGE,
+    RetryableProviderError,
+)
 from .service import MessagingService
 from .fallback import GitHubCallbackFallbackAdapter
 
@@ -106,6 +111,12 @@ class McpServer:
                 return self._error(request_id, -32602, "unknown messaging tool")
         except (KeyError, ValueError, TypeError) as exc:
             return self._error(request_id, -32602, f"invalid tool arguments: {exc}")
+        except RetryableProviderError:
+            return self._error(
+                request_id,
+                RETRYABLE_MCP_ERROR_CODE,
+                RETRYABLE_MCP_ERROR_MESSAGE,
+            )
         except Exception as exc:
             return self._error(request_id, -32000, str(exc))
         return self._result(request_id, {"content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}], "structuredContent": value})

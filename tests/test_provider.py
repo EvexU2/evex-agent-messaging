@@ -9,7 +9,14 @@ import tempfile
 import uuid
 import unittest
 
-from evex_agent_messaging.provider import OpenHandsProvider, ProviderError, _compact_json
+from evex_agent_messaging.provider import (
+    OpenHandsProvider,
+    ProviderError,
+    RETRYABLE_MCP_ERROR_CODE,
+    RETRYABLE_MCP_ERROR_MESSAGE,
+    RetryableProviderError,
+    _compact_json,
+)
 from evex_agent_messaging.capability import deterministic_child_id
 
 
@@ -57,7 +64,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                     {
                         "kind": "ACPToolCallEvent",
                         "title": "mcp.evex_agent_messaging.send_to_parent",
-                        "status": "completed",
+                        "status": "failed",
                         "is_error": True,
                         "tool_call_id": "exec-3",
                         "raw_input": {
@@ -70,12 +77,17 @@ class OpenHandsProviderTest(unittest.TestCase):
                                 }
                             },
                         },
-                        "raw_output": {"error": {"code": -32000}, "result": None},
+                        "raw_output": {
+                            "error": {
+                                "message": "Mcp error: -32001: EVEX_RETRYABLE_MESSAGING_TRANSPORT"
+                            },
+                            "result": None,
+                        },
                     },
                     {
                         "kind": "ACPToolCallEvent",
                         "title": "mcp.evex_agent_messaging.send_to_parent",
-                        "status": "completed",
+                        "status": "failed",
                         "is_error": True,
                         "tool_call_id": "exec-2",
                         "raw_input": {
@@ -88,12 +100,17 @@ class OpenHandsProviderTest(unittest.TestCase):
                                 }
                             },
                         },
-                        "raw_output": {"error": {"code": -32000}, "result": None},
+                        "raw_output": {
+                            "error": {
+                                "message": "Mcp error: -32001: EVEX_RETRYABLE_MESSAGING_TRANSPORT"
+                            },
+                            "result": None,
+                        },
                     },
                     {
                         "kind": "ACPToolCallEvent",
                         "title": "mcp.evex_agent_messaging.send_to_parent",
-                        "status": "completed",
+                        "status": "failed",
                         "is_error": True,
                         "tool_call_id": "exec-1",
                         "raw_input": {
@@ -106,7 +123,12 @@ class OpenHandsProviderTest(unittest.TestCase):
                                 }
                             },
                         },
-                        "raw_output": {"error": {"code": -32000}, "result": None},
+                        "raw_output": {
+                            "error": {
+                                "message": "Mcp error: -32001: EVEX_RETRYABLE_MESSAGING_TRANSPORT"
+                            },
+                            "result": None,
+                        },
                     },
                     {
                         "kind": "MessageEvent",
@@ -143,6 +165,13 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         provider._terminal_result_key.assert_called_once_with(
             owning_main, child, "issue-732"
+        )
+
+        provider._request.return_value["items"][1]["raw_output"]["error"][
+            "message"
+        ] = "Mcp error: -32000: unrelated internal failure"
+        self.assertIsNone(
+            provider.callback_fallback_context(child, owning_main, "issue-732")
         )
 
     def test_callback_event_history_follows_bounded_pages(self) -> None:

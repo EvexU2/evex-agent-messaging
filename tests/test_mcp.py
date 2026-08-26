@@ -19,6 +19,7 @@ from evex_agent_messaging.mcp_server import (  # noqa: E402
     main,
     make_http_server,
 )
+from evex_agent_messaging.provider import RetryableProviderError  # noqa: E402
 
 
 class FakeService:
@@ -174,6 +175,26 @@ class McpServerTest(unittest.TestCase):
         }, capability_ref="evx1_opaque")
         self.assertIn("accepts no arguments", rejected["error"]["message"])
         self.assertEqual(len(self.service.calls), 1)
+
+    def test_retryable_provider_failure_has_stable_mcp_discriminator(self):
+        def fail(*_args):
+            raise RetryableProviderError("credential-free internal detail")
+
+        self.service.send_to_parent = fail
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 43,
+                "method": "tools/call",
+                "params": {"name": "send_to_parent", "arguments": {"result": {}}},
+            },
+            capability_ref="evx1_opaque",
+        )
+
+        self.assertEqual(result["error"], {
+            "code": -32001,
+            "message": "EVEX_RETRYABLE_MESSAGING_TRANSPORT",
+        })
 
     def test_tool_call_without_transport_capability_fails_closed(self):
         result = self.server.handle({

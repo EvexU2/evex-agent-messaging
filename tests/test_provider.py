@@ -1286,45 +1286,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._request.call_args.args[0:2], ("POST", f"/api/conversations/{main}/events")
         )
 
-    def test_needs_input_is_accepted_only_after_native_child_pause(self) -> None:
-        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
-        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
-        generation = "evxg1_" + "0" * 64
-        callback = json.dumps({
-            "callbackGeneration": generation,
-            "childId": str(child),
-            "kind": "NEEDS_INPUT",
-            "messageKey": "decision:pause",
-            "owningMainId": str(main),
-            "taskKey": "spec-614",
-            "text": '{"options":["A","B"],"question":"Choose"}',
-        })
-        provider = OpenHandsProvider("http://openhands", "key", "http://public")
-        provider._current_callback_generation = Mock(return_value=generation)
-        provider._terminal_result_key = Mock(return_value=None)
-        provider._request = Mock(side_effect=[
-            {"execution_status": "running"},
-            {"execution_status": "idle"},
-            {},
-            {},
-            {"execution_status": "paused"},
-        ])
-
-        result = provider.send_child_message(
-            child, main, "decision:pause", "NEEDS_INPUT", callback
-        )
-
-        self.assertEqual(result, {"accepted": True, "messageKey": "decision:pause"})
-        self.assertEqual(
-            provider._request.call_args_list[-2].args,
-            ("POST", f"/api/conversations/{child}/pause", {}),
-        )
-        self.assertEqual(
-            provider._request.call_args_list[-1].args,
-            ("GET", f"/api/conversations/{child}"),
-        )
-
-    def test_needs_input_fails_closed_if_child_finishes_before_pause(self) -> None:
+    def test_needs_input_pause_failure_never_delivers_to_parent(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         generation = "evxg1_" + "0" * 64
@@ -1340,10 +1302,9 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         provider._current_callback_generation = Mock(return_value=generation)
         provider._terminal_result_key = Mock(return_value=None)
+        provider._waiting_input_key = Mock(return_value=None)
         provider._request = Mock(side_effect=[
             {"execution_status": "running"},
-            {"execution_status": "idle"},
-            {},
             {},
             {"execution_status": "finished"},
         ])
@@ -1352,6 +1313,102 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider.send_child_message(
                 child, main, "decision:terminal", "NEEDS_INPUT", callback
             )
+        self.assertFalse(any(
+            call.args[:2] == ("POST", f"/api/conversations/{main}/events")
+            for call in provider._request.call_args_list
+        ))
+
+    def test_needs_input_exact_replay_delivers_once_and_returns_pending_outcome(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        generation = "evxg1_" + "0" * 64
+        callback = json.dumps({
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "kind": "NEEDS_INPUT",
+            "messageKey": "decision:pause",
+            "owningMainId": str(main),
+            "taskKey": "spec-614",
+            "text": '{"options":["A","B"],"question":"Choose"}',
+        })
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._current_callback_generation = Mock(return_value=generation)
+        provider._terminal_result_key = Mock(return_value=None)
+        provider._waiting_input_key = Mock(side_effect=[None, "decision:pause"])
+        provider._request = Mock(side_effect=[
+            {"execution_status": "running"},
+            {},
+            {"execution_status": "paused"},
+            {"execution_status": "idle"},
+            {},
+            {"execution_status": "paused"},
+        ])
+
+        self.assertEqual(
+            provider.send_child_message(child, main, "decision:pause", "NEEDS_INPUT", callback),
+            {"accepted": True, "messageKey": "decision:pause"},
+        )
+        self.assertEqual(
+            provider.send_child_message(child, main, "decision:pause", "NEEDS_INPUT", callback),
+            {"accepted": True, "messageKey": "decision:pause", "outcome": "NEEDS_INPUT"},
+        )
+        parent_posts = [
+            call for call in provider._request.call_args_list
+            if call.args[:2] == ("POST", f"/api/conversations/{main}/events")
+        ]
+        self.assertEqual(len(parent_posts), 1)
+        pause_index = next(
+            index for index, call in enumerate(provider._request.call_args_list)
+            if call.args == ("POST", f"/api/conversations/{child}/pause", {})
+        )
+        parent_index = provider._request.call_args_list.index(parent_posts[0])
+        self.assertLess(pause_index, parent_index)
+
+    def test_native_paused_decision_remains_authorized_for_resume(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "spec-614"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, task_key)
+        mission = "MISSION\n" + _compact_json(provider._signed_control_envelope("MISSION", {
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        }))
+        events = {child: [mission], main: []}
+        provider._event_texts = Mock(side_effect=lambda conversation_id: events[conversation_id])
+        provider._request = Mock(side_effect=[
+            {"execution_status": "running"},
+            {},
+            {"execution_status": "paused"},
+            {"execution_status": "paused"},
+            {},
+        ])
+
+        def deliver(target_id, message_key, kind, text):
+            events[target_id].append(f"{kind}\n{text}")
+            return {"accepted": True, "messageKey": message_key}
+
+        provider.send_message = Mock(side_effect=deliver)
+        callback = json.dumps({
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "kind": "NEEDS_INPUT",
+            "messageKey": "decision:pause",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+            "text": '{"options":["A","B"],"question":"Choose"}',
+        })
+
+        self.assertEqual(
+            provider.send_child_message(child, main, "decision:pause", "NEEDS_INPUT", callback),
+            {"accepted": True, "messageKey": "decision:pause"},
+        )
+        self.assertEqual(
+            provider.resume_mission(child, "resume:answer", task_key, {"answer": "A"}, main),
+            {"accepted": True, "messageKey": "resume:answer", "taskKey": task_key, "outcome": "RESUMED"},
+        )
 
     def test_callback_generation_rejects_stale_and_accepts_only_current_resumed_turn(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

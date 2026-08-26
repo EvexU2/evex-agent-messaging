@@ -1522,11 +1522,27 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(replacement_proof)
         self.assertEqual(
             provider._request.call_args_list[2].args,
-            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&page_id=older"),
+            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&source=user&page_id=older"),
         )
         self.assertEqual(
             provider._request.call_args_list[5].args,
-            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&page_id=older"),
+            ("GET", f"/api/conversations/{child}/events/search?limit=100&sort_order=TIMESTAMP_DESC&source=user&page_id=older"),
+        )
+
+    def test_control_history_filters_provider_noise_before_bounded_pagination(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(return_value={"items": [], "next_page_id": None})
+
+        self.assertEqual(provider._event_texts(child), [])
+
+        self.assertEqual(
+            provider._request.call_args.args,
+            (
+                "GET",
+                f"/api/conversations/{child}/events/search?limit=100"
+                "&sort_order=TIMESTAMP_DESC&source=user",
+            ),
         )
 
     def test_paused_provider_rejects_write_create_and_resume_before_durable_mutation(self) -> None:

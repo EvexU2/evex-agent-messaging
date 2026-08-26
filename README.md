@@ -17,8 +17,12 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
   for that Child.
 - `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives
-  identity, kind, and replay key. A native terminal `CANCELLED` Child rejects late `RESULT` and
-  `NEEDS_INPUT` callbacks.
+  identity, kind, and replay key. Each Child Mission and authorized `RESUME_MISSION` event carries a
+  provider-derived opaque `callbackGeneration`; `send_to_parent.result.callbackGeneration` must echo
+  that exact current value. Messaging re-derives it from bounded provider event history and rejects
+  stale, foreign, missing, malformed, ambiguous, incomplete, or truncated evidence before delivery.
+  This required field is a compatibility change for Child result callers. A native terminal `CANCELLED`
+  Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main.
 - `cancel_mission`: stop the exact Child task. The owning Main must provide its deterministic Child,
   task, and stable cancellation key. Cancellation serializes against a terminal result and resume;
@@ -26,6 +30,7 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   that terminal `CANCELLED` outcome. A finished/error/stuck Child is not relabeled as cancelled.
 - `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
   context cannot expand its immutable Mission authority and is rejected after terminal cancellation.
+  The provider advances the opaque callback generation only after the authorized resume is admitted.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 - `get_usage`: read live per-Conversation model, reasoning effort, uncached/cached/cache-write input,
   output with reasoning as a subset, cache-hit rate, long-context turns, and a versioned official

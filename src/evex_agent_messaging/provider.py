@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
+import hmac
 import json
 from pathlib import Path
 import re
@@ -31,6 +33,8 @@ _CONTROL_HISTORY_MAX_PAGES = 8
 _CONTROL_HISTORY_MAX_TEXTS = 800
 _CONTROL_HISTORY_MAX_TEXT_BYTES = 1_000_000
 _CONTROL_HISTORY_MAX_CURSOR_BYTES = 1_024
+_CONTROL_HISTORY_MAX_RESPONSE_BYTES = 1_048_576
+_CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -91,7 +95,18 @@ class OpenHandsProvider:
             with urllib.request.urlopen(
                 request, timeout=self.timeout if timeout is None else timeout
             ) as response:
-                raw = response.read()
+                declared_size = response.headers.get("Content-Length")
+                if isinstance(declared_size, str):
+                    try:
+                        if int(declared_size) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
+                            raise ProviderError(
+                                "OpenHands response exceeds bounded byte budget"
+                            )
+                    except ValueError:
+                        raise ProviderError("OpenHands response is invalid") from None
+                raw = response.read(_CONTROL_HISTORY_MAX_RESPONSE_BYTES + 1)
+                if not isinstance(raw, bytes) or len(raw) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
+                    raise ProviderError("OpenHands response exceeds bounded byte budget")
                 value = json.loads(raw) if raw else {}
         except urllib.error.HTTPError as exc:
             raise ProviderError("OpenHands messaging transport failed", status=exc.code) from exc
@@ -157,7 +172,15 @@ class OpenHandsProvider:
         model: str,
         reasoning_effort: str,
     ) -> dict:
-        mission_text = "MISSION\n" + json.dumps(mission, sort_keys=True, separators=(",", ":"))
+        delivered_mission = {
+            **mission,
+            "callbackGeneration": self._initial_callback_generation(
+                parent_id, child_id, task_key
+            ),
+        }
+        mission_text = "MISSION\n" + json.dumps(
+            delivered_mission, sort_keys=True, separators=(",", ":")
+        )
         try:
             existing = self._request("GET", f"/api/conversations/{child_id}")
             self._validate_existing_child(existing, parent_id, child_id, role, task_key, model, reasoning_effort, capabilities)
@@ -167,7 +190,14 @@ class OpenHandsProvider:
                     self._checkout_path(child_id), mission.get("checkout"), exact=False
                 )
                 return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
-            created = False
+            # Do not append a second Mission to a recovered Child when its prior
+            # continuation evidence cannot prove the new generation contract.
+            self._current_callback_generation(child_id, parent_id, task_key)
+            self._switch_and_verify_model(child_id, model)
+            self._validate_existing_checkout(
+                self._checkout_path(child_id), mission.get("checkout"), exact=False
+            )
+            return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
         except ProviderError as exc:
             if exc.status != 404:
                 raise
@@ -227,6 +257,23 @@ class OpenHandsProvider:
                 self._validate_existing_child(
                     existing, parent_id, child_id, role, task_key, model, reasoning_effort, capabilities
                 )
+                if self._has_user_message(child_id, mission_text):
+                    self._switch_and_verify_model(child_id, model)
+                    self._validate_existing_checkout(
+                        self._checkout_path(child_id), mission.get("checkout"), exact=False
+                    )
+                    return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
+                try:
+                    self._current_callback_generation(child_id, parent_id, task_key)
+                except ProviderError:
+                    if self._has_any_mission_event(child_id):
+                        raise
+                else:
+                    self._switch_and_verify_model(child_id, model)
+                    self._validate_existing_checkout(
+                        self._checkout_path(child_id), mission.get("checkout"), exact=False
+                    )
+                    return {"conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}", "provider": "openhands", "created": False}
                 created = False
             if created:
                 self._request(
@@ -303,6 +350,9 @@ class OpenHandsProvider:
             ):
                 return True
         return False
+
+    def _has_any_mission_event(self, child_id: uuid.UUID) -> bool:
+        return any(text.startswith("MISSION\n") for text in self._event_texts(child_id))
 
     def _validate_existing_child(
         self,
@@ -673,6 +723,16 @@ class OpenHandsProvider:
                 or envelope.get("messageKey") != message_key
             ):
                 raise ProviderError("OpenHands Child callback identity is invalid")
+            callback_generation = envelope.get("callbackGeneration")
+            if not isinstance(callback_generation, str) or not _CALLBACK_GENERATION.fullmatch(
+                callback_generation
+            ):
+                raise ProviderError("OpenHands Child callback generation is invalid")
+            current_generation = self._current_callback_generation(
+                child_id, target_id, task_key
+            )
+            if not hmac.compare_digest(callback_generation, current_generation):
+                raise ProviderError("OpenHands Child callback generation is stale")
             result_key = self._terminal_result_key(target_id, child_id, task_key)
             if status in _RESULT_TERMINAL_STATES:
                 return self._settled(message_key, task_key, "RESULT")
@@ -760,7 +820,13 @@ class OpenHandsProvider:
                 return self._settled(message_key, task_key, "RESULT")
             if self._has_resume(target_id, task_key, owning_main_id):
                 return self._settled(message_key, task_key, "RESUMED")
+            current_generation = self._current_callback_generation(
+                target_id, owning_main_id, task_key
+            )
             envelope = {
+                "callbackGeneration": self._resumed_callback_generation(
+                    current_generation, message_key
+                ),
                 "messageKey": message_key,
                 "owningMainId": str(owning_main_id),
                 "taskKey": task_key,
@@ -794,6 +860,76 @@ class OpenHandsProvider:
         if self._has_cancel(target_id, task_key, message_key, owning_main_id):
             return self._cancelled(message_key, task_key)
         return self._settled(message_key, task_key, "CANCELLED")
+
+    def _generation(self, value: dict) -> str:
+        payload = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return "evxg1_" + hmac.new(
+            self.api_key.encode(), payload, hashlib.sha256
+        ).hexdigest()
+
+    def _initial_callback_generation(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> str:
+        return self._generation(
+            {
+                "childId": str(child_id),
+                "kind": "initial",
+                "owningMainId": str(owning_main_id),
+                "taskKey": task_key,
+            }
+        )
+
+    def _resumed_callback_generation(self, previous: str, message_key: str) -> str:
+        return self._generation(
+            {"messageKey": message_key, "previous": previous, "kind": "resume"}
+        )
+
+    def _current_callback_generation(
+        self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
+    ) -> str:
+        initial = self._initial_callback_generation(owning_main_id, child_id, task_key)
+        missions = []
+        resumes = []
+        for text in self._event_texts(child_id):
+            if text.startswith("MISSION\n"):
+                try:
+                    envelope = json.loads(text.removeprefix("MISSION\n"))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    envelope.get("childId") == str(child_id)
+                    and envelope.get("owningMainId") == str(owning_main_id)
+                    and envelope.get("taskKey") == task_key
+                ):
+                    missions.append(envelope)
+            elif text.startswith("RESUME_MISSION\n"):
+                try:
+                    envelope = json.loads(text.removeprefix("RESUME_MISSION\n"))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    envelope.get("owningMainId") == str(owning_main_id)
+                    and envelope.get("taskKey") == task_key
+                ):
+                    resumes.append(envelope)
+        if len(missions) != 1 or len(resumes) > 1:
+            raise ProviderError("OpenHands Child callback generation history is ambiguous")
+        if missions[0].get("callbackGeneration") != initial:
+            raise ProviderError("OpenHands Child callback generation history is incomplete")
+        if not resumes:
+            return initial
+        message_key = resumes[0].get("messageKey")
+        generation = resumes[0].get("callbackGeneration")
+        if (
+            not isinstance(message_key, str)
+            or not isinstance(generation, str)
+            or not _CALLBACK_GENERATION.fullmatch(generation)
+            or not hmac.compare_digest(
+                generation, self._resumed_callback_generation(initial, message_key)
+            )
+        ):
+            raise ProviderError("OpenHands Child callback generation history is incomplete")
+        return generation
 
     def _has_resume(
         self, target_id: uuid.UUID, task_key: str, owning_main_id: uuid.UUID

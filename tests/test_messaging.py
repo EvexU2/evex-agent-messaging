@@ -306,7 +306,7 @@ class MessagingTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         child = self.create(service, self.main_token(), "qa-604", "qa", self.read_only_mission())
-        self.assertTrue(service.send_to_parent(child["capabilityRef"], {"messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
+        self.assertTrue(service.send_to_parent(child["capabilityRef"], {"callbackGeneration": "evxg1_" + "0" * 64, "messageKey": "result-1", "kind": "RESULT", "status": "PASS"})["accepted"])
         self.assertTrue(service.request_user_decision(child["capabilityRef"], "Choose rollout", ["A", "B", "C"])["accepted"])
         self.assertTrue(service.publish_navigation_links(child["capabilityRef"], {"main": "https://openhands.local/conversations/x"})["accepted"])
         self.assertEqual(
@@ -315,16 +315,32 @@ class MessagingTest(unittest.TestCase):
         )
         self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main])
 
+    def test_send_to_parent_rejects_invalid_callback_generation_before_provider_mutation(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(service, self.main_token(), "qa-generation", "qa", self.read_only_mission())
+
+        for generation in (None, "not-a-generation"):
+            with self.subTest(generation=generation), self.assertRaisesRegex(
+                CapabilityError, "callbackGeneration"
+            ):
+                service.send_to_parent(
+                    child["capabilityRef"],
+                    {"callbackGeneration": generation, "messageKey": "result:invalid", "kind": "RESULT"},
+                )
+
+        self.assertEqual([call[0] for call in provider.calls], ["create"])
+
     def test_send_to_parent_derives_transport_fields_from_bound_result(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         child = self.create(service, self.main_token(), "qa-lean", "qa", self.read_only_mission())
 
         first = service.send_to_parent(
-            child["capabilityRef"], {"outcome": "PASS", "summary": "Focused QA passed"}
+            child["capabilityRef"], {"callbackGeneration": "evxg1_" + "0" * 64, "outcome": "PASS", "summary": "Focused QA passed"}
         )
         second = service.send_to_parent(
-            child["capabilityRef"], {"summary": "Focused QA passed", "outcome": "PASS"}
+            child["capabilityRef"], {"callbackGeneration": "evxg1_" + "0" * 64, "summary": "Focused QA passed", "outcome": "PASS"}
         )
 
         self.assertTrue(first["accepted"])
@@ -333,7 +349,9 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(sent[-1][4], "RESULT")
         envelope = json.loads(sent[-1][5])
         self.assertEqual(envelope["kind"], "RESULT")
+        self.assertEqual(envelope["callbackGeneration"], "evxg1_" + "0" * 64)
         self.assertEqual(json.loads(envelope["text"])["outcome"], "PASS")
+        self.assertNotIn("callbackGeneration", json.loads(envelope["text"]))
 
     def test_deputy_uses_standard_result_to_report_to_parent(self):
         provider = FakeProvider()
@@ -354,6 +372,7 @@ class MessagingTest(unittest.TestCase):
             deputy_token,
             {
                 "messageKey": "deputy-result:626:candidate-passed:abc",
+                "callbackGeneration": "evxg1_" + "0" * 64,
                 "kind": "RESULT",
                 "outcome": "candidate-passed",
             },
@@ -393,7 +412,7 @@ class MessagingTest(unittest.TestCase):
         )
         sent = service.send_to_parent(
             reviewer["capabilityRef"],
-            {"messageKey": "review:f8bb35f:pass", "kind": "RESULT", "outcome": "PASS"},
+            {"callbackGeneration": "evxg1_" + "0" * 64, "messageKey": "review:f8bb35f:pass", "kind": "RESULT", "outcome": "PASS"},
         )
 
         self.assertEqual(reviewer_capability.owning_main_id, deputy)

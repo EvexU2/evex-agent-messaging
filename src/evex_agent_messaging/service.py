@@ -21,6 +21,7 @@ from .capability import (
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
+_CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 
 
 class MessagingProvider(Protocol):
@@ -305,7 +306,17 @@ class MessagingService:
         kind = result.get("kind", "RESULT")
         if kind not in {"RESULT", "NEEDS_INPUT"}:
             raise CapabilityError("result kind must be RESULT or NEEDS_INPUT")
-        canonical_result = {key: value for key, value in result.items() if key != "messageKey"}
+        callback_generation = result.get("callbackGeneration")
+        if (
+            not isinstance(callback_generation, str)
+            or not _CALLBACK_GENERATION.fullmatch(callback_generation)
+        ):
+            raise CapabilityError("result callbackGeneration must be bounded and non-empty")
+        canonical_result = {
+            key: value
+            for key, value in result.items()
+            if key not in {"messageKey", "callbackGeneration"}
+        }
         text = _compact(canonical_result)
         message_key = result.get("messageKey")
         if message_key is None:
@@ -313,7 +324,7 @@ class MessagingService:
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
         if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
             raise CapabilityError("result messageKey must be bounded and non-empty")
-        envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
+        envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
         return self._provider.send_child_message(
             capability.child_id,
             capability.owning_main_id,

@@ -18,11 +18,11 @@ TOOLS = [
     {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "replacement": {"type": "object", "additionalProperties": False, "required": ["cancelledChildId", "cancelledTaskKey", "cancellationKey", "postTerminalProjection", "preAdmissionProjection"], "properties": {"cancelledChildId": {"type": "string", "format": "uuid"}, "cancelledTaskKey": {"type": "string"}, "cancellationKey": {"type": "string"}, "postTerminalProjection": {"type": "object"}, "preAdmissionProjection": {"type": "object"}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
     },
     {
         "name": "send_to_parent",
-        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
+        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. result.callbackGeneration must echo the opaque current generation from the Child Mission or authorized resume. The target is derived from the signed capability; peers cannot be selected.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
     },
     {
@@ -32,8 +32,8 @@ TOOLS = [
     },
     {
         "name": "request_user_decision",
-        "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+        "description": "Ask the human a bounded A/B/C-style question through the owning Main using the current opaque callback generation.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options", "callbackGeneration"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}, "callbackGeneration": {"type": "string", "pattern": "^evxg1_[0-9a-f]{64}$"}}},
     },
     {
         "name": "cancel_mission",
@@ -42,7 +42,7 @@ TOOLS = [
     },
     {
         "name": "resume_mission",
-        "description": "Resume the exact Child mission after its dependency or blocker is cleared.",
+        "description": "Resume the exact Child mission with verified delta context, including a fresh focused finding after an accepted terminal result; exact replay is a no-op and authority never expands.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey", "context"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}, "context": {"type": "object", "minProperties": 1}}},
     },
     {
@@ -82,7 +82,7 @@ class McpServer:
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
             if name == "create_child":
-                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"])
+                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"], replacement=args.get("replacement"))
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
@@ -91,7 +91,7 @@ class McpServer:
                     raise ValueError("send_callback_fallback accepts no arguments")
                 value = self._service.send_callback_fallback(capability_ref)
             elif name == "request_user_decision":
-                value = self._service.request_user_decision(capability_ref, args["question"], args["options"])
+                value = self._service.request_user_decision(capability_ref, args["question"], args["options"], args["callbackGeneration"])
             elif name == "cancel_mission":
                 value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "resume_mission":
@@ -223,13 +223,29 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not all(value.strip() for value in (base_url, api_key, public_url)):
         raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
+    pause_value = os.environ.get("EVEX_WRITE_MISSION_ADMISSION_PAUSED", "false").strip().lower()
+    if pause_value not in {"true", "false"}:
+        raise SystemExit("EVEX_WRITE_MISSION_ADMISSION_PAUSED must be true or false")
+    write_mission_admission_paused = pause_value == "true"
     secret = secret_value.encode()
     fallback_token = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN", "")
     fallback_login = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN", "")
     fallback_adapter = None
     if fallback_token or fallback_login:
         fallback_adapter = GitHubCallbackFallbackAdapter(fallback_token, fallback_login)
-    server = McpServer(MessagingService(OpenHandsProvider(base_url, api_key, public_url), secret, callback_fallback_adapter=fallback_adapter))
+    server = McpServer(
+        MessagingService(
+            OpenHandsProvider(
+                base_url,
+                api_key,
+                public_url,
+                write_mission_admission_paused=write_mission_admission_paused,
+            ),
+            secret,
+            write_mission_admission_paused=write_mission_admission_paused,
+            callback_fallback_adapter=fallback_adapter,
+        )
+    )
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
     else:

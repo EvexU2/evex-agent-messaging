@@ -23,14 +23,34 @@ from .fallback import CALLBACK_FALLBACK_MUTATION, CallbackFallbackError
 _WORKSPACE_ISSUE_URL = re.compile(
     r"https://github\.com/EvexU2/evex-u-workspace/issues/[1-9][0-9]*"
 )
+_CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 _FALLBACK_LOCKS = tuple(threading.RLock() for _ in range(64))
+_RESUME_AUTHORITY_KEYS = frozenset(
+    {
+        "allowedmutations",
+        "authority",
+        "branch",
+        "capabilities",
+        "checkout",
+        "headsha",
+        "mission",
+        "model",
+        "prohibitions",
+        "reasoningeffort",
+        "repository",
+        "role",
+        "skills",
+    }
+)
 
 
 class MessagingProvider(Protocol):
     def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str], model: str, reasoning_effort: str) -> dict[str, Any]: ...
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
-    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any]) -> dict[str, Any]: ...
+    def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any], owning_main_id: uuid.UUID) -> dict[str, Any]: ...
+    def send_child_message(self, child_id: uuid.UUID, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
+    def replacement_cancelled(self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID) -> bool: ...
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def readiness(self) -> bool: ...
@@ -40,12 +60,23 @@ class MessagingProvider(Protocol):
 class MessagingService:
     """Small stateless facade; semantic replay is keyed in the message body, not persisted here."""
 
-    def __init__(self, provider: MessagingProvider, secret: bytes, *, clock=None, callback_fallback_adapter=None) -> None:
+    def __init__(
+        self,
+        provider: MessagingProvider,
+        secret: bytes,
+        *,
+        clock=None,
+        write_mission_admission_paused: bool = False,
+        callback_fallback_adapter=None,
+    ) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
+        if not isinstance(write_mission_admission_paused, bool):
+            raise ValueError("write Mission admission pause must be boolean")
         self._provider = provider
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._write_mission_admission_paused = write_mission_admission_paused
         self._callback_fallback_adapter = callback_fallback_adapter
 
     def readiness(self) -> bool:
@@ -64,6 +95,7 @@ class MessagingService:
         capabilities: list[str] | None = None,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        replacement: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent = verify_capability(
             parent_capability,
@@ -76,9 +108,13 @@ class MessagingService:
             raise CapabilityError("only a Main may create a Child")
         if role not in {"spec", "plan-author", "writer", "reviewer", "qa", "repair"}:
             raise CapabilityError("unsupported Child role")
+        if role in {"spec", "writer"} and self._write_mission_admission_paused:
+            raise CapabilityError("write_mission_admission_paused")
         if model not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or reasoning_effort not in {"medium", "high"}:
             raise CapabilityError("unsupported Child model or reasoning effort")
         mission_payload = self._validated_mission(mission)
+        if replacement is not None:
+            self._validate_replacement(parent.child_id, task_key, mission_payload, replacement)
         mutations = mission_payload["allowedMutations"]
         if role in {"reviewer", "qa", "plan-author"} and mutations:
             if role == "plan-author":
@@ -93,8 +129,8 @@ class MessagingService:
             or any(value != "runtime_environment" for value in requested_capabilities)
         ):
             raise CapabilityError("unsupported Child capability")
-        if requested_capabilities and role not in {"qa", "repair"}:
-            raise CapabilityError("runtime environment is limited to QA or repair Children")
+        if requested_capabilities and role not in {"writer", "qa", "repair"}:
+            raise CapabilityError("runtime environment is limited to writer, QA, or repair Children")
         child_id = deterministic_child_id(parent.child_id, task_key)
         now = self._clock()
         fallback_allowed = mutations.count(CALLBACK_FALLBACK_MUTATION) == 1
@@ -104,9 +140,8 @@ class MessagingService:
             child_id=child_id,
             task_key=task_key,
             role=role,
-            allowed_actions={"send_message", "cancel_mission", "resume_mission"} | (
-                {"callback_fallback"} if fallback_allowed else set()
-            ),
+            allowed_actions={"send_message", "cancel_mission", "resume_mission"}
+            | ({"callback_fallback"} if fallback_allowed else set()),
             issued_at=now,
             expires_at=now + timedelta(hours=24),
         )
@@ -241,16 +276,36 @@ class MessagingService:
         message_key: str,
         context: dict[str, Any],
     ) -> dict[str, Any]:
-        self._main_child_control_capability(
+        capability = self._main_child_control_capability(
             token, target_id, task_key, "resume_mission"
         )
         if not isinstance(context, dict) or not context:
             raise CapabilityError("resume context must contain verified facts")
+        if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
+            raise CapabilityError("messageKey must be bounded and non-empty")
         try:
             copied_context = json.loads(json.dumps(context, separators=(",", ":")))
         except (TypeError, ValueError) as exc:
             raise CapabilityError("resume context must be JSON") from exc
-        return self._provider.resume_mission(target_id, message_key, task_key, copied_context)
+        if len(_compact(copied_context).encode()) > 20000:
+            raise CapabilityError("resume context must be bounded")
+        if self._contains_resume_authority(copied_context):
+            raise CapabilityError("resume context cannot expand Mission authority")
+        return self._provider.resume_mission(
+            target_id, message_key, task_key, copied_context, capability.owning_main_id
+        )
+
+    @classmethod
+    def _contains_resume_authority(cls, value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(
+                str(key).replace("_", "").lower() in _RESUME_AUTHORITY_KEYS
+                or cls._contains_resume_authority(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, list):
+            return any(cls._contains_resume_authority(item) for item in value)
+        return False
 
     def get_usage(
         self, token: str, target_id: uuid.UUID, task_key: str
@@ -294,7 +349,17 @@ class MessagingService:
         kind = result.get("kind", "RESULT")
         if kind not in {"RESULT", "NEEDS_INPUT"}:
             raise CapabilityError("result kind must be RESULT or NEEDS_INPUT")
-        canonical_result = {key: value for key, value in result.items() if key != "messageKey"}
+        callback_generation = result.get("callbackGeneration")
+        if (
+            not isinstance(callback_generation, str)
+            or not _CALLBACK_GENERATION.fullmatch(callback_generation)
+        ):
+            raise CapabilityError("result callbackGeneration must be bounded and non-empty")
+        canonical_result = {
+            key: value
+            for key, value in result.items()
+            if key not in {"messageKey", "callbackGeneration"}
+        }
         text = _compact(canonical_result)
         message_key = result.get("messageKey")
         if message_key is None:
@@ -302,14 +367,23 @@ class MessagingService:
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
         if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
             raise CapabilityError("result messageKey must be bounded and non-empty")
-        envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
-        return self._provider.send_message(capability.owning_main_id, message_key, kind, _compact(envelope))
+        envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
+        return self._provider.send_child_message(
+            capability.child_id,
+            capability.owning_main_id,
+            message_key,
+            kind,
+            _compact(envelope),
+        )
 
     def send_callback_fallback(self, token: str) -> dict[str, Any]:
         """Converge the one Mission-authorized recovery marker after trusted exhaustion."""
         try:
             capability = verify_capability(
-                token, self._secret, now=self._clock(), action="callback_fallback",
+                token,
+                self._secret,
+                now=self._clock(),
+                action="callback_fallback",
                 target_id=self._capability_target(token),
             )
         except CapabilityError as exc:
@@ -319,11 +393,15 @@ class MessagingService:
         lock = _FALLBACK_LOCKS[capability.child_id.int % len(_FALLBACK_LOCKS)]
         with lock:
             context = self._provider.callback_fallback_context(capability.child_id)
-            issue_url, body = self._validated_callback_fallback_context(capability, context)
+            issue_url, body = self._validated_callback_fallback_context(
+                capability, context
+            )
             if self._callback_fallback_adapter is None:
                 raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
             try:
-                result = self._callback_fallback_adapter.converge_callback(issue_url, body)
+                result = self._callback_fallback_adapter.converge_callback(
+                    issue_url, body
+                )
             except CallbackFallbackError:
                 raise
             except Exception as exc:
@@ -333,7 +411,9 @@ class MessagingService:
             return {"accepted": True, "replayed": bool(result.get("replayed"))}
 
     @staticmethod
-    def _validated_callback_fallback_context(capability, context: object) -> tuple[str, str]:
+    def _validated_callback_fallback_context(
+        capability, context: object
+    ) -> tuple[str, str]:
         if not isinstance(context, dict):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         mission = context.get("mission")
@@ -355,8 +435,9 @@ class MessagingService:
         mutations = mission.get("allowedMutations")
         issue_url = links.get("issue") if isinstance(links, dict) else None
         expected_mutation = (
-            CALLBACK_FALLBACK_MUTATION
-            .replace("<Child Conversation URL>", conversation_url)
+            CALLBACK_FALLBACK_MUTATION.replace(
+                "<Child Conversation URL>", conversation_url
+            )
             .replace("<taskKey>", capability.task_key)
             .replace("<owning Issue URL>", issue_url or "")
         )
@@ -367,27 +448,48 @@ class MessagingService:
         ):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         if len(attempts) != 3 or any(
-            not isinstance(attempt, dict) or attempt.get("outcome") != "retryable"
-            or not isinstance(attempt.get("result"), str) for attempt in attempts
+            not isinstance(attempt, dict)
+            or attempt.get("outcome") != "retryable"
+            or not isinstance(attempt.get("result"), str)
+            for attempt in attempts
         ):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
         if len({attempt["result"] for attempt in attempts}) != 1:
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
-        body = f"@evexubot callback recovery for {conversation_url} ({capability.task_key})"
-        if "\n" in conversation_url or not conversation_url or context.get("body", body) != body:
+        body = (
+            f"@evexubot callback recovery for {conversation_url} "
+            f"({capability.task_key})"
+        )
+        if (
+            "\n" in conversation_url
+            or not conversation_url
+            or context.get("body", body) != body
+        ):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         return issue_url, body
 
-    def request_user_decision(self, token: str, question: str, options: list[str]) -> dict[str, Any]:
+    def request_user_decision(
+        self, token: str, question: str, options: list[str], callback_generation: str
+    ) -> dict[str, Any]:
         if not isinstance(question, str) or not question.strip() or len(question) > 4000:
             raise CapabilityError("question must be non-empty and bounded")
         if not isinstance(options, list) or not 2 <= len(options) <= 5 or any(not isinstance(x, str) or not x.strip() for x in options):
             raise CapabilityError("options must contain 2-5 non-empty strings")
+        if not isinstance(callback_generation, str) or not _CALLBACK_GENERATION.fullmatch(
+            callback_generation
+        ):
+            raise CapabilityError("callbackGeneration must be a provider-derived generation")
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
         import hashlib
         message_key = "decision:" + hashlib.sha256(_compact({"question": question.strip(), "options": options}).encode()).hexdigest()[:24]
-        envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
-        return self._provider.send_message(capability.owning_main_id, message_key, "NEEDS_INPUT", _compact(envelope))
+        envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": "NEEDS_INPUT", "text": _compact({"question": question.strip(), "options": options})}
+        return self._provider.send_child_message(
+            capability.child_id,
+            capability.owning_main_id,
+            message_key,
+            "NEEDS_INPUT",
+            _compact(envelope),
+        )
 
     def publish_navigation_links(self, token: str, links: dict[str, str]) -> dict[str, Any]:
         if not isinstance(links, dict) or not links or len(links) > 12 or any(not isinstance(k, str) or not isinstance(v, str) for k, v in links.items()):
@@ -400,6 +502,59 @@ class MessagingService:
 
     def _capability_target(self, token: str) -> uuid.UUID:
         return inspect_capability(token, self._secret).child_id
+
+    def _validate_replacement(
+        self,
+        owning_main_id: uuid.UUID,
+        new_task_key: str,
+        mission: dict[str, Any],
+        replacement: object,
+    ) -> None:
+        if not isinstance(replacement, dict) or set(replacement) != {
+            "cancelledChildId", "cancelledTaskKey", "cancellationKey",
+            "postTerminalProjection", "preAdmissionProjection",
+        }:
+            raise CapabilityError("replacement proof is incomplete")
+        try:
+            cancelled_child = uuid.UUID(str(replacement["cancelledChildId"]))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CapabilityError("replacement Child identity is invalid") from exc
+        cancelled_task = replacement["cancelledTaskKey"]
+        cancellation_key = replacement["cancellationKey"]
+        if (
+            not isinstance(cancelled_task, str)
+            or not cancelled_task
+            or cancelled_task == new_task_key
+            or deterministic_child_id(owning_main_id, cancelled_task) != cancelled_child
+            or not isinstance(cancellation_key, str)
+            or not cancellation_key
+            or len(cancellation_key) > 200
+        ):
+            raise CapabilityError("replacement must use a new deterministic Child")
+        projections = (
+            replacement["postTerminalProjection"],
+            replacement["preAdmissionProjection"],
+        )
+        try:
+            encoded = [json.dumps(value, sort_keys=True, separators=(",", ":")) for value in projections]
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("replacement projection must be JSON") from exc
+        if any(not isinstance(value, dict) for value in projections):
+            raise CapabilityError("replacement projection must be an object")
+        if encoded[0] != encoded[1]:
+            raise CapabilityError("replacement projection changed; reconcile and restart the two-read gate")
+        projection = projections[0]
+        if (
+            projection.get("branch") != mission["checkout"]["branch"]
+            or projection.get("headSha") != mission["checkout"]["headSha"]
+            or not isinstance(projection.get("draftPullRequest"), str)
+            or not projection["draftPullRequest"].strip()
+        ):
+            raise CapabilityError("replacement projection is not authorized for the Mission checkout")
+        if not self._provider.replacement_cancelled(
+            cancelled_child, cancelled_task, cancellation_key, owning_main_id
+        ):
+            raise CapabilityError("replacement requires native terminal CANCELLED proof")
 
 
 def _compact(value: dict[str, Any]) -> str:

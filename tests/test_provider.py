@@ -1286,6 +1286,73 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider._request.call_args.args[0:2], ("POST", f"/api/conversations/{main}/events")
         )
 
+    def test_needs_input_is_accepted_only_after_native_child_pause(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        generation = "evxg1_" + "0" * 64
+        callback = json.dumps({
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "kind": "NEEDS_INPUT",
+            "messageKey": "decision:pause",
+            "owningMainId": str(main),
+            "taskKey": "spec-614",
+            "text": '{"options":["A","B"],"question":"Choose"}',
+        })
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._current_callback_generation = Mock(return_value=generation)
+        provider._terminal_result_key = Mock(return_value=None)
+        provider._request = Mock(side_effect=[
+            {"execution_status": "running"},
+            {"execution_status": "idle"},
+            {},
+            {},
+            {"execution_status": "paused"},
+        ])
+
+        result = provider.send_child_message(
+            child, main, "decision:pause", "NEEDS_INPUT", callback
+        )
+
+        self.assertEqual(result, {"accepted": True, "messageKey": "decision:pause"})
+        self.assertEqual(
+            provider._request.call_args_list[-2].args,
+            ("POST", f"/api/conversations/{child}/pause", {}),
+        )
+        self.assertEqual(
+            provider._request.call_args_list[-1].args,
+            ("GET", f"/api/conversations/{child}"),
+        )
+
+    def test_needs_input_fails_closed_if_child_finishes_before_pause(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        generation = "evxg1_" + "0" * 64
+        callback = json.dumps({
+            "callbackGeneration": generation,
+            "childId": str(child),
+            "kind": "NEEDS_INPUT",
+            "messageKey": "decision:terminal",
+            "owningMainId": str(main),
+            "taskKey": "spec-614",
+            "text": '{"options":["A","B"],"question":"Choose"}',
+        })
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._current_callback_generation = Mock(return_value=generation)
+        provider._terminal_result_key = Mock(return_value=None)
+        provider._request = Mock(side_effect=[
+            {"execution_status": "running"},
+            {"execution_status": "idle"},
+            {},
+            {},
+            {"execution_status": "finished"},
+        ])
+
+        with self.assertRaisesRegex(ProviderError, "became terminal"):
+            provider.send_child_message(
+                child, main, "decision:terminal", "NEEDS_INPUT", callback
+            )
+
     def test_callback_generation_rejects_stale_and_accepts_only_current_resumed_turn(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")

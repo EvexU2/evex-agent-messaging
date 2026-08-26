@@ -772,12 +772,28 @@ class OpenHandsProvider:
             )
             if not self._valid_control_schema(kind, delivered):
                 raise ProviderError("OpenHands Child callback envelope is invalid")
-            return self.send_message(
+            result = self.send_message(
                 target_id,
                 message_key,
                 kind,
                 _compact_json(delivered),
             )
+            if kind != "NEEDS_INPUT":
+                return result
+
+            self._request("POST", f"/api/conversations/{child_id}/pause", {})
+            for _ in range(20):
+                status = self._request(
+                    "GET", f"/api/conversations/{child_id}"
+                ).get("execution_status")
+                if status == "paused":
+                    return result
+                if status in _RESULT_TERMINAL_STATES or status == _NATIVE_CANCELLED:
+                    raise ProviderError(
+                        "OpenHands Child became terminal before human-input pause"
+                    )
+                self.sleeper(0.1)
+            raise ProviderError("OpenHands Child did not enter human-input pause")
 
     def cancel_mission(
         self,

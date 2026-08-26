@@ -1169,6 +1169,120 @@ class OpenHandsProviderTest(unittest.TestCase):
             second_resume,
         )
 
+    def test_terminal_resumed_run_without_result_accepts_one_recovery_key(self) -> None:
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        task_key = "plan-796"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        initial = provider._initial_callback_generation(main, child, task_key)
+
+        def control(kind, envelope):
+            return kind + "\n" + _compact_json(
+                provider._signed_control_envelope(kind, envelope)
+            )
+
+        mission = control("MISSION", {
+            "callbackGeneration": initial,
+            "childId": str(child),
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        })
+        first_result = control("RESULT", {
+            "callbackGeneration": initial,
+            "childId": str(child),
+            "kind": "RESULT",
+            "messageKey": "result:first",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+            "text": "{}",
+        })
+        review_generation = provider._resumed_callback_generation(
+            initial, "plan-review:first"
+        )
+        review_resume = control("RESUME_MISSION", {
+            "callbackGeneration": review_generation,
+            "childId": str(child),
+            "context": {"findings": ["P2-1"]},
+            "messageKey": "plan-review:first",
+            "owningMainId": str(main),
+            "taskKey": task_key,
+        })
+        child_events = [review_resume, mission]
+        main_events = [first_result]
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: (
+                list(child_events) if conversation_id == child else list(main_events)
+            )
+        )
+        provider._request = Mock(
+            side_effect=lambda method, path, *args: (
+                {"execution_status": "finished"} if method == "GET" else {}
+            )
+        )
+
+        ordinary = provider.resume_mission(
+            child,
+            "plan-review:second",
+            task_key,
+            {"findings": ["P1-2"]},
+            main,
+        )
+        self.assertEqual(ordinary["outcome"], "RESULT")
+        self.assertFalse(ordinary["accepted"])
+        self.assertFalse(any(
+            call.args[0] == "POST" for call in provider._request.call_args_list
+        ))
+
+        provider._request.reset_mock()
+        recovery_context = {
+            "instruction": "Reuse the completed bounded result and send the bound callback."
+        }
+        recovery = provider.resume_mission(
+            child,
+            "recovery-mode-796-plan-callback",
+            task_key,
+            recovery_context,
+            main,
+        )
+        self.assertEqual(recovery["outcome"], "RESUMED")
+        self.assertTrue(recovery["accepted"])
+        recovery_resume = provider._request.call_args_list[-1].args[2]["content"][0]["text"]
+        self.assertIn(
+            provider._resumed_callback_generation(
+                review_generation, "recovery-mode-796-plan-callback"
+            ),
+            recovery_resume,
+        )
+        child_events.insert(0, recovery_resume)
+
+        provider._request.reset_mock()
+        replay = provider.resume_mission(
+            child,
+            "recovery-mode-796-plan-callback",
+            task_key,
+            recovery_context,
+            main,
+        )
+        self.assertEqual(replay["outcome"], "RESUMED")
+        self.assertTrue(replay["accepted"])
+        self.assertFalse(any(
+            call.args[0] == "POST" for call in provider._request.call_args_list
+        ))
+
+        provider._request.reset_mock()
+        second_recovery = provider.resume_mission(
+            child,
+            "recovery-mode-796-plan-callback-again",
+            task_key,
+            recovery_context,
+            main,
+        )
+        self.assertEqual(second_recovery["outcome"], "RESULT")
+        self.assertFalse(second_recovery["accepted"])
+        self.assertFalse(any(
+            call.args[0] == "POST" for call in provider._request.call_args_list
+        ))
+
     def test_terminal_result_resume_rejects_cancelled_child(self) -> None:
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

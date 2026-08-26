@@ -17,7 +17,11 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from .fallback import materialize_callback_fallback_mutation
+from .fallback import (
+    CALLBACK_FALLBACK_RETRYABLE_ERROR,
+    CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE,
+    materialize_callback_fallback_mutation,
+)
 
 
 class ProviderError(RuntimeError):
@@ -50,6 +54,7 @@ _CONTROL_SIGNATURE = re.compile(r"^evxs1_[0-9a-f]{64}$")
 _CONTROL_TEXT_MAX_BYTES = 100_000
 _CONTROL_TASK_MAX_BYTES = 200
 _CONTROL_KEY_MAX_BYTES = 200
+_CALLBACK_FALLBACK_MAX_PRIOR_ATTEMPTS = 8
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -411,7 +416,7 @@ class OpenHandsProvider:
             return None
         attempts = []
         current_fallback_seen = False
-        replay_fallback_seen = False
+        prior_fallback_attempts = 0
         for event in events:
             title = event.get("title") if isinstance(event, dict) else None
             if title == "mcp.evex_agent_messaging.send_callback_fallback":
@@ -432,21 +437,38 @@ class OpenHandsProvider:
                         return None
                     current_fallback_seen = True
                     continue
-                if not attempts and not replay_fallback_seen:
+                if not attempts:
                     raw_output = event.get("raw_output")
                     output = raw_output.get("result") if isinstance(raw_output, dict) else None
                     structured = (
                         output.get("structuredContent") if isinstance(output, dict) else None
                     )
+                    error = raw_output.get("error") if isinstance(raw_output, dict) else None
+                    error_message = error.get("message") if isinstance(error, dict) else None
+                    accepted_replay = (
+                        event.get("kind") == "ACPToolCallEvent"
+                        and event.get("status") == "completed"
+                        and isinstance(structured, dict)
+                        and structured.get("accepted") is True
+                    )
+                    retryable_replay = (
+                        event.get("kind") == "ACPToolCallEvent"
+                        and event.get("status") == "failed"
+                        and isinstance(error_message, str)
+                        and (
+                            f"Mcp error: {CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE}: "
+                            f"{CALLBACK_FALLBACK_RETRYABLE_ERROR}"
+                        )
+                        in error_message
+                    )
+                    prior_fallback_attempts += 1
                     if (
-                        event.get("kind") != "ACPToolCallEvent"
-                        or event.get("status") != "completed"
-                        or not exact_input
-                        or not isinstance(structured, dict)
-                        or structured.get("accepted") is not True
+                        not exact_input
+                        or prior_fallback_attempts
+                        > _CALLBACK_FALLBACK_MAX_PRIOR_ATTEMPTS
+                        or not (accepted_replay or retryable_replay)
                     ):
                         return None
-                    replay_fallback_seen = True
                     continue
                 return None
             if title != "mcp.evex_agent_messaging.send_to_parent":
@@ -459,7 +481,8 @@ class OpenHandsProvider:
             arguments = raw_input.get("arguments") if isinstance(raw_input, dict) else None
             result = arguments.get("result") if isinstance(arguments, dict) else None
             if (
-                raw_input.get("server") != "evex_agent_messaging"
+                not isinstance(raw_input, dict)
+                or raw_input.get("server") != "evex_agent_messaging"
                 or raw_input.get("tool") != "send_to_parent"
                 or not isinstance(result, dict)
             ):

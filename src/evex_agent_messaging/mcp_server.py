@@ -16,7 +16,12 @@ from .provider import (
     RetryableProviderError,
 )
 from .service import MessagingService
-from .fallback import GitHubCallbackFallbackAdapter
+from .fallback import (
+    CALLBACK_FALLBACK_RETRYABLE_ERROR,
+    CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE,
+    CallbackFallbackError,
+    GitHubCallbackFallbackAdapter,
+)
 
 
 TOOLS = [
@@ -117,6 +122,14 @@ class McpServer:
                 RETRYABLE_MCP_ERROR_CODE,
                 RETRYABLE_MCP_ERROR_MESSAGE,
             )
+        except CallbackFallbackError as exc:
+            if exc.code == CALLBACK_FALLBACK_RETRYABLE_ERROR:
+                return self._error(
+                    request_id,
+                    CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE,
+                    CALLBACK_FALLBACK_RETRYABLE_ERROR,
+                )
+            return self._error(request_id, -32000, exc.code)
         except Exception as exc:
             return self._error(request_id, -32000, str(exc))
         return self._result(request_id, {"content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}], "structuredContent": value})

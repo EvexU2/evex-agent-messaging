@@ -20,6 +20,7 @@ from evex_agent_messaging.mcp_server import (  # noqa: E402
     make_http_server,
 )
 from evex_agent_messaging.provider import RetryableProviderError  # noqa: E402
+from evex_agent_messaging.fallback import CallbackFallbackError  # noqa: E402
 
 
 class FakeService:
@@ -194,6 +195,26 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(result["error"], {
             "code": -32001,
             "message": "EVEX_RETRYABLE_MESSAGING_TRANSPORT",
+        })
+
+    def test_retryable_fallback_failure_has_stable_mcp_discriminator(self):
+        def fail(*_args):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE")
+
+        self.service.send_callback_fallback = fail
+        result = self.server.handle(
+            {
+                "jsonrpc": "2.0",
+                "id": 44,
+                "method": "tools/call",
+                "params": {"name": "send_callback_fallback", "arguments": {}},
+            },
+            capability_ref="evx1_opaque",
+        )
+
+        self.assertEqual(result["error"], {
+            "code": -32002,
+            "message": "CALLBACK_FALLBACK_RETRYABLE",
         })
 
     def test_tool_call_without_transport_capability_fails_closed(self):

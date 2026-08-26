@@ -184,11 +184,22 @@ class OpenHandsProviderTest(unittest.TestCase):
             },
         }
         provider._request.return_value["items"].insert(1, replay_event)
+        provider._request.return_value["items"].insert(1, dict(replay_event))
+        retryable_replay_event = dict(
+            replay_event,
+            status="failed",
+            raw_output={
+                "error": {
+                    "message": "Mcp error: -32002: CALLBACK_FALLBACK_RETRYABLE"
+                }
+            },
+        )
+        provider._request.return_value["items"].insert(1, retryable_replay_event)
         replay_context = provider.callback_fallback_context(
             child, owning_main, "issue-732"
         )
         self.assertEqual(len(replay_context["attempts"]), 3)
-        provider._request.return_value["items"].pop(1)
+        del provider._request.return_value["items"][1:4]
 
         intervening = dict(replay_event, status="failed", raw_output={"error": {}})
         provider._request.return_value["items"].insert(1, intervening)

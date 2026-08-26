@@ -17,6 +17,10 @@ class CallbackFallbackError(RuntimeError):
         self.code = code
 
 
+CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE = -32002
+CALLBACK_FALLBACK_RETRYABLE_ERROR = "CALLBACK_FALLBACK_RETRYABLE"
+
+
 _ISSUE_URL = re.compile(r"https://github\.com/EvexU2/evex-u-workspace/issues/([1-9][0-9]*)")
 _PREFIX = "@evexubot callback recovery for "
 _MAX_GITHUB_RESPONSE_BYTES = 1_048_576

@@ -2298,6 +2298,67 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertEqual(order, ["pr", "checkout"])
 
+    def test_new_reviewer_admission_rejects_stale_bound_pr_before_any_mutation(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider(
+            "http://openhands",
+            "key",
+            "http://public",
+            github_token="provider-held-token",
+        )
+        provider._request = Mock(
+            side_effect=[
+                ProviderError("missing", status=404),
+                {"active_agent_profile_id": "acp"},
+                {},
+                {},
+                {},
+            ]
+        )
+        provider._read_specification_pr = Mock(
+            return_value={
+                "headSha": "b" * 40,
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            }
+        )
+        provider._ensure_checkout = Mock()
+        provider._validate_existing_checkout = Mock()
+        mission = {
+            "links": {
+                "issue": "https://github.com/EvexU2/evex-u-workspace/issues/836",
+                "specificationPr": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            },
+            "checkout": {
+                "repository": "EvexU2/evex-agent-messaging",
+                "branch": "review/issue-836",
+                "headSha": "a" * 40,
+            },
+            "skills": ["evex-delivery-reviewer"],
+        }
+
+        with self.assertRaisesRegex(
+            ProviderError,
+            "authenticated Draft PR head does not match Mission checkout",
+        ):
+            self.create_provider_child(
+                provider,
+                parent,
+                child,
+                "reviewer",
+                "issue-836-reviewer",
+                mission,
+                "evx1_opaque",
+                frozenset(),
+            )
+
+        provider._ensure_checkout.assert_not_called()
+        provider._request.assert_called_once_with(
+            "GET", f"/api/conversations/{child}"
+        )
+
     def test_authenticated_pr_boundary_rejects_ineligible_or_foreign_responses(self) -> None:
         canonical = "https://github.com/EvexU2/evex-agent-messaging/pull/42"
         repository = "EvexU2/evex-agent-messaging"

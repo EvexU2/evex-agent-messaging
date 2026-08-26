@@ -17,13 +17,13 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
   for that Child.
 - `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives
-  identity, kind, and replay key. Each Child Mission and authorized `RESUME_MISSION` event carries a
-  provider-derived opaque `callbackGeneration`; `send_to_parent.result.callbackGeneration` must echo
-  that exact current value. Messaging re-derives it from bounded provider event history and rejects
-  stale, foreign, missing, malformed, ambiguous, incomplete, or truncated evidence before delivery.
-  Provider-emitted control records are HMAC-authenticated before they can win a result, input, resume,
-  cancellation-replay, or replacement decision. This required field is a compatibility change for Child
-  result callers. A native terminal `CANCELLED` Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
+  sender, Main, Child, task, immutable-Mission, kind, and semantic replay identity. Every distinct
+  canonical logical result under the same valid Mission commits one bound result and wakes that Main;
+  exact replay returns the accepted result without another event or wake. Legacy
+  `callbackGeneration` and caller `messageKey` values are ignored transition metadata outside
+  authorization, payload meaning, and replay identity. Provider-emitted control records remain
+  HMAC-authenticated before they can win a result, input, resume, cancellation-replay, or replacement
+  decision. A native terminal `CANCELLED` Child rejects late `RESULT` and `NEEDS_INPUT` callbacks.
 - `request_user_decision`: deliver an A/B/C-style question to the owning Main. It likewise requires the
   exact current `callbackGeneration`, so an earlier continuation cannot recreate a cleared input gate.
 - `cancel_mission`: stop the exact Child task. The owning Main must provide its deterministic Child,

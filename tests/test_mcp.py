@@ -126,6 +126,10 @@ class McpServerTest(unittest.TestCase):
             1,
         )
         resume = next(tool for tool in listed["result"]["tools"] if tool["name"] == "resume_mission")
+        send_to_parent = next(
+            tool for tool in listed["result"]["tools"] if tool["name"] == "send_to_parent"
+        )
+        self.assertNotIn("callbackGeneration", send_to_parent["description"])
         self.assertIn("context", resume["inputSchema"]["required"])
         self.assertEqual(
             set(resume["inputSchema"]["properties"]),

@@ -99,6 +99,10 @@ def _compact_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _reject_json_constant(_value: str) -> None:
+    raise ValueError("non-finite JSON number")
+
+
 @dataclass
 class OpenHandsProvider:
     base_url: str
@@ -1000,7 +1004,7 @@ class OpenHandsProvider:
         kind: str,
         text: str,
     ) -> dict:
-        """Deliver one Child callback unless native cancellation already won."""
+        """Deliver one Mission-bound Child callback unless cancellation won."""
         with _CHECKOUT_LOCKS[child_id.int % len(_CHECKOUT_LOCKS)]:
             status = self._request(
                 "GET", f"/api/conversations/{child_id}"
@@ -1020,24 +1024,30 @@ class OpenHandsProvider:
                 envelope.get("childId") != str(child_id)
                 or envelope.get("owningMainId") != str(target_id)
                 or envelope.get("messageKey") != message_key
+                or envelope.get("kind") != kind
+                or set(envelope).difference(
+                    {
+                        "callbackGeneration",
+                        "childId",
+                        "kind",
+                        "messageKey",
+                        "owningMainId",
+                        "taskKey",
+                        "text",
+                    }
+                )
             ):
                 raise ProviderError("OpenHands Child callback identity is invalid")
-            callback_generation = envelope.get("callbackGeneration")
-            if not isinstance(callback_generation, str) or not _CALLBACK_GENERATION.fullmatch(
-                callback_generation
-            ):
-                raise ProviderError("OpenHands Child callback generation is invalid")
             current_generation = self._current_callback_generation(
                 child_id, target_id, task_key
             )
-            if not hmac.compare_digest(callback_generation, current_generation):
-                raise ProviderError("OpenHands Child callback generation is stale")
-            result_key = self._terminal_result_key(target_id, child_id, task_key)
-            if status in _RESULT_TERMINAL_STATES:
-                return self._settled(message_key, task_key, "RESULT")
-            if result_key is not None:
-                if result_key == message_key:
-                    return {"accepted": True, "messageKey": message_key, "outcome": "RESULT"}
+            if kind == "RESULT":
+                replay = self._result_replay(
+                    target_id, child_id, task_key, envelope.get("text")
+                )
+                if replay is not None:
+                    return replay
+            elif status in _RESULT_TERMINAL_STATES:
                 return self._settled(message_key, task_key, "RESULT")
             if kind == "NEEDS_INPUT":
                 waiting_key = self._waiting_input_key(
@@ -1066,14 +1076,12 @@ class OpenHandsProvider:
                         self.sleeper(0.1)
                     else:
                         raise ProviderError("OpenHands Child did not enter human-input pause")
-            if kind == "RESULT" and self._has_waiting_input(
-                target_id, child_id, task_key
-            ):
-                return self._settled(message_key, task_key, "NEEDS_INPUT")
             delivered = self._signed_control_envelope(
                 kind,
                 {
-                    "callbackGeneration": callback_generation,
+                    # Kept only as signed transition metadata for old event readers.
+                    # Caller-supplied legacy bytes never participate in validation or replay.
+                    "callbackGeneration": current_generation,
                     "childId": str(child_id),
                     "kind": kind,
                     "messageKey": message_key,
@@ -1554,6 +1562,50 @@ class OpenHandsProvider:
     def _terminal_result_key(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> str | None:
+        results = self._result_envelopes(owning_main_id, child_id, task_key)
+        if not results:
+            return None
+        current_generation = self._current_callback_generation(
+            child_id, owning_main_id, task_key
+        )
+        current = [
+            envelope
+            for envelope in results
+            if hmac.compare_digest(
+                envelope["callbackGeneration"], current_generation
+            )
+        ]
+        return current[0]["messageKey"] if current else None
+
+    def _result_replay(
+        self,
+        owning_main_id: uuid.UUID,
+        child_id: uuid.UUID,
+        task_key: str,
+        text: object,
+    ) -> dict | None:
+        canonical_text = self._canonical_result_text(text)
+        matching = [
+            envelope
+            for envelope in self._result_envelopes(
+                owning_main_id, child_id, task_key
+            )
+            if hmac.compare_digest(
+                self._canonical_result_text(envelope["text"]), canonical_text
+            )
+        ]
+        if len(matching) > 1:
+            raise ProviderError("OpenHands result replay history is ambiguous")
+        if not matching:
+            return None
+        return {
+            "accepted": True,
+            "messageKey": matching[0]["messageKey"],
+        }
+
+    def _result_envelopes(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> list[dict]:
         matching = [
             envelope
             for envelope in self._control_envelopes(owning_main_id, "RESULT")
@@ -1564,12 +1616,10 @@ class OpenHandsProvider:
             and isinstance(envelope.get("messageKey"), str)
         ]
         if not matching:
-            return None
+            return []
         generations = self._callback_generation_chain(
             child_id, owning_main_id, task_key
         )
-        current_generation = generations[-1]
-        current = []
         for envelope in matching:
             if (
                 not self._valid_control_schema("RESULT", envelope)
@@ -1577,18 +1627,38 @@ class OpenHandsProvider:
                 or not isinstance(envelope.get("callbackGeneration"), str)
             ):
                 raise ProviderError("OpenHands control history is unauthenticated")
+            self._canonical_result_text(envelope["text"])
             if not any(
                 hmac.compare_digest(envelope["callbackGeneration"], generation)
                 for generation in generations
             ):
                 raise ProviderError("OpenHands control history is unauthenticated")
-            if hmac.compare_digest(
-                envelope["callbackGeneration"], current_generation
-            ):
-                current.append(envelope)
-        if len(current) > 1:
-            raise ProviderError("OpenHands control history is ambiguous")
-        return current[0]["messageKey"] if current else None
+        return matching
+
+    def _canonical_result_text(self, value: object) -> str:
+        if not self._bounded_string(value, _CONTROL_TEXT_MAX_BYTES):
+            raise ProviderError("OpenHands Child callback payload is invalid")
+        try:
+            payload = json.loads(
+                value,
+                parse_constant=_reject_json_constant,
+            )
+        except (TypeError, ValueError):
+            raise ProviderError("OpenHands Child callback payload is invalid") from None
+        if not isinstance(payload, dict):
+            raise ProviderError("OpenHands Child callback payload is invalid")
+        kind = payload.get("kind", "RESULT")
+        if kind != "RESULT":
+            raise ProviderError("OpenHands Child callback payload is invalid")
+        canonical = {
+            "kind": "RESULT",
+            **{
+                key: item
+                for key, item in payload.items()
+                if key not in {"kind", "messageKey", "callbackGeneration"}
+            },
+        }
+        return _compact_json(canonical)
 
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str

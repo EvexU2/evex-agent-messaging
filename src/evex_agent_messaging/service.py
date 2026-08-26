@@ -25,6 +25,21 @@ _SPECIFICATION_PR_URL = re.compile(
     r"https://github\.com/(EvexU2/[A-Za-z0-9_-]+)/pull/([1-9][0-9]*)"
 )
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
+_RESULT_AUTHORITY_KEYS = frozenset(
+    {
+        "allowedmutations",
+        "callback",
+        "capabilities",
+        "capabilityref",
+        "childid",
+        "mission",
+        "owningmainid",
+        "prohibitions",
+        "targetid",
+        "taskkey",
+        "transport",
+    }
+)
 _RESUME_AUTHORITY_KEYS = frozenset(
     {
         "allowedmutations",
@@ -407,25 +422,30 @@ class MessagingService:
         kind = result.get("kind", "RESULT")
         if kind not in {"RESULT", "NEEDS_INPUT"}:
             raise CapabilityError("result kind must be RESULT or NEEDS_INPUT")
-        callback_generation = result.get("callbackGeneration")
-        if (
-            not isinstance(callback_generation, str)
-            or not _CALLBACK_GENERATION.fullmatch(callback_generation)
+        if any(
+            str(key).replace("_", "").lower() in _RESULT_AUTHORITY_KEYS
+            for key in result
         ):
-            raise CapabilityError("result callbackGeneration must be bounded and non-empty")
-        canonical_result = {
+            raise CapabilityError("result cannot select callback authority or transport")
+        canonical_result = {"kind": kind, **{
             key: value
             for key, value in result.items()
-            if key not in {"messageKey", "callbackGeneration"}
-        }
-        text = _compact(canonical_result)
-        message_key = result.get("messageKey")
-        if message_key is None:
-            message_key = "result:" + hashlib.sha256(text.encode()).hexdigest()[:24]
+            if key not in {"kind", "messageKey", "callbackGeneration"}
+        }}
+        try:
+            text = _compact(canonical_result)
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError("result must be JSON-compatible") from exc
+        if len(text.encode()) > 20000:
+            raise CapabilityError("result must be bounded")
         capability = verify_capability(token, self._secret, now=self._clock(), action="send_message", target_id=self._capability_target(token))
-        if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
-            raise CapabilityError("result messageKey must be bounded and non-empty")
-        envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
+        message_key = _result_message_key(
+            capability.owning_main_id,
+            capability.child_id,
+            capability.task_key,
+            text,
+        )
+        envelope = {"messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
         return self._provider.send_child_message(
             capability.child_id,
             capability.owning_main_id,
@@ -525,4 +545,20 @@ class MessagingService:
 
 def _compact(value: dict[str, Any]) -> str:
     import json
-    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
+
+
+def _result_message_key(
+    owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str, text: str
+) -> str:
+    identity = _compact(
+        {
+            "childId": str(child_id),
+            "owningMainId": str(owning_main_id),
+            "taskKey": task_key,
+            "text": text,
+        }
+    )
+    return "result:" + hashlib.sha256(identity.encode()).hexdigest()[:24]

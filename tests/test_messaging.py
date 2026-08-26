@@ -413,21 +413,46 @@ class MessagingTest(unittest.TestCase):
         )
         self.assertEqual([call[1] for call in provider.calls if call[0] == "send"], [self.main])
 
-    def test_send_to_parent_rejects_invalid_callback_generation_before_provider_mutation(self):
+    def test_send_to_parent_ignores_legacy_callback_generation_metadata(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)
         child = self.create(service, self.main_token(), "qa-generation", "qa", self.read_only_mission())
 
-        for generation in (None, "not-a-generation"):
-            with self.subTest(generation=generation), self.assertRaisesRegex(
-                CapabilityError, "callbackGeneration"
-            ):
-                service.send_to_parent(
-                    child["capabilityRef"],
-                    {"callbackGeneration": generation, "messageKey": "result:invalid", "kind": "RESULT"},
-                )
+        results = [
+            service.send_to_parent(
+                child["capabilityRef"],
+                {
+                    "messageKey": "caller-selected-a",
+                    "kind": "RESULT",
+                    "outcome": "PASS",
+                },
+            ),
+            service.send_to_parent(
+                child["capabilityRef"],
+                {
+                    "callbackGeneration": "legacy-generation-one",
+                    "messageKey": "caller-selected-b",
+                    "kind": "RESULT",
+                    "outcome": "PASS",
+                },
+            ),
+            service.send_to_parent(
+                child["capabilityRef"],
+                {
+                    "callbackGeneration": {"ignored": True},
+                    "kind": "RESULT",
+                    "outcome": "PASS",
+                },
+            ),
+        ]
 
-        self.assertEqual([call[0] for call in provider.calls], ["create"])
+        self.assertTrue(all(result["accepted"] for result in results))
+        sent = [call for call in provider.calls if call[0] == "child-send"]
+        self.assertEqual(len({call[3] for call in sent}), 1)
+        for call in sent:
+            envelope = json.loads(call[5])
+            self.assertNotIn("callbackGeneration", envelope)
+            self.assertNotIn("callbackGeneration", json.loads(envelope["text"]))
 
     def test_send_to_parent_derives_transport_fields_from_bound_result(self):
         provider = FakeProvider()
@@ -447,9 +472,28 @@ class MessagingTest(unittest.TestCase):
         self.assertEqual(sent[-1][4], "RESULT")
         envelope = json.loads(sent[-1][5])
         self.assertEqual(envelope["kind"], "RESULT")
-        self.assertEqual(envelope["callbackGeneration"], "evxg1_" + "0" * 64)
         self.assertEqual(json.loads(envelope["text"])["outcome"], "PASS")
         self.assertNotIn("callbackGeneration", json.loads(envelope["text"]))
+
+    def test_send_to_parent_rejects_invalid_payload_without_provider_mutation(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        child = self.create(
+            service, self.main_token(), "qa-invalid-result", "qa", self.read_only_mission()
+        )
+
+        invalid_results = (
+            {"kind": "OTHER", "outcome": "PASS"},
+            {"kind": "RESULT", "owning_main_id": str(uuid.uuid4())},
+            {"kind": "RESULT", "mission": {"allowedMutations": ["push main"]}},
+            {"kind": "RESULT", "summary": "x" * 20001},
+            {"kind": "RESULT", "summary": {"not-json": object()}},
+        )
+        for result in invalid_results:
+            with self.subTest(result=result), self.assertRaises(CapabilityError):
+                service.send_to_parent(child["capabilityRef"], result)
+
+        self.assertEqual([call[0] for call in provider.calls], ["create"])
 
     def test_deputy_uses_standard_result_to_report_to_parent(self):
         provider = FakeProvider()

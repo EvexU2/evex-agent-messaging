@@ -1490,7 +1490,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "history is ambiguous"):
             provider._has_waiting_input(main, child, task_key)
 
-    def test_signed_incomplete_current_input_fails_closed_before_result_delivery(self) -> None:
+    def test_unrelated_incomplete_input_does_not_gate_mission_bound_result(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         task_key = "spec-614"
@@ -1509,17 +1509,22 @@ class OpenHandsProviderTest(unittest.TestCase):
             "messageKey": "result:after-malformed-input", "owningMainId": str(main),
             "taskKey": task_key, "text": "{}",
         })
+        events = {child: [mission], main: [malformed]}
         provider._request = Mock(return_value={"execution_status": "idle"})
-        provider._event_texts = Mock(side_effect=[[mission], [], [mission], [malformed]])
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: list(events[conversation_id])
+        )
+        provider.send_message = Mock(
+            return_value={"accepted": True, "messageKey": "result:after-malformed-input"}
+        )
 
-        with self.assertRaisesRegex(ProviderError, "control envelope is invalid"):
+        self.assertEqual(
             provider.send_child_message(
                 child, main, "result:after-malformed-input", "RESULT", callback
-            )
-        self.assertFalse(any(
-            len(call.args) > 1 and call.args[0] == "POST"
-            for call in provider._request.call_args_list
-        ))
+            ),
+            {"accepted": True, "messageKey": "result:after-malformed-input"},
+        )
+        provider.send_message.assert_called_once()
 
     def test_signed_control_schema_rejects_invalid_fields_for_every_control_kind(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -1639,7 +1644,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(late_resume["outcome"], "CANCELLED")
         self.assertFalse(late_resume["accepted"])
 
-    def test_paused_child_waiting_for_bound_input_rejects_late_result(self) -> None:
+    def test_waiting_input_does_not_mint_or_gate_result_authority(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         waiting = (
@@ -1653,19 +1658,17 @@ class OpenHandsProviderTest(unittest.TestCase):
         })
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         provider._current_callback_generation = Mock(return_value="evxg1_" + "0" * 64)
-        provider._has_waiting_input = Mock(return_value=True)
-        provider._request = Mock(side_effect=[
-            {"execution_status": "paused"},
-            {"items": []},
-            {"items": []},
-            {"items": [{"llm_message": {"content": [{"text": waiting}]}}]},
-        ])
+        provider._request = Mock(return_value={"execution_status": "paused"})
+        provider._event_texts = Mock(return_value=[waiting])
+        provider.send_message = Mock(
+            return_value={"accepted": True, "messageKey": "result:late"}
+        )
 
         result = provider.send_child_message(child, main, "result:late", "RESULT", callback)
 
         self.assertEqual(
             result,
-            {"accepted": False, "messageKey": "result:late", "taskKey": "spec-614", "outcome": "NEEDS_INPUT"},
+            {"accepted": True, "messageKey": "result:late"},
         )
 
     def test_exact_owner_result_after_authorized_resume_is_delivered_once(self) -> None:
@@ -1699,6 +1702,80 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(
             provider._request.call_args.args[0:2], ("POST", f"/api/conversations/{main}/events")
         )
+
+    def test_mission_bound_results_accept_a_replay_then_distinct_b(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "writer-846"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, task_key)
+        mission = "MISSION\n" + _compact_json(provider._signed_control_envelope(
+            "MISSION",
+            {
+                "callbackGeneration": generation,
+                "childId": str(child),
+                "owningMainId": str(main),
+                "taskKey": task_key,
+                "immediateTask": "Your task now: implement.",
+            },
+        ))
+        events = {child: [mission], main: []}
+        wakes = []
+        statuses = iter(["running", "finished", "finished"])
+        provider._request = Mock(
+            side_effect=lambda method, path, *args: (
+                {"execution_status": next(statuses)}
+                if method == "GET" and path == f"/api/conversations/{child}"
+                else {}
+            )
+        )
+        provider._event_texts = Mock(
+            side_effect=lambda conversation_id: list(events[conversation_id])
+        )
+
+        def deliver(target_id, message_key, kind, text):
+            wakes.append((target_id, message_key, kind))
+            events[target_id].insert(0, f"{kind}\n{text}")
+            return {
+                "accepted": True,
+                "messageKey": message_key,
+            }
+
+        provider.send_message = Mock(side_effect=deliver)
+
+        def callback(message_key, payload, callback_generation=None):
+            envelope = {
+                "childId": str(child),
+                "kind": "RESULT",
+                "messageKey": message_key,
+                "owningMainId": str(main),
+                "taskKey": task_key,
+                "text": _compact_json(payload),
+            }
+            if callback_generation is not None:
+                envelope["callbackGeneration"] = callback_generation
+            return provider.send_child_message(
+                child, main, message_key, "RESULT", _compact_json(envelope)
+            )
+
+        first = callback("result:a", {"outcome": "PASS", "summary": "A"})
+        replay = callback(
+            "result:a",
+            {"kind": "RESULT", "outcome": "PASS", "summary": "A"},
+            "legacy-changed",
+        )
+        second = callback("result:b", {"outcome": "PASS", "summary": "B"})
+
+        self.assertEqual(first, replay)
+        self.assertTrue(second["accepted"])
+        self.assertEqual(
+            wakes,
+            [
+                (main, "result:a", "RESULT"),
+                (main, "result:b", "RESULT"),
+            ],
+        )
+        self.assertEqual(len(events[main]), 2)
 
     def test_needs_input_pause_failure_never_delivers_to_parent(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
@@ -1824,59 +1901,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"accepted": True, "messageKey": "resume:answer", "taskKey": task_key, "outcome": "RESUMED"},
         )
 
-    def test_callback_generation_rejects_stale_and_accepts_only_current_resumed_turn(self) -> None:
-        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
-        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
-        task_key = "spec-614"
-        provider = OpenHandsProvider("http://openhands", "key", "http://public")
-        initial = provider._initial_callback_generation(main, child, task_key)
-        resumed = provider._resumed_callback_generation(initial, "resume:answer")
-        mission = "MISSION\n" + json.dumps(provider._signed_control_envelope("MISSION", {
-            "callbackGeneration": initial, "childId": str(child),
-            "owningMainId": str(main), "taskKey": task_key,
-        }), sort_keys=True, separators=(",", ":"))
-        resume = "RESUME_MISSION\n" + json.dumps(provider._signed_control_envelope("RESUME_MISSION", {
-            "callbackGeneration": resumed, "messageKey": "resume:answer",
-            "childId": str(child), "context": {"answer": "A"}, "owningMainId": str(main), "taskKey": task_key,
-        }), sort_keys=True, separators=(",", ":"))
-        stale = json.dumps({
-            "childId": str(child), "kind": "RESULT", "messageKey": "result:stale",
-            "owningMainId": str(main), "taskKey": task_key, "text": "{}",
-            "callbackGeneration": initial,
-        })
-        provider._request = Mock(side_effect=[{"execution_status": "idle"}])
-        provider._event_texts = Mock(return_value=[mission, resume])
-
-        with self.assertRaisesRegex(ProviderError, "callback generation"):
-            provider.send_child_message(child, main, "result:stale", "RESULT", stale)
-
-        callback = json.dumps({
-            "childId": str(child), "kind": "RESULT", "messageKey": "result:current",
-            "owningMainId": str(main), "taskKey": task_key, "text": "{}",
-            "callbackGeneration": resumed,
-        })
-        result_event = "RESULT\n" + json.dumps(
-            provider._signed_control_envelope("RESULT", json.loads(callback)),
-            sort_keys=True, separators=(",", ":"),
-        )
-        provider._request = Mock(side_effect=[
-            {"execution_status": "idle"}, {"execution_status": "idle"}, {},
-            {"execution_status": "idle"},
-        ])
-        provider._event_texts = Mock(side_effect=[
-            [mission, resume], [], [mission, resume], [], [mission, resume], [result_event], [mission, resume],
-        ])
-
-        self.assertEqual(
-            provider.send_child_message(child, main, "result:current", "RESULT", callback),
-            {"accepted": True, "messageKey": "result:current"},
-        )
-        self.assertEqual(
-            provider.send_child_message(child, main, "result:current", "RESULT", callback),
-            {"accepted": True, "messageKey": "result:current", "outcome": "RESULT"},
-        )
-
-    def test_callback_generation_history_or_identity_failure_prevents_parent_delivery(self) -> None:
+    def test_mission_history_or_identity_failure_prevents_parent_delivery(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
         task_key = "spec-614"
@@ -1897,8 +1922,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             sort_keys=True, separators=(",", ":"),
         )
         for name, callback, history in (
-            ("missing", {key: value for key, value in valid.items() if key != "callbackGeneration"}, None),
-            ("malformed", {**valid, "callbackGeneration": "not-a-generation"}, None),
             ("foreign", {**valid, "owningMainId": str(uuid.uuid4())}, None),
             ("incomplete", valid, [incomplete]),
             ("ambiguous", valid, [mission, mission]),

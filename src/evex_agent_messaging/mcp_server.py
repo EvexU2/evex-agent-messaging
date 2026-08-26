@@ -21,7 +21,7 @@ TOOLS = [
     },
     {
         "name": "send_to_parent",
-        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. result.callbackGeneration must echo the opaque current generation from the Child Mission or authorized resume. The target is derived from the signed capability; peers cannot be selected.",
+        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. Exact logical-payload replay is a no-op and each distinct result wakes the owning Main once. The target and Mission identity are derived from the transport-bound capability; peers cannot be selected. Legacy result metadata is ignored.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
     },
     {

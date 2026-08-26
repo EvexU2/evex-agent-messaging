@@ -410,14 +410,51 @@ class OpenHandsProvider:
         except ProviderError:
             return None
         attempts = []
+        current_fallback_seen = False
+        replay_fallback_seen = False
         for event in events:
             title = event.get("title") if isinstance(event, dict) else None
             if title == "mcp.evex_agent_messaging.send_callback_fallback":
-                continue
+                raw_input = event.get("raw_input")
+                arguments = raw_input.get("arguments") if isinstance(raw_input, dict) else None
+                exact_input = (
+                    isinstance(raw_input, dict)
+                    and raw_input.get("server") == "evex_agent_messaging"
+                    and raw_input.get("tool") == "send_callback_fallback"
+                    and arguments == {}
+                )
+                if not current_fallback_seen:
+                    if (
+                        event.get("kind") != "ACPToolCallEvent"
+                        or event.get("status") != "in_progress"
+                        or not exact_input
+                    ):
+                        return None
+                    current_fallback_seen = True
+                    continue
+                if not attempts and not replay_fallback_seen:
+                    raw_output = event.get("raw_output")
+                    output = raw_output.get("result") if isinstance(raw_output, dict) else None
+                    structured = (
+                        output.get("structuredContent") if isinstance(output, dict) else None
+                    )
+                    if (
+                        event.get("kind") != "ACPToolCallEvent"
+                        or event.get("status") != "completed"
+                        or not exact_input
+                        or not isinstance(structured, dict)
+                        or structured.get("accepted") is not True
+                    ):
+                        return None
+                    replay_fallback_seen = True
+                    continue
+                return None
             if title != "mcp.evex_agent_messaging.send_to_parent":
                 continue
+            if not current_fallback_seen:
+                return None
             if event.get("kind") != "ACPToolCallEvent" or event.get("status") != "failed":
-                continue
+                return None
             raw_input = event.get("raw_input")
             arguments = raw_input.get("arguments") if isinstance(raw_input, dict) else None
             result = arguments.get("result") if isinstance(arguments, dict) else None
@@ -431,7 +468,7 @@ class OpenHandsProvider:
             if generation != current_generation:
                 if attempts:
                     break
-                continue
+                return None
             raw_output = event.get("raw_output")
             error = raw_output.get("error") if isinstance(raw_output, dict) else None
             message = error.get("message") if isinstance(error, dict) else None
@@ -448,6 +485,12 @@ class OpenHandsProvider:
                     "outcome": "retryable",
                 }
             )
+            if len(attempts) == 3:
+                continue
+            if len(attempts) > 3:
+                return None
+        if not current_fallback_seen or len(attempts) != 3:
+            return None
         try:
             if self._terminal_result_key(owning_main_id, child_id, task_key) is not None:
                 return None

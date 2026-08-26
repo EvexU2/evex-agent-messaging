@@ -167,6 +167,36 @@ class OpenHandsProviderTest(unittest.TestCase):
             owning_main, child, "issue-732"
         )
 
+        replay_event = {
+            "kind": "ACPToolCallEvent",
+            "title": "mcp.evex_agent_messaging.send_callback_fallback",
+            "status": "completed",
+            "raw_input": {
+                "server": "evex_agent_messaging",
+                "tool": "send_callback_fallback",
+                "arguments": {},
+            },
+            "raw_output": {
+                "error": None,
+                "result": {
+                    "structuredContent": {"accepted": True, "replayed": False}
+                },
+            },
+        }
+        provider._request.return_value["items"].insert(1, replay_event)
+        replay_context = provider.callback_fallback_context(
+            child, owning_main, "issue-732"
+        )
+        self.assertEqual(len(replay_context["attempts"]), 3)
+        provider._request.return_value["items"].pop(1)
+
+        intervening = dict(replay_event, status="failed", raw_output={"error": {}})
+        provider._request.return_value["items"].insert(1, intervening)
+        self.assertIsNone(
+            provider.callback_fallback_context(child, owning_main, "issue-732")
+        )
+        provider._request.return_value["items"].pop(1)
+
         provider._request.return_value["items"][1]["raw_output"]["error"][
             "message"
         ] = "Mcp error: -32000: unrelated internal failure"

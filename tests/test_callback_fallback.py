@@ -15,9 +15,12 @@ from evex_agent_messaging.service import (
     CallbackFallbackError,
     MessagingService,
 )
-from evex_agent_messaging.fallback import GitHubCallbackFallbackAdapter
+from evex_agent_messaging.fallback import (
+    GitHubAppInstallationTokenProvider,
+    GitHubCallbackFallbackAdapter,
+)
 from evex_agent_messaging.fallback import materialize_callback_fallback_mutation
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 
 class Provider:
@@ -139,7 +142,7 @@ class CallbackFallbackTest(unittest.TestCase):
         self.assertEqual(self.adapter.calls, [])
 
     def test_adapter_rejects_conflicts_before_create_and_replays_one_exact_app_comment(self):
-        adapter = GitHubCallbackFallbackAdapter("test-token", "messaging-fallback[bot]")
+        adapter = GitHubCallbackFallbackAdapter(lambda: "test-token", "messaging-fallback[bot]")
         adapter._request = Mock(return_value=([{"body": "@evexubot callback recovery for near", "user": {"login": "messaging-fallback[bot]"}}], {}))
         with self.assertRaisesRegex(CallbackFallbackError, "CALLBACK_FALLBACK_CONFLICT"):
             adapter.converge_callback("https://github.com/EvexU2/evex-u-workspace/issues/732", "@evexubot callback recovery for http://canvas/conversations/x (task)")
@@ -150,7 +153,7 @@ class CallbackFallbackTest(unittest.TestCase):
 
     def test_adapter_creates_then_rereads_one_exact_app_comment(self):
         adapter = GitHubCallbackFallbackAdapter(
-            "test-token", "messaging-fallback[bot]"
+            lambda: "test-token", "messaging-fallback[bot]"
         )
         body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
         exact = {"body": body, "user": {"login": "messaging-fallback[bot]"}}
@@ -170,7 +173,7 @@ class CallbackFallbackTest(unittest.TestCase):
 
     def test_adapter_recovers_post_response_loss_as_exact_replay(self):
         adapter = GitHubCallbackFallbackAdapter(
-            "test-token", "messaging-fallback[bot]"
+            lambda: "test-token", "messaging-fallback[bot]"
         )
         body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
         adapter._request = Mock(
@@ -201,7 +204,7 @@ class CallbackFallbackTest(unittest.TestCase):
 
     def test_adapter_rejects_pagination_wrong_author_and_duplicate_exact_comments(self):
         adapter = GitHubCallbackFallbackAdapter(
-            "test-token", "messaging-fallback[bot]"
+            lambda: "test-token", "messaging-fallback[bot]"
         )
         body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
         cases = [
@@ -228,7 +231,7 @@ class CallbackFallbackTest(unittest.TestCase):
 
     def test_adapter_classifies_authentication_failure_as_not_authorized(self):
         adapter = GitHubCallbackFallbackAdapter(
-            "test-token", "messaging-fallback[bot]"
+            lambda: "test-token", "messaging-fallback[bot]"
         )
         error = urllib.error.HTTPError(
             "https://api.github.com", 403, "forbidden", {}, None
@@ -240,7 +243,49 @@ class CallbackFallbackTest(unittest.TestCase):
             with self.assertRaisesRegex(
                 CallbackFallbackError, "CALLBACK_FALLBACK_NOT_AUTHORIZED"
             ):
-                adapter._request("GET", "/repos/EvexU2/evex-u-workspace/issues/1/comments")
+                adapter._request(
+                    "GET",
+                    "/repos/EvexU2/evex-u-workspace/issues/1/comments",
+                    token="test-token",
+                )
+
+    @patch("evex_agent_messaging.fallback.GithubIntegration")
+    @patch("evex_agent_messaging.fallback.Auth.AppAuth")
+    def test_app_provider_mints_one_scoped_token_per_attempt(
+        self, app_auth, github_integration
+    ):
+        integration = github_integration.return_value
+        authorization = MagicMock(token="installation-token")
+        integration.get_access_token.return_value = authorization
+        provider = GitHubAppInstallationTokenProvider(123, 456, "private-key")
+
+        self.assertEqual(provider(), "installation-token")
+
+        app_auth.assert_called_once_with(123, "private-key")
+        integration.get_access_token.assert_called_once_with(
+            456, permissions={"issues": "write"}
+        )
+        integration.close.assert_called_once_with()
+
+    @patch("evex_agent_messaging.fallback.GithubIntegration")
+    @patch("evex_agent_messaging.fallback.Auth.AppAuth")
+    def test_app_preflight_proves_identity_repository_and_write_scope(
+        self, _app_auth, github_integration
+    ):
+        integration = github_integration.return_value
+        integration.get_app.return_value.slug = "messaging-fallback"
+        github = integration.get_github_for_installation.return_value
+        github.get_repo.return_value.full_name = "EvexU2/evex-u-workspace"
+        provider = GitHubAppInstallationTokenProvider(123, 456, "private-key")
+
+        provider.preflight("messaging-fallback[bot]")
+
+        integration.get_github_for_installation.assert_called_once_with(
+            456, permissions={"issues": "write"}
+        )
+        github.get_repo.assert_called_once_with("EvexU2/evex-u-workspace")
+        github.close.assert_called_once_with()
+        integration.close.assert_called_once_with()
 
     def test_fallback_writes_are_serialized_per_child(self):
         child = self.create()

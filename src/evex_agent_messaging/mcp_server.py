@@ -20,6 +20,7 @@ from .fallback import (
     CALLBACK_FALLBACK_RETRYABLE_ERROR,
     CALLBACK_FALLBACK_RETRYABLE_MCP_ERROR_CODE,
     CallbackFallbackError,
+    GitHubAppInstallationTokenProvider,
     GitHubCallbackFallbackAdapter,
 )
 
@@ -252,14 +253,37 @@ def main() -> int:
         raise SystemExit("EVEX_WRITE_MISSION_ADMISSION_PAUSED must be true or false")
     write_mission_admission_paused = pause_value == "true"
     secret = secret_value.encode()
-    fallback_token = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN", "")
+    fallback_app_id = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_APP_ID", "")
+    fallback_installation_id = os.environ.get(
+        "EVEX_MESSAGING_FALLBACK_GITHUB_INSTALLATION_ID", ""
+    )
+    fallback_private_key = os.environ.get(
+        "EVEX_MESSAGING_FALLBACK_GITHUB_APP_PRIVATE_KEY", ""
+    )
     fallback_login = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN", "")
-    if not fallback_token.strip() or not fallback_login.strip():
+    if (
+        not fallback_app_id.isdigit()
+        or int(fallback_app_id) < 1
+        or not fallback_installation_id.isdigit()
+        or int(fallback_installation_id) < 1
+        or not fallback_private_key.strip()
+        or not fallback_login.strip()
+    ):
         raise SystemExit(
-            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN and "
-            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN are required"
+            "complete fallback GitHub App configuration is required"
         )
-    fallback_adapter = GitHubCallbackFallbackAdapter(fallback_token, fallback_login)
+    fallback_token_provider = GitHubAppInstallationTokenProvider(
+        int(fallback_app_id),
+        int(fallback_installation_id),
+        fallback_private_key,
+    )
+    try:
+        fallback_token_provider.preflight(fallback_login)
+    except CallbackFallbackError as exc:
+        raise SystemExit("fallback GitHub App preflight failed") from exc
+    fallback_adapter = GitHubCallbackFallbackAdapter(
+        fallback_token_provider, fallback_login
+    )
     server = McpServer(
         MessagingService(
             OpenHandsProvider(

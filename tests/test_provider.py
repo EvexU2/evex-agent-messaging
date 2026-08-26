@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from unittest.mock import ANY, MagicMock, Mock, patch
 import http.client
 from pathlib import Path
@@ -147,6 +148,13 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         provider._current_callback_generation = Mock(return_value=generation)
         provider._terminal_result_key = Mock(return_value=None)
+        items = provider._request.return_value["items"]
+        for index in (3, 2, 1):
+            lifecycle_start = deepcopy(items[index])
+            lifecycle_start["status"] = "in_progress"
+            lifecycle_start["is_error"] = False
+            lifecycle_start.pop("raw_output")
+            items.insert(index + 1, lifecycle_start)
 
         context = provider.callback_fallback_context(child, owning_main, "issue-732")
 
@@ -171,6 +179,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "kind": "ACPToolCallEvent",
             "title": "mcp.evex_agent_messaging.send_callback_fallback",
             "status": "completed",
+            "tool_call_id": "exec-prior-fallback-1",
             "raw_input": {
                 "server": "evex_agent_messaging",
                 "tool": "send_callback_fallback",
@@ -184,9 +193,13 @@ class OpenHandsProviderTest(unittest.TestCase):
             },
         }
         provider._request.return_value["items"].insert(1, replay_event)
-        provider._request.return_value["items"].insert(1, dict(replay_event))
+        second_replay_event = dict(
+            replay_event, tool_call_id="exec-prior-fallback-2"
+        )
+        provider._request.return_value["items"].insert(1, second_replay_event)
         retryable_replay_event = dict(
             replay_event,
+            tool_call_id="exec-prior-fallback-3",
             status="failed",
             raw_output={
                 "error": {

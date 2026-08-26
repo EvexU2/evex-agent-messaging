@@ -8,6 +8,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from github import Auth, GithubException, GithubIntegration
+
 
 class CallbackFallbackError(RuntimeError):
     """A bounded, credential-free callback fallback outcome."""
@@ -57,12 +59,12 @@ def materialize_callback_fallback_mutation(mission: dict, conversation_url: str)
 
 
 class GitHubCallbackFallbackAdapter:
-    """Use one repository-scoped App token for one convergent comment shape."""
+    """Use one on-demand repository-scoped App token per convergence attempt."""
 
-    def __init__(self, token: str, bot_login: str, *, timeout: float = 5.0) -> None:
-        if not isinstance(token, str) or not token or not isinstance(bot_login, str) or not bot_login:
+    def __init__(self, token_provider, bot_login: str, *, timeout: float = 5.0) -> None:
+        if not callable(token_provider) or not isinstance(bot_login, str) or not bot_login:
             raise ValueError("fallback GitHub App configuration is required")
-        self._token = token
+        self._token_provider = token_provider
         self._bot_login = bot_login
         self._timeout = timeout
 
@@ -70,17 +72,25 @@ class GitHubCallbackFallbackAdapter:
         match = _ISSUE_URL.fullmatch(issue_url)
         if match is None or not isinstance(body, str) or not body.startswith(_PREFIX) or "\n" in body:
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        try:
+            token = self._token_provider()
+        except CallbackFallbackError:
+            raise
+        except Exception as exc:
+            raise CallbackFallbackError(CALLBACK_FALLBACK_RETRYABLE_ERROR) from exc
+        if not isinstance(token, str) or not token:
+            raise CallbackFallbackError(CALLBACK_FALLBACK_RETRYABLE_ERROR)
         path = f"/repos/EvexU2/evex-u-workspace/issues/{match.group(1)}/comments"
-        replayed = self._classify(self._comments(path), body)
+        replayed = self._classify(self._comments(path, token), body)
         if replayed:
             return {"accepted": True, "replayed": True}
-        self._request("POST", path, {"body": body})
-        if not self._classify(self._comments(path), body):
+        self._request("POST", path, {"body": body}, token=token)
+        if not self._classify(self._comments(path, token), body):
             raise CallbackFallbackError("CALLBACK_FALLBACK_CONFLICT")
         return {"accepted": True, "replayed": False}
 
-    def _comments(self, path: str) -> list[dict]:
-        value, headers = self._request("GET", path + "?per_page=100")
+    def _comments(self, path: str, token: str) -> list[dict]:
+        value, headers = self._request("GET", path + "?per_page=100", token=token)
         if not isinstance(value, list) or len(value) >= 100 or headers.get("Link"):
             raise CallbackFallbackError("CALLBACK_FALLBACK_CONFLICT")
         if not all(isinstance(comment, dict) for comment in value):
@@ -105,14 +115,16 @@ class GitHubCallbackFallbackAdapter:
             raise CallbackFallbackError("CALLBACK_FALLBACK_CONFLICT")
         return len(exact) == 1
 
-    def _request(self, method: str, path: str, body: dict | None = None):
+    def _request(
+        self, method: str, path: str, body: dict | None = None, *, token: str
+    ):
         request = urllib.request.Request(
             "https://api.github.com" + path,
             data=json.dumps(body, separators=(",", ":")).encode() if body is not None else None,
             method=method,
             headers={
                 "Accept": "application/vnd.github+json",
-                "Authorization": f"Bearer {self._token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
                 "X-GitHub-Api-Version": "2022-11-28",
             },
@@ -133,3 +145,94 @@ class GitHubCallbackFallbackAdapter:
             raise
         except (OSError, ValueError, UnicodeError) as exc:
             raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE") from exc
+
+
+class GitHubAppInstallationTokenProvider:
+    """Mint a short-lived installation token for each bounded fallback attempt."""
+
+    def __init__(
+        self,
+        app_id: int,
+        installation_id: int,
+        private_key: str,
+        *,
+        timeout: int = 5,
+    ) -> None:
+        if (
+            not isinstance(app_id, int)
+            or isinstance(app_id, bool)
+            or app_id < 1
+            or not isinstance(installation_id, int)
+            or isinstance(installation_id, bool)
+            or installation_id < 1
+            or not isinstance(private_key, str)
+            or not private_key.strip()
+        ):
+            raise ValueError("fallback GitHub App configuration is required")
+        self._app_id = app_id
+        self._installation_id = installation_id
+        self._private_key = private_key
+        self._timeout = timeout
+
+    def _integration(self):
+        return GithubIntegration(
+            auth=Auth.AppAuth(self._app_id, self._private_key),
+            timeout=self._timeout,
+            retry=0,
+            per_page=100,
+            seconds_between_requests=0,
+            seconds_between_writes=0,
+        )
+
+    @staticmethod
+    def _error(exc: Exception) -> CallbackFallbackError:
+        code = (
+            "CALLBACK_FALLBACK_NOT_AUTHORIZED"
+            if isinstance(exc, GithubException) and exc.status in {401, 403, 404}
+            else CALLBACK_FALLBACK_RETRYABLE_ERROR
+        )
+        return CallbackFallbackError(code)
+
+    def preflight(self, expected_login: str) -> None:
+        """Prove App identity, installation, repository selection, and Issues-write scope."""
+        integration = None
+        github = None
+        try:
+            integration = self._integration()
+            app = integration.get_app()
+            if f"{getattr(app, 'slug', '')}[bot]" != expected_login:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+            github = integration.get_github_for_installation(
+                self._installation_id, permissions={"issues": "write"}
+            )
+            repository = github.get_repo("EvexU2/evex-u-workspace")
+            if getattr(repository, "full_name", None) != "EvexU2/evex-u-workspace":
+                raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        except CallbackFallbackError:
+            raise
+        except Exception as exc:
+            raise self._error(exc) from exc
+        finally:
+            if github is not None:
+                github.close()
+            if integration is not None:
+                integration.close()
+
+    def __call__(self) -> str:
+        integration = None
+        try:
+            integration = self._integration()
+            authorization = integration.get_access_token(
+                self._installation_id, permissions={"issues": "write"}
+            )
+            token = authorization.token
+            if not isinstance(token, str) or not token:
+                raise CallbackFallbackError(CALLBACK_FALLBACK_RETRYABLE_ERROR)
+            return token
+        except CallbackFallbackError:
+            raise
+        except Exception as exc:
+            raise self._error(exc) from exc
+        finally:
+            if integration is not None:
+                integration.close()

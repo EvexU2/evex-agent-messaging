@@ -414,10 +414,35 @@ class OpenHandsProvider:
             )
         except ProviderError:
             return None
+        messaging_events = []
+        terminal_call_ids = set()
+        for event in events:
+            title = event.get("title") if isinstance(event, dict) else None
+            if title not in {
+                "mcp.evex_agent_messaging.send_callback_fallback",
+                "mcp.evex_agent_messaging.send_to_parent",
+            }:
+                continue
+            call_id = event.get("tool_call_id")
+            status = event.get("status")
+            if not isinstance(call_id, str) or not call_id:
+                return None
+            if status in {"completed", "failed"}:
+                if call_id in terminal_call_ids:
+                    return None
+                terminal_call_ids.add(call_id)
+                messaging_events.append(event)
+                continue
+            if status == "in_progress":
+                if call_id in terminal_call_ids:
+                    continue
+                messaging_events.append(event)
+                continue
+            return None
         attempts = []
         current_fallback_seen = False
         prior_fallback_attempts = 0
-        for event in events:
+        for event in messaging_events:
             title = event.get("title") if isinstance(event, dict) else None
             if title == "mcp.evex_agent_messaging.send_callback_fallback":
                 raw_input = event.get("raw_input")

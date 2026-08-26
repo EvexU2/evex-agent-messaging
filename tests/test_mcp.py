@@ -328,7 +328,9 @@ class McpServerTest(unittest.TestCase):
             "OPENHANDS_URL": "http://openhands",
             "OPENHANDS_API_KEY": "key",
             "OPENHANDS_PUBLIC_URL": "http://public",
-            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN": "fallback-token",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_ID": "123",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_INSTALLATION_ID": "456",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_PRIVATE_KEY": "private-key",
             "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN": "fallback[bot]",
         }
         for name in valid:
@@ -353,11 +355,15 @@ class McpServerTest(unittest.TestCase):
             "OPENHANDS_URL": "http://openhands",
             "OPENHANDS_API_KEY": "key",
             "OPENHANDS_PUBLIC_URL": "http://public",
-            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN": "fallback-token",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_ID": "123",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_INSTALLATION_ID": "456",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_PRIVATE_KEY": "private-key",
             "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN": "fallback[bot]",
         }
         for missing in (
-            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_ID",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_INSTALLATION_ID",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_PRIVATE_KEY",
             "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN",
         ):
             with self.subTest(missing=missing):
@@ -366,7 +372,7 @@ class McpServerTest(unittest.TestCase):
                 with patch.dict(os.environ, environment, clear=True), patch(
                     "evex_agent_messaging.mcp_server.OpenHandsProvider"
                 ) as provider:
-                    with self.assertRaisesRegex(SystemExit, "are required"):
+                    with self.assertRaisesRegex(SystemExit, "configuration is required"):
                         main()
                 provider.assert_not_called()
 

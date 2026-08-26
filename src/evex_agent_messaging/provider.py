@@ -26,6 +26,11 @@ class ProviderError(RuntimeError):
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _NATIVE_CANCELLED = "cancelled"
 _RESULT_TERMINAL_STATES = frozenset({"finished", "error", "stuck"})
+_CONTROL_HISTORY_PAGE_SIZE = 100
+_CONTROL_HISTORY_MAX_PAGES = 8
+_CONTROL_HISTORY_MAX_TEXTS = 800
+_CONTROL_HISTORY_MAX_TEXT_BYTES = 1_000_000
+_CONTROL_HISTORY_MAX_CURSOR_BYTES = 1_024
 
 _STANDARD_PRICES_PER_MILLION = {
     "gpt-5.6-sol": {
@@ -675,8 +680,6 @@ class OpenHandsProvider:
                 if result_key == message_key:
                     return {"accepted": True, "messageKey": message_key, "outcome": "RESULT"}
                 return self._settled(message_key, task_key, "RESULT")
-            if self._has_resume(child_id, task_key, target_id):
-                return self._settled(message_key, task_key, "RESUMED")
             if kind == "RESULT" and self._has_waiting_input(
                 target_id, child_id, task_key
             ):
@@ -834,6 +837,8 @@ class OpenHandsProvider:
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> bool:
+        if self._has_resume(child_id, task_key, owning_main_id):
+            return False
         for text in self._event_texts(owning_main_id):
             if not text.startswith("NEEDS_INPUT\n"):
                 continue
@@ -879,9 +884,10 @@ class OpenHandsProvider:
         texts = []
         page_id = None
         seen_page_ids = set()
-        while True:
+        text_bytes = 0
+        for _ in range(_CONTROL_HISTORY_MAX_PAGES):
             path = (
-                f"/api/conversations/{conversation_id}/events/search?limit=100"
+                f"/api/conversations/{conversation_id}/events/search?limit={_CONTROL_HISTORY_PAGE_SIZE}"
                 "&sort_order=TIMESTAMP_DESC"
             )
             if page_id is not None:
@@ -889,9 +895,13 @@ class OpenHandsProvider:
             response = self._request("GET", path)
             values = response.get("items") if isinstance(response, dict) else None
             next_page_id = response.get("next_page_id") if isinstance(response, dict) else None
-            if not isinstance(values, list) or (
+            if not isinstance(values, list) or len(values) > _CONTROL_HISTORY_PAGE_SIZE or (
                 next_page_id is not None
-                and (not isinstance(next_page_id, str) or not next_page_id)
+                and (
+                    not isinstance(next_page_id, str)
+                    or not next_page_id
+                    or len(next_page_id.encode()) > _CONTROL_HISTORY_MAX_CURSOR_BYTES
+                )
             ):
                 raise ProviderError("OpenHands control history is unavailable")
             for event in values:
@@ -899,13 +909,21 @@ class OpenHandsProvider:
                 content = message.get("content") if isinstance(message, dict) else None
                 if not isinstance(content, list):
                     continue
-                texts.extend(
-                    item["text"] for item in content
-                    if isinstance(item, dict) and isinstance(item.get("text"), str)
-                )
+                for item in content:
+                    text = item.get("text") if isinstance(item, dict) else None
+                    if not isinstance(text, str):
+                        continue
+                    text_bytes += len(text.encode())
+                    if (
+                        len(texts) >= _CONTROL_HISTORY_MAX_TEXTS
+                        or text_bytes > _CONTROL_HISTORY_MAX_TEXT_BYTES
+                    ):
+                        raise ProviderError("OpenHands control history exceeds bounded event budget")
+                    texts.append(text)
             if next_page_id is None:
                 return texts
             if next_page_id in seen_page_ids:
                 raise ProviderError("OpenHands control history is unavailable")
             seen_page_ids.add(next_page_id)
             page_id = next_page_id
+        raise ProviderError("OpenHands control history exceeds bounded page budget")

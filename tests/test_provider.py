@@ -868,6 +868,48 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"accepted": False, "messageKey": "result:late", "taskKey": "spec-614", "outcome": "NEEDS_INPUT"},
         )
 
+    def test_exact_owner_result_after_authorized_resume_is_delivered_once(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        resume = "RESUME_MISSION\n" + json.dumps(
+            {"messageKey": "resume:answer", "owningMainId": str(main), "taskKey": "spec-614"},
+            sort_keys=True, separators=(",", ":"),
+        )
+        callback = json.dumps({
+            "childId": str(child), "kind": "RESULT", "messageKey": "result:after-resume",
+            "owningMainId": str(main), "taskKey": "spec-614", "text": "{}",
+        })
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"execution_status": "running"},
+            {"items": []},
+            {"items": [{"llm_message": {"content": [{"text": resume}]}}]},
+            {"execution_status": "idle"},
+            {},
+        ])
+
+        result = provider.send_child_message(
+            child, main, "result:after-resume", "RESULT", callback
+        )
+
+        self.assertEqual(result, {"accepted": True, "messageKey": "result:after-resume"})
+        self.assertEqual(
+            provider._request.call_args.args[0:2], ("POST", f"/api/conversations/{main}/events")
+        )
+
+    def test_control_history_fails_closed_after_a_finite_page_budget(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._request = Mock(side_effect=[
+            {"items": [], "next_page_id": f"page-{index}"}
+            for index in range(8)
+        ])
+
+        with self.assertRaisesRegex(ProviderError, "page budget"):
+            provider._event_texts(child)
+
+        self.assertEqual(provider._request.call_count, 8)
+
     def test_foreign_result_or_resume_evidence_cannot_block_owned_cancellation(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")

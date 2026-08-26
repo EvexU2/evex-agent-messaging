@@ -318,9 +318,13 @@ class OpenHandsProvider:
                         if isinstance(checkout, dict)
                         else ""
                     )
-                    self._read_specification_pr(
+                    authenticated_pr = self._read_specification_pr(
                         specification_pr, str(repository)
                     )
+                    if authenticated_pr["headSha"] != checkout.get("headSha"):
+                        raise ProviderError(
+                            "authenticated Draft PR head does not match Mission checkout"
+                        )
             self._ensure_checkout(child_id, mission.get("checkout"))
             created = True
             profiles = self._request("GET", "/api/agent-profiles")

@@ -1223,6 +1223,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         child_events.insert(0, first_resume)
 
         provider._request.reset_mock()
+        provider._read_specification_pr = Mock()
         replay = provider.resume_mission(
             child,
             "review:first",
@@ -1233,6 +1234,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(replay["outcome"], "RESUMED")
         self.assertTrue(replay["accepted"])
         self.assertFalse(any(call.args[0] == "POST" for call in provider._request.call_args_list))
+        provider._read_specification_pr.assert_not_called()
 
         with self.assertRaisesRegex(ProviderError, "changed context"):
             provider.resume_mission(
@@ -2415,6 +2417,66 @@ class OpenHandsProviderTest(unittest.TestCase):
         with self.assertRaisesRegex(ProviderError, "credential is unavailable"):
             without_credential._read_specification_pr(canonical, repository)
 
+    def test_reviewer_exact_replay_reconciles_stale_checkout_without_duplicate_turn(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "issue-836-reviewer"
+        with tempfile.TemporaryDirectory() as temporary:
+            provider, history, child_events, _ = self._reviewer_resume_provider(
+                Path(temporary), child, main, task_key
+            )
+            context = {
+                "currentRevision": history["repaired"],
+                "findings": ["P2-1"],
+            }
+            initial = provider._initial_callback_generation(main, child, task_key)
+            replay = provider._signed_control_envelope(
+                "RESUME_MISSION",
+                {
+                    "callbackGeneration": provider._resumed_callback_generation(
+                        initial, "resume:repaired"
+                    ),
+                    "childId": str(child),
+                    "context": context,
+                    "messageKey": "resume:repaired",
+                    "owningMainId": str(main),
+                    "taskKey": task_key,
+                },
+            )
+            child_events.insert(0, "RESUME_MISSION\n" + _compact_json(replay))
+            pr = {
+                "headSha": history["repaired"],
+                "number": 42,
+                "repository": "EvexU2/evex-agent-messaging",
+                "url": "https://github.com/EvexU2/evex-agent-messaging/pull/42",
+            }
+            provider._read_specification_pr = Mock(side_effect=[pr, pr])
+            provider._request = Mock(return_value={"execution_status": "finished"})
+
+            result = provider.resume_mission(
+                child, "resume:repaired", task_key, context, main
+            )
+
+            self.assertEqual(result["outcome"], "RESUMED")
+            self.assertTrue(result["accepted"])
+            self.assertEqual(
+                self._git_run(history["checkout"], "rev-parse", "HEAD"),
+                history["repaired"],
+            )
+            self.assertEqual(
+                (history["checkout"] / "candidate.txt").read_text(), "repaired\n"
+            )
+            provider._read_specification_pr.assert_has_calls(
+                [unittest.mock.call(pr["url"], pr["repository"])] * 2
+            )
+            self.assertEqual(
+                len([event for event in child_events if event.startswith("RESUME_MISSION\n")]),
+                1,
+            )
+            self.assertFalse(
+                any(call.args[0] == "POST" for call in provider._request.call_args_list)
+            )
+
     def test_reviewer_resume_fast_forwards_to_authenticated_head_and_replays_once(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         main = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -2465,6 +2527,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
             provider._request.reset_mock()
             provider._read_specification_pr.reset_mock()
+            provider._read_specification_pr.side_effect = [pr, pr]
             replay = provider.resume_mission(
                 child, "resume:repaired", task_key, context, main
             )
@@ -2473,7 +2536,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             self.assertFalse(
                 any(call.args[0] == "POST" for call in provider._request.call_args_list)
             )
-            provider._read_specification_pr.assert_not_called()
+            provider._read_specification_pr.assert_has_calls(
+                [unittest.mock.call(pr["url"], pr["repository"])] * 2
+            )
 
     def test_reviewer_resume_interruption_and_uncertain_delivery_converge_statelessly(self) -> None:
         for uncertain in (False, True):
@@ -2627,7 +2692,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                         1,
                     )
 
-    def test_reviewer_resume_fail_closed_matrix_delivers_no_turn(self) -> None:
+    def test_reviewer_resume_and_exact_replay_fail_closed_matrix_delivers_no_turn(self) -> None:
         cases = (
             "missing-pr",
             "unreachable-head",
@@ -2643,8 +2708,15 @@ class OpenHandsProviderTest(unittest.TestCase):
             "unauthorized-context",
             "ambiguous-event",
         )
-        for case in cases:
-            with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
+        variants = (
+            (case, exact_replay)
+            for case in cases
+            for exact_replay in (False, True)
+        )
+        for case, exact_replay in variants:
+            with self.subTest(
+                case=case, exact_replay=exact_replay
+            ), tempfile.TemporaryDirectory() as temporary:
                 child = uuid.UUID("22222222-2222-4222-8222-222222222222")
                 main = uuid.UUID("11111111-1111-4111-8111-111111111111")
                 task_key = "issue-836-reviewer"
@@ -2729,6 +2801,24 @@ class OpenHandsProviderTest(unittest.TestCase):
                     )
                     event = "RESUME_MISSION\n" + _compact_json(resume)
                     child_events[0:0] = [event, event]
+                if exact_replay and case != "ambiguous-event":
+                    initial = provider._initial_callback_generation(main, child, task_key)
+                    resume = provider._signed_control_envelope(
+                        "RESUME_MISSION",
+                        {
+                            "callbackGeneration": provider._resumed_callback_generation(
+                                initial, "resume:repaired"
+                            ),
+                            "childId": str(child),
+                            "context": context,
+                            "messageKey": "resume:repaired",
+                            "owningMainId": str(main),
+                            "taskKey": task_key,
+                        },
+                    )
+                    child_events.insert(
+                        0, "RESUME_MISSION\n" + _compact_json(resume)
+                    )
                 provider._request = Mock(return_value={"execution_status": "finished"})
 
                 with self.assertRaises(ProviderError):

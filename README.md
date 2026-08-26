@@ -33,8 +33,10 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
 - `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
   context cannot expand its immutable Mission authority and is rejected after terminal cancellation.
   After an accepted terminal result, one fresh deterministic finding key re-admits the same Specialist
-  once and advances its opaque callback generation. Exact key/context replay is a no-op; changed
-  context and later fresh-key cycles remain fail-closed and repeatable respectively. For a read-only
+  once and advances its opaque callback generation. Exact key/context replay emits no duplicate event
+  or turn; a Reviewer replay still performs required authenticated checkout reconciliation before
+  returning accepted. Changed context and later fresh-key cycles remain fail-closed and repeatable
+  respectively. For a read-only
   Reviewer whose signed Mission canonically binds `links.specificationPr`, the provider uses its
   server-held GitHub credential to derive the same open Draft PR's current head. Under the Child lock
   it permits only an optional `context.currentRevision` equality assertion, verifies clean monotonic

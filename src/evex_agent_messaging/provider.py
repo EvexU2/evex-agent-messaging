@@ -1175,6 +1175,11 @@ class OpenHandsProvider:
                         _compact_json(replay["context"]), _compact_json(context)
                     ):
                         raise ProviderError("OpenHands resume messageKey has changed context")
+                    reviewer_mission = self._reviewer_resume_mission(
+                        target_id, task_key, owning_main_id, context
+                    )
+                    if reviewer_mission is not None:
+                        self._readmit_reviewer(target_id, reviewer_mission, context)
                     return {
                         "accepted": True,
                         "messageKey": message_key,

@@ -1206,7 +1206,7 @@ class OpenHandsProvider:
         for _ in range(_CONTROL_HISTORY_MAX_PAGES):
             path = (
                 f"/api/conversations/{conversation_id}/events/search?limit={_CONTROL_HISTORY_PAGE_SIZE}"
-                "&sort_order=TIMESTAMP_DESC"
+                "&sort_order=TIMESTAMP_DESC&source=user"
             )
             if page_id is not None:
                 path += "&page_id=" + urllib.parse.quote(page_id, safe="")

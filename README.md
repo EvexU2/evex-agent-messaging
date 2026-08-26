@@ -32,7 +32,9 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   that terminal `CANCELLED` outcome. A finished/error/stuck Child is not relabeled as cancelled.
 - `resume_mission`: resume the exact Child task with a non-empty JSON context of verified facts; the
   context cannot expand its immutable Mission authority and is rejected after terminal cancellation.
-  The provider advances the opaque callback generation only after the authorized resume is admitted.
+  After an accepted terminal result, one fresh deterministic finding key re-admits the same Specialist
+  once and advances its opaque callback generation. Exact key/context replay is a no-op; changed
+  context and later fresh-key cycles remain fail-closed and repeatable respectively.
 - `publish_navigation_links`: publish informational Issue/Main/Child/PR links to the owning Main.
 - `get_usage`: read live per-Conversation model, reasoning effort, uncached/cached/cache-write input,
   output with reasoning as a subset, cache-hit rate, long-context turns, and a versioned official

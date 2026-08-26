@@ -875,20 +875,45 @@ class OpenHandsProvider:
     ) -> dict:
         with _CHECKOUT_LOCKS[target_id.int % len(_CHECKOUT_LOCKS)]:
             current = self._request("GET", f"/api/conversations/{target_id}")
-            if current.get("execution_status") == _NATIVE_CANCELLED:
+            status = current.get("execution_status")
+            if status == _NATIVE_CANCELLED:
                 return self._settled(message_key, task_key, "CANCELLED")
-            if current.get("execution_status") in _RESULT_TERMINAL_STATES:
-                return self._settled(message_key, task_key, "RESULT")
             if self.write_mission_admission_paused:
                 if self._write_mission_facts(current) is not None:
                     raise ProviderError("write_mission_admission_paused")
-            if self._has_terminal_result(owning_main_id, target_id, task_key):
-                return self._settled(message_key, task_key, "RESULT")
-            current_generation = self._current_callback_generation(
-                target_id, owning_main_id, task_key
-            )
-            if not self._has_waiting_input(owning_main_id, target_id, task_key):
-                return self._settled(message_key, task_key, "NEEDS_INPUT")
+            if status in _RESULT_TERMINAL_STATES:
+                replay = self._resume_envelope(
+                    target_id, task_key, message_key, owning_main_id
+                )
+                if replay is not None:
+                    if not hmac.compare_digest(
+                        _compact_json(replay["context"]), _compact_json(context)
+                    ):
+                        raise ProviderError("OpenHands resume messageKey has changed context")
+                    return {
+                        "accepted": True,
+                        "messageKey": message_key,
+                        "taskKey": task_key,
+                        "outcome": "RESUMED",
+                    }
+                terminal_result = self._terminal_result_key(
+                    owning_main_id, target_id, task_key
+                )
+                if terminal_result is None:
+                    return self._settled(message_key, task_key, "RESULT")
+                current_generation = self._current_callback_generation(
+                    target_id, owning_main_id, task_key
+                )
+            else:
+                if self._has_terminal_result(owning_main_id, target_id, task_key):
+                    return self._settled(message_key, task_key, "RESULT")
+                current_generation = self._current_callback_generation(
+                    target_id, owning_main_id, task_key
+                )
+                if not self._has_waiting_input(
+                    owning_main_id, target_id, task_key
+                ):
+                    return self._settled(message_key, task_key, "NEEDS_INPUT")
             envelope = {
                 "callbackGeneration": self._resumed_callback_generation(
                     current_generation, message_key
@@ -902,6 +927,33 @@ class OpenHandsProvider:
             envelope = self._signed_control_envelope("RESUME_MISSION", envelope)
             self._request("POST", f"/api/conversations/{target_id}/events", {"role": "user", "content": [{"type": "text", "text": "RESUME_MISSION\n" + _compact_json(envelope)}], "run": True})
             return {"accepted": True, "messageKey": message_key, "taskKey": task_key, "outcome": "RESUMED"}
+
+    def _resume_envelope(
+        self,
+        target_id: uuid.UUID,
+        task_key: str,
+        message_key: str,
+        owning_main_id: uuid.UUID,
+    ) -> dict | None:
+        matches = [
+            envelope
+            for envelope in self._control_envelopes(target_id, "RESUME_MISSION")
+            if self._matches_control_identity(
+                envelope, target_id, owning_main_id, task_key
+            )
+            and envelope.get("messageKey") == message_key
+        ]
+        if len(matches) > 1:
+            raise ProviderError("OpenHands resume history is ambiguous")
+        if not matches:
+            return None
+        envelope = matches[0]
+        if not self._valid_control_schema(
+            "RESUME_MISSION", envelope
+        ) or not self._valid_control_signature("RESUME_MISSION", envelope):
+            raise ProviderError("OpenHands control envelope is invalid")
+        self._current_callback_generation(target_id, owning_main_id, task_key)
+        return envelope
 
     def replacement_cancelled(
         self, target_id: uuid.UUID, task_key: str, message_key: str, owning_main_id: uuid.UUID
@@ -1170,28 +1222,41 @@ class OpenHandsProvider:
     def _terminal_result_key(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> str | None:
-        for envelope in self._control_envelopes(owning_main_id, "RESULT"):
+        matching = [
+            envelope
+            for envelope in self._control_envelopes(owning_main_id, "RESULT")
+            if self._matches_control_identity(
+                envelope, child_id, owning_main_id, task_key
+            )
+            and envelope.get("kind") == "RESULT"
+            and isinstance(envelope.get("messageKey"), str)
+        ]
+        if not matching:
+            return None
+        generations = self._callback_generation_chain(
+            child_id, owning_main_id, task_key
+        )
+        current_generation = generations[-1]
+        current = []
+        for envelope in matching:
             if (
-                self._matches_control_identity(
-                    envelope, child_id, owning_main_id, task_key
-                )
-                and envelope.get("kind") == "RESULT"
-                and isinstance(envelope.get("messageKey"), str)
+                not self._valid_control_schema("RESULT", envelope)
+                or not self._valid_control_signature("RESULT", envelope)
+                or not isinstance(envelope.get("callbackGeneration"), str)
             ):
-                current_generation = self._current_callback_generation(
-                    child_id, owning_main_id, task_key
-                )
-                if (
-                    not self._valid_control_schema("RESULT", envelope)
-                    or not self._valid_control_signature("RESULT", envelope)
-                    or not isinstance(envelope.get("callbackGeneration"), str)
-                    or not hmac.compare_digest(
-                        envelope["callbackGeneration"], current_generation
-                    )
-                ):
-                    raise ProviderError("OpenHands control history is unauthenticated")
-                return envelope["messageKey"]
-        return None
+                raise ProviderError("OpenHands control history is unauthenticated")
+            if not any(
+                hmac.compare_digest(envelope["callbackGeneration"], generation)
+                for generation in generations
+            ):
+                raise ProviderError("OpenHands control history is unauthenticated")
+            if hmac.compare_digest(
+                envelope["callbackGeneration"], current_generation
+            ):
+                current.append(envelope)
+        if len(current) > 1:
+            raise ProviderError("OpenHands control history is ambiguous")
+        return current[0]["messageKey"] if current else None
 
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str

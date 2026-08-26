@@ -865,6 +865,81 @@ class OpenHandsProviderTest(unittest.TestCase):
         envelope = json.loads(event[2]["content"][0]["text"].removeprefix("CANCEL_MISSION\n"))
         self.assertTrue(provider._valid_control_signature("CANCEL_MISSION", envelope))
 
+    def test_cancel_wakes_authenticated_input_paused_child_before_terminal_replay(self) -> None:
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        task_key = "issue-689-paused-cancel-terminal"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        generation = provider._initial_callback_generation(main, child, task_key)
+        events = {
+            child: [
+                "MISSION\n" + _compact_json(provider._signed_control_envelope("MISSION", {
+                    "callbackGeneration": generation,
+                    "childId": str(child),
+                    "owningMainId": str(main),
+                    "taskKey": task_key,
+                }))
+            ],
+            main: [
+                "NEEDS_INPUT\n" + _compact_json(provider._signed_control_envelope("NEEDS_INPUT", {
+                    "callbackGeneration": generation,
+                    "childId": str(child),
+                    "kind": "NEEDS_INPUT",
+                    "messageKey": "decision:one",
+                    "owningMainId": str(main),
+                    "taskKey": task_key,
+                    "text": '{"options":["A","B"],"question":"Choose"}',
+                }))
+            ],
+        }
+        provider._event_texts = Mock(side_effect=lambda conversation_id: events[conversation_id])
+        status = "paused"
+        interrupted = False
+        requests = []
+
+        def request(method, path, payload=None):
+            nonlocal interrupted, status
+            requests.append((method, path, payload))
+            if method == "GET" and path == f"/api/conversations/{child}":
+                return {"execution_status": status}
+            if method == "POST" and path == f"/api/conversations/{child}/interrupt":
+                interrupted = True
+                return {}
+            if method == "POST" and path == f"/api/conversations/{child}/events":
+                self.assertTrue(interrupted, "paused child must be interrupted before cancellation delivery")
+                events[child].append(payload["content"][0]["text"])
+                status = "cancelled"
+                return {}
+            self.fail(f"unexpected provider request: {method} {path}")
+
+        provider._request = Mock(side_effect=request)
+
+        self.assertTrue(provider._has_waiting_input(main, child, task_key))
+        self.assertEqual(
+            provider.cancel_mission(child, "cancel:one", task_key, main),
+            {"accepted": True, "messageKey": "cancel:one", "taskKey": task_key, "outcome": "CANCELLED"},
+        )
+        self.assertEqual(
+            provider.cancel_mission(child, "cancel:one", task_key, main),
+            {"accepted": True, "messageKey": "cancel:one", "taskKey": task_key, "outcome": "CANCELLED"},
+        )
+        self.assertEqual(
+            provider.resume_mission(child, "resume:late", task_key, {"answer": "A"}, main),
+            {"accepted": False, "messageKey": "resume:late", "taskKey": task_key, "outcome": "CANCELLED"},
+        )
+        self.assertEqual(
+            [path for method, path, _ in requests if method == "POST" and path.endswith("/interrupt")],
+            [f"/api/conversations/{child}/interrupt"],
+        )
+        cancel_events = [
+            payload for method, path, payload in requests
+            if method == "POST" and path.endswith("/events")
+        ]
+        self.assertEqual(len(cancel_events), 1)
+        self.assertTrue(cancel_events[0]["run"])
+        envelope = json.loads(cancel_events[0]["content"][0]["text"].removeprefix("CANCEL_MISSION\n"))
+        self.assertTrue(provider._valid_control_signature("CANCEL_MISSION", envelope))
+
     def test_cancel_does_not_relabel_an_ordinary_finished_child_as_cancelled(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
         provider = OpenHandsProvider("http://openhands", "key", "http://public", sleeper=lambda _seconds: None)

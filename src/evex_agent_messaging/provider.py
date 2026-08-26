@@ -828,7 +828,7 @@ class OpenHandsProvider:
                 return self._settled(message_key, task_key, "RESULT")
             if self._has_resume(target_id, task_key, owning_main_id):
                 return self._settled(message_key, task_key, "RESUMED")
-            if status == "running":
+            if status in {"running", "paused"}:
                 self._request("POST", f"{path}/interrupt", {})
             for _ in range(20):
                 current = self._request("GET", path)

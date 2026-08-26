@@ -17,17 +17,17 @@ TOOLS = [
     {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "replacement": {"type": "object", "additionalProperties": False, "required": ["cancelledChildId", "cancelledTaskKey", "cancellationKey", "postTerminalProjection", "preAdmissionProjection"], "properties": {"cancelledChildId": {"type": "string", "format": "uuid"}, "cancelledTaskKey": {"type": "string"}, "cancellationKey": {"type": "string"}, "postTerminalProjection": {"type": "object"}, "preAdmissionProjection": {"type": "object"}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
     },
     {
         "name": "send_to_parent",
-        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. The target is derived from the signed capability; peers cannot be selected.",
+        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. result.callbackGeneration must echo the opaque current generation from the Child Mission or authorized resume. The target is derived from the signed capability; peers cannot be selected.",
         "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
     },
     {
         "name": "request_user_decision",
-        "description": "Ask the human a bounded A/B/C-style question through the owning Main.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}}},
+        "description": "Ask the human a bounded A/B/C-style question through the owning Main using the current opaque callback generation.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options", "callbackGeneration"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}, "callbackGeneration": {"type": "string", "pattern": "^evxg1_[0-9a-f]{64}$"}}},
     },
     {
         "name": "cancel_mission",
@@ -76,12 +76,12 @@ class McpServer:
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
             if name == "create_child":
-                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"])
+                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"], replacement=args.get("replacement"))
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
             elif name == "request_user_decision":
-                value = self._service.request_user_decision(capability_ref, args["question"], args["options"])
+                value = self._service.request_user_decision(capability_ref, args["question"], args["options"], args["callbackGeneration"])
             elif name == "cancel_mission":
                 value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
             elif name == "resume_mission":

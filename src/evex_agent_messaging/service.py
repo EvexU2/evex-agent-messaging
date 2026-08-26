@@ -54,7 +54,12 @@ class MessagingProvider(Protocol):
     def wait_until_terminal(self, target_id: uuid.UUID) -> str: ...
     def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
     def readiness(self) -> bool: ...
-    def callback_fallback_context(self, target_id: uuid.UUID) -> dict[str, Any] | None: ...
+    def callback_fallback_context(
+        self,
+        target_id: uuid.UUID,
+        owning_main_id: uuid.UUID,
+        task_key: str,
+    ) -> dict[str, Any] | None: ...
 
 
 class MessagingService:
@@ -368,13 +373,15 @@ class MessagingService:
         if not isinstance(message_key, str) or not message_key or len(message_key) > 200:
             raise CapabilityError("result messageKey must be bounded and non-empty")
         envelope = {"callbackGeneration": callback_generation, "messageKey": message_key, "owningMainId": str(capability.owning_main_id), "childId": str(capability.child_id), "taskKey": capability.task_key, "kind": kind, "text": text}
-        return self._provider.send_child_message(
-            capability.child_id,
-            capability.owning_main_id,
-            message_key,
-            kind,
-            _compact(envelope),
-        )
+        lock = _FALLBACK_LOCKS[capability.child_id.int % len(_FALLBACK_LOCKS)]
+        with lock:
+            return self._provider.send_child_message(
+                capability.child_id,
+                capability.owning_main_id,
+                message_key,
+                kind,
+                _compact(envelope),
+            )
 
     def send_callback_fallback(self, token: str) -> dict[str, Any]:
         """Converge the one Mission-authorized recovery marker after trusted exhaustion."""
@@ -392,7 +399,11 @@ class MessagingService:
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         lock = _FALLBACK_LOCKS[capability.child_id.int % len(_FALLBACK_LOCKS)]
         with lock:
-            context = self._provider.callback_fallback_context(capability.child_id)
+            context = self._provider.callback_fallback_context(
+                capability.child_id,
+                capability.owning_main_id,
+                capability.task_key,
+            )
             issue_url, body = self._validated_callback_fallback_context(
                 capability, context
             )
@@ -427,9 +438,11 @@ class MessagingService:
             or mission.get("role") != capability.role
             or not isinstance(conversation_url, str)
             or not isinstance(attempts, list)
-            or context.get("interveningFallback") is not False
-            or not isinstance(context.get("newestRunId"), str)
+            or not isinstance(context.get("currentCallbackGeneration"), str)
         ):
+            raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
+        current_generation = context["currentCallbackGeneration"]
+        if not _CALLBACK_GENERATION.fullmatch(current_generation):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED")
         links = mission.get("links")
         mutations = mission.get("allowedMutations")
@@ -450,11 +463,12 @@ class MessagingService:
         if len(attempts) != 3 or any(
             not isinstance(attempt, dict)
             or attempt.get("outcome") != "retryable"
-            or not isinstance(attempt.get("result"), str)
+            or not isinstance(attempt.get("payload"), str)
+            or attempt.get("callbackGeneration") != current_generation
             for attempt in attempts
         ):
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
-        if len({attempt["result"] for attempt in attempts}) != 1:
+        if len({attempt["payload"] for attempt in attempts}) != 1:
             raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_EXHAUSTED")
         body = (
             f"@evexubot callback recovery for {conversation_url} "

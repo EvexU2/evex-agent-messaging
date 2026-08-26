@@ -24,11 +24,13 @@ class OpenHandsProviderTest(unittest.TestCase):
     def tearDown(self) -> None:
         self._model_patch.stop()
 
-    def test_callback_fallback_context_uses_only_original_mission_and_newest_retryable_events(self) -> None:
+    def test_callback_fallback_context_uses_current_acp_tool_events_and_payloads(self) -> None:
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        owning_main = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        generation = "evxg1_" + "a" * 64
         provider = OpenHandsProvider("http://openhands", "key", "http://public")
         mission = {
-            "owningMainId": "11111111-1111-4111-8111-111111111111",
+            "owningMainId": str(owning_main),
             "childId": str(child),
             "taskKey": "issue-732",
             "role": "writer",
@@ -41,25 +43,70 @@ class OpenHandsProviderTest(unittest.TestCase):
             return_value={
                 "items": [
                     {
-                        "kind": "McpToolEvent",
-                        "runId": "newest",
-                        "toolName": "send_to_parent",
-                        "retryable": True,
-                        "result": "same",
+                        "kind": "ACPToolCallEvent",
+                        "title": "mcp.evex_agent_messaging.send_callback_fallback",
+                        "status": "in_progress",
+                        "is_error": False,
+                        "tool_call_id": "exec-fallback",
+                        "raw_input": {
+                            "server": "evex_agent_messaging",
+                            "tool": "send_callback_fallback",
+                            "arguments": {},
+                        },
                     },
                     {
-                        "kind": "McpToolEvent",
-                        "runId": "newest",
-                        "toolName": "send_to_parent",
-                        "retryable": True,
-                        "result": "same",
+                        "kind": "ACPToolCallEvent",
+                        "title": "mcp.evex_agent_messaging.send_to_parent",
+                        "status": "completed",
+                        "is_error": True,
+                        "tool_call_id": "exec-3",
+                        "raw_input": {
+                            "server": "evex_agent_messaging",
+                            "tool": "send_to_parent",
+                            "arguments": {
+                                "result": {
+                                    "callbackGeneration": generation,
+                                    "outcome": "PASS",
+                                }
+                            },
+                        },
+                        "raw_output": {"error": {"code": -32000}, "result": None},
                     },
                     {
-                        "kind": "McpToolEvent",
-                        "runId": "newest",
-                        "toolName": "send_to_parent",
-                        "retryable": True,
-                        "result": "same",
+                        "kind": "ACPToolCallEvent",
+                        "title": "mcp.evex_agent_messaging.send_to_parent",
+                        "status": "completed",
+                        "is_error": True,
+                        "tool_call_id": "exec-2",
+                        "raw_input": {
+                            "server": "evex_agent_messaging",
+                            "tool": "send_to_parent",
+                            "arguments": {
+                                "result": {
+                                    "callbackGeneration": generation,
+                                    "outcome": "PASS",
+                                }
+                            },
+                        },
+                        "raw_output": {"error": {"code": -32000}, "result": None},
+                    },
+                    {
+                        "kind": "ACPToolCallEvent",
+                        "title": "mcp.evex_agent_messaging.send_to_parent",
+                        "status": "completed",
+                        "is_error": True,
+                        "tool_call_id": "exec-1",
+                        "raw_input": {
+                            "server": "evex_agent_messaging",
+                            "tool": "send_to_parent",
+                            "arguments": {
+                                "result": {
+                                    "callbackGeneration": generation,
+                                    "outcome": "PASS",
+                                }
+                            },
+                        },
+                        "raw_output": {"error": {"code": -32000}, "result": None},
                     },
                     {
                         "kind": "MessageEvent",
@@ -76,15 +123,42 @@ class OpenHandsProviderTest(unittest.TestCase):
                 ]
             }
         )
+        provider._current_callback_generation = Mock(return_value=generation)
+        provider._terminal_result_key = Mock(return_value=None)
 
-        context = provider.callback_fallback_context(child)
+        context = provider.callback_fallback_context(child, owning_main, "issue-732")
 
         self.assertEqual(context["mission"], mission)
-        self.assertEqual(context["newestRunId"], "newest")
+        self.assertEqual(context["currentCallbackGeneration"], generation)
         self.assertEqual(
             context["attempts"],
-            [{"result": "same", "outcome": "retryable"}] * 3,
+            [
+                {
+                    "payload": '{"callbackGeneration":"' + generation + '","outcome":"PASS"}',
+                    "callbackGeneration": generation,
+                    "outcome": "retryable",
+                }
+            ]
+            * 3,
         )
+        provider._terminal_result_key.assert_called_once_with(
+            owning_main, child, "issue-732"
+        )
+
+    def test_callback_event_history_follows_bounded_pages(self) -> None:
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        first = {"kind": "ACPToolCallEvent", "id": "newest"}
+        second = {"kind": "MessageEvent", "id": "mission"}
+        provider._request = Mock(
+            side_effect=[
+                {"items": [first], "next_page_id": "cursor-2"},
+                {"items": [second], "next_page_id": None},
+            ]
+        )
+
+        self.assertEqual(provider._callback_events(child), [first, second])
+        self.assertIn("page_id=cursor-2", provider._request.call_args_list[1].args[1])
 
     def create_provider_child(self, provider, *args, **kwargs):
         kwargs.setdefault("model", "gpt-5.6-sol")

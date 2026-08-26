@@ -2,6 +2,7 @@ import sys
 import unittest
 import uuid
 import threading
+import urllib.error
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -16,7 +17,7 @@ from evex_agent_messaging.service import (
 )
 from evex_agent_messaging.fallback import GitHubCallbackFallbackAdapter
 from evex_agent_messaging.fallback import materialize_callback_fallback_mutation
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 
 class Provider:
@@ -29,7 +30,7 @@ class Provider:
         self.child = child
         return {"created": True, "conversationUrl": f"http://canvas/conversations/{child}"}
 
-    def callback_fallback_context(self, _child):
+    def callback_fallback_context(self, _child, _owning_main, _task_key):
         return self.context
 
     def send_message(self, *_args): return {"accepted": True}
@@ -72,13 +73,19 @@ class CallbackFallbackTest(unittest.TestCase):
         return self.service.create_child(self.main_token(), "issue-732-writer", "writer", self.mission(), model="gpt-5.6-terra", reasoning_effort="medium")
 
     def trusted_context(self, child):
+        generation = "evxg1_" + "a" * 64
         body = f"@evexubot callback recovery for http://canvas/conversations/{child} (issue-732-writer)"
         return {
             "mission": self.provider.mission,
             "conversationUrl": f"http://canvas/conversations/{child}",
-            "newestRunId": "run-3",
-            "attempts": [{"result": '{"outcome":"PARTIAL"}', "outcome": "retryable"}] * 3,
-            "interveningFallback": False,
+            "currentCallbackGeneration": generation,
+            "attempts": [
+                {
+                    "payload": '{"callbackGeneration":"' + generation + '","outcome":"PARTIAL"}',
+                    "callbackGeneration": generation,
+                    "outcome": "retryable",
+                }
+            ] * 3,
             "body": body,
         }
 
@@ -104,7 +111,14 @@ class CallbackFallbackTest(unittest.TestCase):
         context["attempts"] = context["attempts"][:2]
         cases.append(("CALLBACK_FALLBACK_NOT_EXHAUSTED", context))
         context = self.trusted_context(child["childId"])
-        context["attempts"] = [*context["attempts"][:2], {"result": '{"outcome":"DIFFERENT"}', "outcome": "retryable"}]
+        context["attempts"] = [
+            *context["attempts"][:2],
+            {
+                "payload": '{"callbackGeneration":"' + context["currentCallbackGeneration"] + '","outcome":"DIFFERENT"}',
+                "callbackGeneration": context["currentCallbackGeneration"],
+                "outcome": "retryable",
+            },
+        ]
         cases.append(("CALLBACK_FALLBACK_NOT_EXHAUSTED", context))
         context = self.trusted_context(child["childId"])
         context["mission"] = {**context["mission"], "allowedMutations": []}
@@ -133,6 +147,100 @@ class CallbackFallbackTest(unittest.TestCase):
         adapter._request = Mock(return_value=([{"body": "@evexubot callback recovery for http://canvas/conversations/x (task)", "user": {"login": "messaging-fallback[bot]"}}], {}))
         self.assertEqual(adapter.converge_callback("https://github.com/EvexU2/evex-u-workspace/issues/732", "@evexubot callback recovery for http://canvas/conversations/x (task)"), {"accepted": True, "replayed": True})
         self.assertEqual(adapter._request.call_count, 1)
+
+    def test_adapter_creates_then_rereads_one_exact_app_comment(self):
+        adapter = GitHubCallbackFallbackAdapter(
+            "test-token", "messaging-fallback[bot]"
+        )
+        body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
+        exact = {"body": body, "user": {"login": "messaging-fallback[bot]"}}
+        adapter._request = Mock(
+            side_effect=[([], {}), ({"id": 1}, {}), ([exact], {})]
+        )
+
+        result = adapter.converge_callback(
+            "https://github.com/EvexU2/evex-u-workspace/issues/732", body
+        )
+
+        self.assertEqual(result, {"accepted": True, "replayed": False})
+        self.assertEqual(
+            [call.args[0] for call in adapter._request.call_args_list],
+            ["GET", "POST", "GET"],
+        )
+
+    def test_adapter_recovers_post_response_loss_as_exact_replay(self):
+        adapter = GitHubCallbackFallbackAdapter(
+            "test-token", "messaging-fallback[bot]"
+        )
+        body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
+        adapter._request = Mock(
+            side_effect=[
+                ([], {}),
+                CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE"),
+            ]
+        )
+        with self.assertRaisesRegex(
+            CallbackFallbackError, "CALLBACK_FALLBACK_RETRYABLE"
+        ):
+            adapter.converge_callback(
+                "https://github.com/EvexU2/evex-u-workspace/issues/732", body
+            )
+        adapter._request = Mock(
+            return_value=(
+                [{"body": body, "user": {"login": "messaging-fallback[bot]"}}],
+                {},
+            )
+        )
+
+        self.assertEqual(
+            adapter.converge_callback(
+                "https://github.com/EvexU2/evex-u-workspace/issues/732", body
+            ),
+            {"accepted": True, "replayed": True},
+        )
+
+    def test_adapter_rejects_pagination_wrong_author_and_duplicate_exact_comments(self):
+        adapter = GitHubCallbackFallbackAdapter(
+            "test-token", "messaging-fallback[bot]"
+        )
+        body = "@evexubot callback recovery for http://canvas/conversations/x (task)"
+        cases = [
+            ([{"body": "ordinary", "user": {"login": "someone"}}], {"Link": "next"}),
+            ([{"body": body, "user": {"login": "someone"}}], {}),
+            (
+                [
+                    {"body": body, "user": {"login": "messaging-fallback[bot]"}},
+                    {"body": body, "user": {"login": "messaging-fallback[bot]"}},
+                ],
+                {},
+            ),
+        ]
+        for comments, headers in cases:
+            with self.subTest(comments=comments, headers=headers):
+                adapter._request = Mock(return_value=(comments, headers))
+                with self.assertRaisesRegex(
+                    CallbackFallbackError, "CALLBACK_FALLBACK_CONFLICT"
+                ):
+                    adapter.converge_callback(
+                        "https://github.com/EvexU2/evex-u-workspace/issues/732",
+                        body,
+                    )
+
+    def test_adapter_classifies_authentication_failure_as_not_authorized(self):
+        adapter = GitHubCallbackFallbackAdapter(
+            "test-token", "messaging-fallback[bot]"
+        )
+        error = urllib.error.HTTPError(
+            "https://api.github.com", 403, "forbidden", {}, None
+        )
+        with patch(
+            "evex_agent_messaging.fallback.urllib.request.urlopen",
+            side_effect=error,
+        ):
+            with self.assertRaisesRegex(
+                CallbackFallbackError, "CALLBACK_FALLBACK_NOT_AUTHORIZED"
+            ):
+                adapter._request("GET", "/repos/EvexU2/evex-u-workspace/issues/1/comments")
 
     def test_fallback_writes_are_serialized_per_child(self):
         child = self.create()

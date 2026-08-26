@@ -230,9 +230,12 @@ def main() -> int:
     secret = secret_value.encode()
     fallback_token = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN", "")
     fallback_login = os.environ.get("EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN", "")
-    fallback_adapter = None
-    if fallback_token or fallback_login:
-        fallback_adapter = GitHubCallbackFallbackAdapter(fallback_token, fallback_login)
+    if not fallback_token.strip() or not fallback_login.strip():
+        raise SystemExit(
+            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN and "
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN are required"
+        )
+    fallback_adapter = GitHubCallbackFallbackAdapter(fallback_token, fallback_login)
     server = McpServer(
         MessagingService(
             OpenHandsProvider(

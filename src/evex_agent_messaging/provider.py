@@ -373,55 +373,122 @@ class OpenHandsProvider:
     def _has_any_mission_event(self, child_id: uuid.UUID) -> bool:
         return any(text.startswith("MISSION\n") for text in self._event_texts(child_id))
 
-    def callback_fallback_context(self, child_id: uuid.UUID) -> dict | None:
+    def callback_fallback_context(
+        self,
+        child_id: uuid.UUID,
+        owning_main_id: uuid.UUID,
+        task_key: str,
+    ) -> dict | None:
         """Read the original Mission and newest-run callback facts without trusting callers."""
         try:
-            events = self._request(
-                "GET",
-                f"/api/conversations/{child_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
-            ).get("items")
+            events = self._callback_events(child_id)
         except (ProviderError, TypeError, ValueError):
-            return None
-        if not isinstance(events, list) or len(events) >= 100:
             return None
         missions = [self._mission_from_event(event) for event in events]
         missions = [mission for mission in missions if mission is not None]
         if len(missions) != 1:
             return None
-        newest_run = next((self._run_id(event) for event in events if self._run_id(event)), None)
-        if not isinstance(newest_run, str):
+        try:
+            current_generation = self._current_callback_generation(
+                child_id, owning_main_id, task_key
+            )
+        except ProviderError:
             return None
         attempts = []
-        intervening_fallback = False
-        for event in reversed(events):
-            if self._run_id(event) != newest_run:
+        for event in events:
+            title = event.get("title") if isinstance(event, dict) else None
+            if title == "mcp.evex_agent_messaging.send_callback_fallback":
                 continue
-            name = event.get("toolName") or event.get("tool_name")
-            if name == "send_callback_fallback":
-                intervening_fallback = True
-            if name != "send_to_parent":
+            if title != "mcp.evex_agent_messaging.send_to_parent":
                 continue
-            result = event.get("result")
-            if isinstance(result, (dict, list)):
-                result = json.dumps(result, sort_keys=True, separators=(",", ":"))
-            if event.get("retryable") is True and isinstance(result, str):
-                attempts.append({"result": result, "outcome": "retryable"})
-            else:
+            if event.get("kind") != "ACPToolCallEvent" or event.get("status") != "completed":
+                continue
+            raw_input = event.get("raw_input")
+            arguments = raw_input.get("arguments") if isinstance(raw_input, dict) else None
+            result = arguments.get("result") if isinstance(arguments, dict) else None
+            if (
+                raw_input.get("server") != "evex_agent_messaging"
+                or raw_input.get("tool") != "send_to_parent"
+                or not isinstance(result, dict)
+            ):
                 return None
+            generation = result.get("callbackGeneration")
+            if generation != current_generation:
+                if attempts:
+                    break
+                continue
+            raw_output = event.get("raw_output")
+            error = raw_output.get("error") if isinstance(raw_output, dict) else None
+            if not isinstance(error, dict) or error.get("code") != -32000:
+                return None
+            attempts.append(
+                {
+                    "payload": _compact_json(result),
+                    "callbackGeneration": generation,
+                    "outcome": "retryable",
+                }
+            )
+        try:
+            if self._terminal_result_key(owning_main_id, child_id, task_key) is not None:
+                return None
+        except ProviderError:
+            return None
         return {
             "mission": missions[0],
             "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{child_id}",
-            "newestRunId": newest_run,
+            "currentCallbackGeneration": current_generation,
             "attempts": attempts,
-            "interveningFallback": intervening_fallback,
         }
 
-    @staticmethod
-    def _run_id(event: object) -> str | None:
-        if not isinstance(event, dict):
-            return None
-        value = event.get("runId", event.get("run_id"))
-        return value if isinstance(value, str) and value else None
+    def _callback_events(self, child_id: uuid.UUID) -> list[dict]:
+        events = []
+        page_id = None
+        seen_page_ids = set()
+        event_bytes = 0
+        for _ in range(_CONTROL_HISTORY_MAX_PAGES):
+            path = (
+                f"/api/conversations/{child_id}/events/search?"
+                f"limit={_CONTROL_HISTORY_PAGE_SIZE}&sort_order=TIMESTAMP_DESC"
+            )
+            if page_id is not None:
+                path += "&page_id=" + urllib.parse.quote(page_id, safe="")
+            response = self._request("GET", path)
+            values = response.get("items") if isinstance(response, dict) else None
+            next_page_id = (
+                response.get("next_page_id") if isinstance(response, dict) else None
+            )
+            if (
+                not isinstance(values, list)
+                or len(values) > _CONTROL_HISTORY_PAGE_SIZE
+                or any(not isinstance(event, dict) for event in values)
+                or (
+                    next_page_id is not None
+                    and (
+                        not isinstance(next_page_id, str)
+                        or not next_page_id
+                        or len(next_page_id.encode())
+                        > _CONTROL_HISTORY_MAX_CURSOR_BYTES
+                    )
+                )
+            ):
+                raise ProviderError("OpenHands callback history is unavailable")
+            for event in values:
+                event_bytes += len(_compact_json(event).encode())
+                if (
+                    len(events) >= _CONTROL_HISTORY_MAX_TEXTS
+                    or event_bytes > _CONTROL_HISTORY_MAX_TEXT_BYTES
+                ):
+                    raise ProviderError(
+                        "OpenHands callback history exceeds bounded event budget"
+                    )
+                events.append(event)
+            if next_page_id is None:
+                return events
+            if next_page_id in seen_page_ids:
+                raise ProviderError("OpenHands callback history is unavailable")
+            seen_page_ids.add(next_page_id)
+            page_id = next_page_id
+        raise ProviderError("OpenHands callback history exceeds bounded page budget")
 
     @staticmethod
     def _mission_from_event(event: object) -> dict | None:

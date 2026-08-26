@@ -286,6 +286,8 @@ class McpServerTest(unittest.TestCase):
             "OPENHANDS_URL": "http://openhands",
             "OPENHANDS_API_KEY": "key",
             "OPENHANDS_PUBLIC_URL": "http://public",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN": "fallback-token",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN": "fallback[bot]",
         }
         for name in valid:
             for label, value in (("absent", None), ("blank", ""), ("whitespace", " \t")):
@@ -302,6 +304,29 @@ class McpServerTest(unittest.TestCase):
                             main()
                     self.assertNotEqual(raised.exception.code, 0)
                     provider.assert_not_called()
+
+    def test_main_requires_complete_callback_fallback_configuration(self):
+        valid = {
+            "EVEX_MESSAGING_SECRET": "secret",
+            "OPENHANDS_URL": "http://openhands",
+            "OPENHANDS_API_KEY": "key",
+            "OPENHANDS_PUBLIC_URL": "http://public",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN": "fallback-token",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN": "fallback[bot]",
+        }
+        for missing in (
+            "EVEX_MESSAGING_FALLBACK_GITHUB_TOKEN",
+            "EVEX_MESSAGING_FALLBACK_GITHUB_APP_LOGIN",
+        ):
+            with self.subTest(missing=missing):
+                environment = dict(valid)
+                environment.pop(missing)
+                with patch.dict(os.environ, environment, clear=True), patch(
+                    "evex_agent_messaging.mcp_server.OpenHandsProvider"
+                ) as provider:
+                    with self.assertRaisesRegex(SystemExit, "are required"):
+                        main()
+                provider.assert_not_called()
 
     def test_module_exits_nonzero_for_whitespace_startup_configuration(self):
         environment = {

@@ -19,6 +19,7 @@ class CallbackFallbackError(RuntimeError):
 
 _ISSUE_URL = re.compile(r"https://github\.com/EvexU2/evex-u-workspace/issues/([1-9][0-9]*)")
 _PREFIX = "@evexubot callback recovery for "
+_MAX_GITHUB_RESPONSE_BYTES = 1_048_576
 CALLBACK_FALLBACK_MUTATION = (
     "Post exactly one GitHub Issue comment '@evexubot callback recovery for "
     "<Child Conversation URL> (<taskKey>)' on <owning Issue URL> only after the initial "
@@ -114,7 +115,17 @@ class GitHubCallbackFallbackAdapter:
         )
         try:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                raw = response.read()
+                raw = response.read(_MAX_GITHUB_RESPONSE_BYTES + 1)
+                if len(raw) > _MAX_GITHUB_RESPONSE_BYTES:
+                    raise CallbackFallbackError("CALLBACK_FALLBACK_CONFLICT")
                 return (json.loads(raw) if raw else {}, dict(response.headers.items()))
-        except (urllib.error.HTTPError, OSError, ValueError, UnicodeError) as exc:
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403, 404}:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_NOT_AUTHORIZED") from exc
+            if 400 <= exc.code < 500:
+                raise CallbackFallbackError("CALLBACK_FALLBACK_CONFLICT") from exc
+            raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE") from exc
+        except CallbackFallbackError:
+            raise
+        except (OSError, ValueError, UnicodeError) as exc:
             raise CallbackFallbackError("CALLBACK_FALLBACK_RETRYABLE") from exc

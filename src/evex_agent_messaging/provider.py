@@ -754,6 +754,33 @@ class OpenHandsProvider:
                 if result_key == message_key:
                     return {"accepted": True, "messageKey": message_key, "outcome": "RESULT"}
                 return self._settled(message_key, task_key, "RESULT")
+            if kind == "NEEDS_INPUT":
+                waiting_key = self._waiting_input_key(
+                    target_id, child_id, task_key
+                )
+                if waiting_key is not None:
+                    if waiting_key == message_key:
+                        return {
+                            "accepted": True,
+                            "messageKey": message_key,
+                            "outcome": "NEEDS_INPUT",
+                        }
+                    return self._settled(message_key, task_key, "NEEDS_INPUT")
+                if status != "paused":
+                    self._request("POST", f"/api/conversations/{child_id}/pause", {})
+                    for _ in range(20):
+                        status = self._request(
+                            "GET", f"/api/conversations/{child_id}"
+                        ).get("execution_status")
+                        if status == "paused":
+                            break
+                        if status in _RESULT_TERMINAL_STATES or status == _NATIVE_CANCELLED:
+                            raise ProviderError(
+                                "OpenHands Child became terminal before human-input pause"
+                            )
+                        self.sleeper(0.1)
+                    else:
+                        raise ProviderError("OpenHands Child did not enter human-input pause")
             if kind == "RESULT" and self._has_waiting_input(
                 target_id, child_id, task_key
             ):
@@ -778,22 +805,7 @@ class OpenHandsProvider:
                 kind,
                 _compact_json(delivered),
             )
-            if kind != "NEEDS_INPUT":
-                return result
-
-            self._request("POST", f"/api/conversations/{child_id}/pause", {})
-            for _ in range(20):
-                status = self._request(
-                    "GET", f"/api/conversations/{child_id}"
-                ).get("execution_status")
-                if status == "paused":
-                    return result
-                if status in _RESULT_TERMINAL_STATES or status == _NATIVE_CANCELLED:
-                    raise ProviderError(
-                        "OpenHands Child became terminal before human-input pause"
-                    )
-                self.sleeper(0.1)
-            raise ProviderError("OpenHands Child did not enter human-input pause")
+            return result
 
     def cancel_mission(
         self,
@@ -1184,6 +1196,11 @@ class OpenHandsProvider:
     def _has_waiting_input(
         self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
     ) -> bool:
+        return self._waiting_input_key(owning_main_id, child_id, task_key) is not None
+
+    def _waiting_input_key(
+        self, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str
+    ) -> str | None:
         generations = self._callback_generation_chain(
             child_id, owning_main_id, task_key
         )
@@ -1212,7 +1229,9 @@ class OpenHandsProvider:
                     current.append(envelope)
         if len(current) > 1:
             raise ProviderError("OpenHands control history is ambiguous")
-        return bool(current)
+        if current:
+            return current[0]["messageKey"]
+        return None
 
     def _event_texts(self, conversation_id: uuid.UUID) -> list[str]:
         texts = []

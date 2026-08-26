@@ -498,6 +498,155 @@ class MessagingTest(unittest.TestCase):
 
         self.assertTrue(result["created"])
 
+    def test_create_child_accepts_recovery_reviewer_mission(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        mission = {
+            "immediateTask": (
+                "Your task now: independently review the exact governed skill candidate."
+            ),
+            "displayTitle": "Governed skill candidate",
+            "links": {
+                "issue": "https://github.com/EvexU2/evex-u-workspace/issues/687",
+                "specification": (
+                    "https://github.com/EvexU2/evex-u-workspace/blob/main/"
+                    "docs/02_specs/platform-foundation/delivery/agent-delivery/"
+                    "openhands-autonomous-delivery.md"
+                ),
+                "pullRequest": "https://github.com/EvexU2/evex-agent-skills/pull/105",
+            },
+            "checkout": {
+                "repository": "EvexU2/evex-agent-skills",
+                "branch": "recovery-issue-687-integrated-review-fcca45c",
+                "headSha": "fcca45cb7534e835688e3143afa83bb0e11c9c7d",
+            },
+            "allowedMutations": [],
+            "prohibitions": [
+                "Do not mutate source, branches, pull requests, or GitHub state.",
+                "Do not inspect provider implementation or credentials.",
+            ],
+            "skills": [
+                "evex-delivery-specialist",
+                "evex-delivery-protocol",
+                "evex-delivery-reviewer",
+                "evex-review",
+                "evex-u-code-review",
+            ],
+            "evidence": [
+                "Review the exact checkout findings-first.",
+                "Return the verdict through send_to_parent.",
+            ],
+        }
+
+        result = self.create(
+            service,
+            self.main_token(),
+            "recovery-issue-687-integrated-review-fcca45c",
+            "reviewer",
+            mission,
+            model="gpt-5.6-sol",
+            reasoning_effort="high",
+        )
+
+        self.assertTrue(result["created"])
+        self.assertEqual(1, len(provider.calls))
+        self.assertEqual(mission["checkout"], provider.calls[0][5]["checkout"])
+        self.assertEqual([], provider.calls[0][5]["allowedMutations"])
+
+    def test_create_child_names_each_missing_required_mission_field(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        for field in (
+            "allowedMutations",
+            "checkout",
+            "evidence",
+            "immediateTask",
+            "links",
+            "prohibitions",
+            "skills",
+        ):
+            mission = self.read_only_mission()
+            del mission[field]
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(
+                    CapabilityError,
+                    rf"missing required fields: {field}",
+                ),
+            ):
+                self.create(
+                    service,
+                    self.main_token(),
+                    f"reviewer-missing-{field}",
+                    "reviewer",
+                    mission,
+                )
+
+        self.assertEqual([], provider.calls)
+
+    def test_create_child_names_each_provider_owned_mission_field(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+
+        for field in (
+            "callback",
+            "capabilities",
+            "childId",
+            "owningMainId",
+            "role",
+            "taskKey",
+        ):
+            mission = self.read_only_mission()
+            mission[field] = "caller-controlled"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(
+                    CapabilityError,
+                    rf"provider-owned fields: {field}",
+                ),
+            ):
+                self.create(
+                    service,
+                    self.main_token(),
+                    f"reviewer-reserved-{field}",
+                    "reviewer",
+                    mission,
+                )
+
+        self.assertEqual([], provider.calls)
+
+    def test_create_child_accepts_same_task_after_field_specific_repair(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        mission = self.read_only_mission()
+        del mission["evidence"]
+
+        with self.assertRaisesRegex(
+            CapabilityError,
+            "missing required fields: evidence",
+        ):
+            self.create(
+                service,
+                self.main_token(),
+                "recovery-reviewer-687",
+                "reviewer",
+                mission,
+            )
+
+        self.assertEqual([], provider.calls)
+        mission["evidence"] = ["review the exact checkout findings-first"]
+        result = self.create(
+            service,
+            self.main_token(),
+            "recovery-reviewer-687",
+            "reviewer",
+            mission,
+        )
+
+        self.assertTrue(result["created"])
+        self.assertEqual(1, len(provider.calls))
+
     def test_create_child_rejects_incomplete_mission_before_provider_call(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

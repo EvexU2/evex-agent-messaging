@@ -179,8 +179,18 @@ class MessagingService:
             "evidence",
         }
         reserved = {"owningMainId", "childId", "taskKey", "role", "callback", "capabilities"}
-        if not isinstance(mission, dict) or not required.issubset(mission) or reserved.intersection(mission):
-            raise CapabilityError("mission is incomplete or contains provider-owned authority")
+        if not isinstance(mission, dict):
+            raise CapabilityError("mission must be an object")
+        missing = sorted(required.difference(mission))
+        if missing:
+            raise CapabilityError(
+                f"mission is missing required fields: {', '.join(missing)}"
+            )
+        provider_owned = sorted(reserved.intersection(mission))
+        if provider_owned:
+            raise CapabilityError(
+                f"mission contains provider-owned fields: {', '.join(provider_owned)}"
+            )
         immediate_task = mission.get("immediateTask")
         checkout = mission.get("checkout")
         if not isinstance(immediate_task, str) or not immediate_task.startswith("Your task now:"):

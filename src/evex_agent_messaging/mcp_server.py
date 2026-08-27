@@ -1,8 +1,7 @@
-"""Minimal MCP stdio server with provider-neutral agent messaging tools."""
+"""Minimal MCP server exposing one authenticated message operation."""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
 import sys
@@ -13,43 +12,40 @@ from .provider import OpenHandsProvider
 from .service import MessagingService
 
 
-TOOLS = [
-    {
-        "name": "create_child",
-        "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "replacement": {"type": "object", "additionalProperties": False, "required": ["cancelledChildId", "cancelledTaskKey", "cancellationKey", "postTerminalProjection", "preAdmissionProjection"], "properties": {"cancelledChildId": {"type": "string", "format": "uuid"}, "cancelledTaskKey": {"type": "string"}, "cancellationKey": {"type": "string"}, "postTerminalProjection": {"type": "object"}, "preAdmissionProjection": {"type": "object"}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+TOOLS = [{
+    "name": "create_spec_chat",
+    "description": "Create or reuse the one interactive Spec Chat owned by this Parent Main.",
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["checkout"],
+        "properties": {
+            "checkout": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["repository", "branch", "headSha"],
+                "properties": {
+                    "repository": {"type": "string", "minLength": 3, "maxLength": 200},
+                    "branch": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                },
+            },
+        },
     },
-    {
-        "name": "send_to_parent",
-        "description": "Send a structured RESULT or NEEDS_INPUT to the owning Main. result.callbackGeneration must echo the opaque current generation from the Child Mission or authorized resume. The target is derived from the signed capability; peers cannot be selected.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["result"], "properties": {"result": {"type": "object"}}},
+}, {
+    "name": "send_message",
+    "description": "Send bounded text to one exact known durable Discussion target.",
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["targetId", "messageKey", "text"],
+        "properties": {
+            "targetId": {"type": "string", "format": "uuid"},
+            "messageKey": {"type": "string", "minLength": 1, "maxLength": 200},
+            "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+        },
     },
-    {
-        "name": "request_user_decision",
-        "description": "Ask the human a bounded A/B/C-style question through the owning Main using the current opaque callback generation.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["question", "options", "callbackGeneration"], "properties": {"question": {"type": "string"}, "options": {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}, "callbackGeneration": {"type": "string", "pattern": "^evxg1_[0-9a-f]{64}$"}}},
-    },
-    {
-        "name": "cancel_mission",
-        "description": "Interrupt the exact Child mission bound to this capability before a replacement mission starts.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}}},
-    },
-    {
-        "name": "resume_mission",
-        "description": "Resume the exact Child mission with verified delta context, including a fresh focused finding after an accepted terminal result; exact replay is a no-op and authority never expands.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey", "messageKey", "context"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}, "messageKey": {"type": "string"}, "context": {"type": "object", "minProperties": 1}}},
-    },
-    {
-        "name": "publish_navigation_links",
-        "description": "Publish bounded human navigation links to the owning Main; links are informational, never workflow authority.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["links"], "properties": {"links": {"type": "object", "additionalProperties": {"type": "string"}}}},
-    },
-    {
-        "name": "get_usage",
-        "description": "Read live token usage, cache hit rate, model, reasoning effort, and official Standard API-equivalent cost for this Main or one deterministic Child. This is observability, never workflow authority or a subscription invoice.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["targetId", "taskKey"], "properties": {"targetId": {"type": "string", "format": "uuid"}, "taskKey": {"type": "string"}}},
-    },
-]
+}]
 
 
 class McpServer:
@@ -57,48 +53,47 @@ class McpServer:
         self._service = service
 
     def handle(self, request: dict, *, capability_ref: str | None = None) -> dict | None:
-        method = request.get("method")
-        request_id = request.get("id")
+        method, request_id = request.get("method"), request.get("id")
         if method == "notifications/initialized":
             return None
         if method == "initialize":
-            return self._result(request_id, {"protocolVersion": "2025-06-18", "capabilities": {"tools": {}}, "serverInfo": {"name": "evex-agent-messaging", "version": "0.1.0"}})
+            return self._result(request_id, {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "evex-agent-messaging", "version": "0.3.0"},
+            })
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
-        if method == "tools/call":
-            return self._call(request_id, request.get("params") or {}, capability_ref)
-        return self._error(request_id, -32601, "method not found")
-
-    def _call(self, request_id: object, params: dict, capability_ref: str | None) -> dict:
-        name = params.get("name")
-        args = params.get("arguments") or {}
+        if method != "tools/call":
+            return self._error(request_id, -32601, "method not found")
+        params = request.get("params") or {}
+        arguments = params.get("arguments") or {}
         try:
+            name = params.get("name")
+            if name not in {"create_spec_chat", "send_message"}:
+                return self._error(request_id, -32602, "unknown messaging tool")
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
-            if name == "create_child":
-                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"], replacement=args.get("replacement"))
-                value = {key: item for key, item in value.items() if key != "capabilityRef"}
-            elif name == "send_to_parent":
-                value = self._service.send_to_parent(capability_ref, args["result"])
-            elif name == "request_user_decision":
-                value = self._service.request_user_decision(capability_ref, args["question"], args["options"], args["callbackGeneration"])
-            elif name == "cancel_mission":
-                value = self._service.cancel_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"])
-            elif name == "resume_mission":
-                value = self._service.resume_mission(capability_ref, uuid.UUID(args["targetId"]), args["taskKey"], args["messageKey"], args["context"])
-            elif name == "publish_navigation_links":
-                value = self._service.publish_navigation_links(capability_ref, args["links"])
-            elif name == "get_usage":
-                value = self._service.get_usage(
-                    capability_ref, uuid.UUID(args["targetId"]), args["taskKey"]
+            if name == "create_spec_chat":
+                value = self._service.create_spec_chat(
+                    capability_ref,
+                    arguments["checkout"],
                 )
             else:
-                return self._error(request_id, -32602, "unknown messaging tool")
-        except (KeyError, ValueError, TypeError) as exc:
+                value = self._service.send_message(
+                    capability_ref,
+                    uuid.UUID(arguments["targetId"]),
+                    arguments["messageKey"],
+                    arguments["text"],
+                )
+        except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, f"invalid tool arguments: {exc}")
         except Exception as exc:
             return self._error(request_id, -32000, str(exc))
-        return self._result(request_id, {"content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}], "structuredContent": value})
+        return self._result(request_id, {
+            "content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}],
+            "structuredContent": value,
+        })
 
     @staticmethod
     def _result(request_id: object, result: dict) -> dict:
@@ -110,8 +105,7 @@ class McpServer:
 
 
 def serve(server: McpServer, stdin=None, stdout=None) -> None:
-    stdin = stdin or sys.stdin.buffer
-    stdout = stdout or sys.stdout.buffer
+    stdin, stdout = stdin or sys.stdin.buffer, stdout or sys.stdout.buffer
     while True:
         headers = b""
         while b"\r\n\r\n" not in headers:
@@ -120,9 +114,10 @@ def serve(server: McpServer, stdin=None, stdout=None) -> None:
                 return
             headers += chunk
         try:
-            length = int(next(line for line in headers.split(b"\r\n") if line.lower().startswith(b"content-length:" )).split(b":", 1)[1])
-            payload = json.loads(stdin.read(length))
-            response = server.handle(payload)
+            length = int(next(
+                line for line in headers.split(b"\r\n") if line.lower().startswith(b"content-length:")
+            ).split(b":", 1)[1])
+            response = server.handle(json.loads(stdin.read(length)))
         except Exception as exc:
             response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"invalid MCP request: {exc}"}}
         if response is not None:
@@ -131,31 +126,21 @@ def serve(server: McpServer, stdin=None, stdout=None) -> None:
             stdout.flush()
 
 
-def make_http_server(
-    server: McpServer, host: str = "0.0.0.0", port: int = 3101
-) -> ThreadingHTTPServer:
-    """Build the small stateless HTTP server used for in-cluster MCP transport."""
+def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
             if self.path == "/healthz":
-                self.send_response(200)
-                self.end_headers()
-                self.wfile.write(b"ok\n")
+                status, body = 200, b"ok\n"
             elif self.path == "/readyz":
-                try:
-                    ready = bool(server._service.readiness())
-                except Exception:
-                    ready = False
-                if ready:
-                    self.send_response(200)
-                    body = b"ok\n"
-                else:
-                    self.send_response(503)
-                    body = b"unavailable\n"
-                self.end_headers()
-                self.wfile.write(body)
+                ready = server._service.readiness()
+                status, body = (200, b"ok\n") if ready else (503, b"unavailable\n")
             else:
                 self.send_error(404)
+                return
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
             if self.path != "/mcp":
@@ -163,26 +148,16 @@ def make_http_server(
                 return
             try:
                 request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
-                response = server.handle(
-                    request,
-                    capability_ref=bearer_capability(self.headers.get("Authorization")),
-                )
-                if response is None:
-                    self.send_response(202)
-                    self.end_headers()
-                    return
-                body = json.dumps(response, separators=(",", ":")).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-            except Exception as exc:  # malformed request is a JSON-RPC parse error, never a traceback
+                response = server.handle(request, capability_ref=bearer_capability(self.headers.get("Authorization")))
+                body = b"" if response is None else json.dumps(response, separators=(",", ":")).encode()
+                self.send_response(202 if response is None else 200)
+            except Exception as exc:
                 body = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": f"invalid MCP request: {exc}"}}).encode()
                 self.send_response(400)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body:
                 self.wfile.write(body)
 
         def log_message(self, *_args):
@@ -192,12 +167,10 @@ def make_http_server(
 
 
 def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> None:
-    """Serve the small stateless HTTP MCP transport."""
     make_http_server(server, host, port).serve_forever()
 
 
 def bearer_capability(value: str | None) -> str | None:
-    """Return one transport-bound EVEX capability from an HTTP Bearer header."""
     if not isinstance(value, str) or not value.startswith("Bearer evx1_"):
         return None
     token = value.removeprefix("Bearer ")
@@ -205,31 +178,18 @@ def bearer_capability(value: str | None) -> str | None:
 
 
 def main() -> int:
-    secret_value = os.environ.get("EVEX_MESSAGING_SECRET", "")
-    if not secret_value.strip():
-        raise SystemExit("EVEX_MESSAGING_SECRET is required")
+    secret = os.environ.get("EVEX_MESSAGING_SECRET", "")
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
+    if not all(value.strip() for value in (secret, base_url, api_key)):
+        raise SystemExit("EVEX_MESSAGING_SECRET, OPENHANDS_URL, and OPENHANDS_API_KEY are required")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
-    if not all(value.strip() for value in (base_url, api_key, public_url)):
-        raise SystemExit("OPENHANDS_URL, OPENHANDS_API_KEY, and OPENHANDS_PUBLIC_URL are required")
-    pause_value = os.environ.get("EVEX_WRITE_MISSION_ADMISSION_PAUSED", "false").strip().lower()
-    if pause_value not in {"true", "false"}:
-        raise SystemExit("EVEX_WRITE_MISSION_ADMISSION_PAUSED must be true or false")
-    write_mission_admission_paused = pause_value == "true"
-    secret = secret_value.encode()
-    server = McpServer(
-        MessagingService(
-            OpenHandsProvider(
-                base_url,
-                api_key,
-                public_url,
-                write_mission_admission_paused=write_mission_admission_paused,
-            ),
-            secret,
-            write_mission_admission_paused=write_mission_admission_paused,
-        )
-    )
+    if not public_url.strip():
+        raise SystemExit("OPENHANDS_PUBLIC_URL is required")
+    server = McpServer(MessagingService(
+        OpenHandsProvider(base_url, api_key, public_url=public_url),
+        secret.encode(),
+    ))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
     else:

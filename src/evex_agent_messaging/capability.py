@@ -109,7 +109,10 @@ def inspect_capability(token: str, secret: bytes) -> Capability:
     if not isinstance(token, str) or not token.startswith(REFERENCE_PREFIX) or not secret:
         raise error
     try:
-        raw = _unb64(token[len(REFERENCE_PREFIX) :])
+        encoded = token[len(REFERENCE_PREFIX) :]
+        raw = _unb64(encoded)
+        if _b64(raw) != encoded:
+            raise error
         if len(raw) < _HEADER.size + _SIGNATURE_BYTES:
             raise error
         payload, signature = raw[:-_SIGNATURE_BYTES], raw[-_SIGNATURE_BYTES:]

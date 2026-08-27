@@ -288,7 +288,8 @@ class OpenHandsProvider:
     def _has_initial_prompt(self, spec_chat_id: uuid.UUID, expected: str) -> bool:
         events = self._request(
             "GET",
-            f"/api/conversations/{spec_chat_id}/events/search?limit=100&sort_order=TIMESTAMP_DESC",
+            f"/api/conversations/{spec_chat_id}/events/search"
+            "?limit=1&source=user&sort_order=TIMESTAMP",
         )
         for event in events.get("items", []):
             message = event.get("llm_message") if isinstance(event, dict) else None

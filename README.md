@@ -14,8 +14,10 @@ send_message(targetId, messageKey, text)
 ```
 
 Only Parent Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
-Spec Chat, admits one isolated checkout at the exact repository/branch/base head, fixes the role to
-Spec on Sol/high, and returns its stable ID and Canvas URL. The operation has no generic role, Mission,
+Spec Chat, validates the Parent's exact clean `EvexU2/evex-u-workspace` `main` checkout, and derives
+one independent isolated Spec checkout from it locally at the exact admitted head. Messaging needs no
+GitHub credential, public-egress rule, or shared mirror for this operation. It fixes the role to Spec
+on Sol/high and returns its stable ID and Canvas URL. The operation has no generic role, Mission,
 callback, task-control, or Conversation-search surface.
 
 Only Parent Main, direct Child Main, and interactive Spec Chat receive a transport-bound HMAC Bearer

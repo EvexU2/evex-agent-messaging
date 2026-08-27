@@ -273,7 +273,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "source": "user",
             "llm_message": {"content": [{"type": "text", "text": expected_prompt}]},
         }
-        provider, _ = self.provider([
+        provider, transport = self.provider([
             parent,
             existing,
             {},
@@ -306,6 +306,12 @@ class OpenHandsProviderTest(unittest.TestCase):
             )
 
         self.assertFalse(result["created"])
+        self.assertIn((
+            "GET",
+            f"/api/conversations/{self.spec}/events/search"
+            "?limit=1&source=user&sort_order=TIMESTAMP",
+            None,
+        ), transport.calls)
 
     def test_spec_chat_checkout_is_derived_from_exact_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:

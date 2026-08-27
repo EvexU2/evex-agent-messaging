@@ -176,14 +176,17 @@ class OpenHandsProvider:
             try:
                 self._request("POST", "/api/conversations", payload)
                 created = True
-                self._request(
-                    "PATCH",
-                    f"/api/conversations/{spec_chat_id}",
-                    {"title": f"#{issue_number} · Spec"},
-                )
             except ProviderError as create_error:
-                if create_error.status != 409:
-                    raise
+                try:
+                    self._request("GET", f"/api/conversations/{spec_chat_id}")
+                except ProviderError:
+                    raise create_error
+                created = create_error.status != 409
+            self._request(
+                "PATCH",
+                f"/api/conversations/{spec_chat_id}",
+                {"title": f"#{issue_number} · Spec"},
+            )
             existing = None
 
         self._switch_and_verify_spec_model(spec_chat_id)
@@ -204,15 +207,19 @@ class OpenHandsProvider:
                 }}},
             )
         if created or not self._has_initial_prompt(spec_chat_id, prompt):
-            self._request(
-                "POST",
-                f"/api/conversations/{spec_chat_id}/events",
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": prompt}],
-                    "run": True,
-                },
-            )
+            try:
+                self._request(
+                    "POST",
+                    f"/api/conversations/{spec_chat_id}/events",
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                        "run": True,
+                    },
+                )
+            except ProviderError as prompt_error:
+                if not self._has_initial_prompt(spec_chat_id, prompt):
+                    raise prompt_error
         return {
             "conversationUrl": (
                 f"{self.public_url.rstrip('/')}/conversations/{spec_chat_id}"

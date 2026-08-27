@@ -675,6 +675,45 @@ class MessagingTest(unittest.TestCase):
         with self.assertRaisesRegex(CapabilityError, "unsafe report"):
             service.run_model_pressure(admitted["capabilityRef"], request)
 
+    def test_model_pressure_report_requires_each_requested_assertion_exactly_once(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        admitted = self.create(
+            service, self.main_token(), "qa-report-integrity", "qa",
+            self.read_only_mission(), capabilities=["model_pressure"],
+            runtime_grants={"modelPressure": self.model_binding()},
+        )
+        provider.model_binding = provider.calls[0][5]["runtimeGrants"]["modelPressure"]
+        request = {
+            **{key: provider.model_binding[key] for key in (
+                "scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode"
+            )},
+            "prompt": "bounded report integrity input",
+            "assertions": ["alpha", "beta"],
+        }
+        invalid_assertions = {
+            "duplicate": [
+                {"id": "alpha", "passed": True}, {"id": "alpha", "passed": True},
+            ],
+            "contradictory": [
+                {"id": "alpha", "passed": True}, {"id": "alpha", "passed": False},
+            ],
+            "missing": [{"id": "alpha", "passed": True}],
+            "extra": [
+                {"id": "alpha", "passed": True}, {"id": "beta", "passed": True},
+                {"id": "gamma", "passed": True},
+            ],
+        }
+        for case, assertions in invalid_assertions.items():
+            with self.subTest(case=case):
+                provider.model_result = {
+                    "assertions": assertions,
+                    "outcome": "PASS", "failureDiagnosis": None,
+                    "usage": {"inputTokens": 1, "outputTokens": 1}, "excerpts": [],
+                }
+                with self.assertRaisesRegex(CapabilityError, "unsafe report"):
+                    service.run_model_pressure(admitted["capabilityRef"], request)
+
     def test_model_pressure_role_mode_is_revalidated_on_every_invocation(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret, clock=lambda: self.now)

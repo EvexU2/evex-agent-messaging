@@ -190,7 +190,8 @@ class MessagingService:
             raise CapabilityError("model-pressure provider returned an unsafe report")
         assertions = raw.get("assertions")
         if (
-            not isinstance(assertions, list) or len(assertions) > 64
+            not isinstance(assertions, list)
+            or len(assertions) != len(requested_assertions)
             or any(
                 not isinstance(item, dict)
                 or set(item) != {"id", "passed"}
@@ -200,6 +201,7 @@ class MessagingService:
                 or not isinstance(item.get("passed"), bool)
                 for item in assertions
             )
+            or len({item["id"] for item in assertions}) != len(assertions)
             or {item["id"] for item in assertions} != set(requested_assertions)
         ):
             raise CapabilityError("model-pressure provider returned an unsafe report")

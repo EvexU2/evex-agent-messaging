@@ -45,6 +45,15 @@ _CONTROL_HISTORY_MAX_TEXTS = 800
 _CONTROL_HISTORY_MAX_TEXT_BYTES = 1_000_000
 _CONTROL_HISTORY_MAX_CURSOR_BYTES = 1_024
 _CONTROL_HISTORY_MAX_RESPONSE_BYTES = 1_048_576
+MODEL_PROVIDER_DENIED_IPV4_CIDRS = (
+    "0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+    "169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+    "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+    "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+)
+_MODEL_PROVIDER_DENIED_IPV4_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in MODEL_PROVIDER_DENIED_IPV4_CIDRS
+)
 _CALLBACK_GENERATION = re.compile(r"^evxg1_[0-9a-f]{64}$")
 _CONTROL_SIGNATURE = re.compile(r"^evxs1_[0-9a-f]{64}$")
 _CONTROL_TEXT_MAX_BYTES = 100_000
@@ -164,6 +173,10 @@ def _public_model_pressure_url(value: object) -> str:
         or address.is_multicast
         or address.is_reserved
         or address.is_unspecified
+        or (
+            isinstance(address, ipaddress.IPv4Address)
+            and any(address in network for network in _MODEL_PROVIDER_DENIED_IPV4_NETWORKS)
+        )
         for address in addresses
     ):
         raise ProviderError("model-pressure provider URL is not public")

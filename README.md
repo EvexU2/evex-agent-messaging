@@ -31,9 +31,11 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   The capability and live signed binding are checked again after completion and before any report is
   returned. The provider endpoint must be public HTTPS on effective port 443; userinfo, query,
   fragment, redirects, non-public/reserved addresses, and local/service DNS suffixes fail before an
-  Authorization header is constructed. The result is a strict typed report containing only binding
-  identity, boolean assertion outcomes, outcome, allowlisted diagnosis codes, bounded token counts,
-  and assertion-keyed evaluator-status enums with no free-form provider text. Prompt-containing
+  Authorization header is constructed. IPv4 literals and every DNS answer also enforce the exact
+  14-CIDR K8s egress exclusion contract pinned in `tests/fixtures/model-provider-network-v1.json`.
+  The result requires exactly one unique outcome for every requested assertion and contains only
+  binding identity, boolean assertion outcomes, outcome, allowlisted diagnosis codes, bounded token
+  counts, and assertion-keyed evaluator-status enums with no free-form provider text. Prompt-containing
   evidence, full prompts/completions, raw provider requests/logs, credentials, callback secrets, and
   transcript archives are never returned.
 - `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives

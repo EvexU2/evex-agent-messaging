@@ -12,7 +12,12 @@ import urllib.error
 import uuid
 import unittest
 
-from evex_agent_messaging.provider import OpenHandsProvider, ProviderError, _compact_json
+from evex_agent_messaging.provider import (
+    MODEL_PROVIDER_DENIED_IPV4_CIDRS,
+    OpenHandsProvider,
+    ProviderError,
+    _compact_json,
+)
 from evex_agent_messaging.capability import deterministic_child_id
 
 
@@ -578,6 +583,21 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
 
     def test_model_pressure_provider_rejects_nonpublic_url_before_credentialed_call(self) -> None:
+        contract = json.loads(
+            (Path(__file__).parent / "fixtures" / "model-provider-network-v1.json").read_text()
+        )
+        self.assertEqual(
+            set(contract), {"contract", "k8sPr", "k8sHead", "deniedIpv4Cidrs"}
+        )
+        self.assertEqual(contract["k8sPr"], "https://github.com/EvexU2/evex-u-k8s/pull/117")
+        self.assertEqual(contract["k8sHead"], "00e2b2f32833e7ffc47ba1b1dd33bbf69f29e02b")
+        self.assertEqual(tuple(contract["deniedIpv4Cidrs"]), MODEL_PROVIDER_DENIED_IPV4_CIDRS)
+        denied_representatives = (
+            "0.0.0.1", "10.0.0.1", "100.64.0.1", "127.0.0.1",
+            "169.254.1.1", "172.16.0.1", "192.0.0.9", "192.0.0.10",
+            "192.0.2.1", "192.168.0.1", "198.18.0.1", "198.51.100.1",
+            "203.0.113.1", "224.0.0.1", "240.0.0.1",
+        )
         invalid_urls = (
             "http://93.184.216.34/evaluate",
             "https://93.184.216.34:444/evaluate",
@@ -587,14 +607,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "https://model.localhost/evaluate",
             "https://runtime-mcp.svc/evaluate",
             "https://runtime-mcp.evex.svc.cluster.local/evaluate",
-            "https://127.0.0.1/evaluate",
-            "https://10.0.0.1/evaluate",
-            "https://169.254.1.1/evaluate",
-            "https://100.64.0.1/evaluate",
-            "https://192.0.2.1/evaluate",
-            "https://224.0.0.1/evaluate",
-            "https://240.0.0.1/evaluate",
-            "https://0.0.0.0/evaluate",
+            *(f"https://{address}/evaluate" for address in denied_representatives),
             "https://[::1]/evaluate",
             "https://[fe80::1]/evaluate",
             "https://[fc00::1]/evaluate",
@@ -614,8 +627,8 @@ class OpenHandsProviderTest(unittest.TestCase):
                 opener.assert_not_called()
 
         for addresses in (
-            ["10.0.0.1"], ["100.64.0.1"], ["192.0.2.1"],
-            ["93.184.216.34", "127.0.0.1"],
+            *((address,) for address in denied_representatives),
+            ("93.184.216.34", "192.0.0.9"),
         ):
             resolved = [
                 (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))

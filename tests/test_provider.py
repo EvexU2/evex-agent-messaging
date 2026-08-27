@@ -54,7 +54,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
-            evexsourcebasehead="a" * 40,
         )
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
@@ -122,7 +121,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
-            evexsourcebasehead="a" * 40,
         )
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
@@ -211,7 +209,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             parent_tags = {
                 "evexsourcerepository": "EvexU2/evex-u-workspace",
                 "evexsourcebranch": "main",
-                "evexsourcebasehead": head,
             }
             self.assertEqual(
                 provider._validated_parent_checkout(
@@ -238,8 +235,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "parent-main",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
-            evexsourcebranch="main",
-            evexsourcebasehead="b" * 40,
+            evexsourcebranch="develop",
         )
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"

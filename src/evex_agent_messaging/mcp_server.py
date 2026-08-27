@@ -9,6 +9,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider
+from .capability import REFERENCE_PREFIX
 from .service import MessagingService
 
 
@@ -72,7 +73,7 @@ class McpServer:
             name = params.get("name")
             if name not in {"create_spec_chat", "send_message"}:
                 return self._error(request_id, -32602, "unknown messaging tool")
-            if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
+            if not isinstance(capability_ref, str) or not capability_ref.startswith(REFERENCE_PREFIX):
                 raise ValueError("transport capability is required")
             if name == "create_spec_chat":
                 value = self._service.create_spec_chat(
@@ -171,7 +172,7 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
 
 
 def bearer_capability(value: str | None) -> str | None:
-    if not isinstance(value, str) or not value.startswith("Bearer evx1_"):
+    if not isinstance(value, str) or not value.startswith(f"Bearer {REFERENCE_PREFIX}"):
         return None
     token = value.removeprefix("Bearer ")
     return token if " " not in token else None

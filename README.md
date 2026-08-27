@@ -24,6 +24,8 @@ Only Parent Main, direct Child Main, and interactive Spec Chat receive a transpo
 capability. The capability identifies the sender and owning Parent. Before posting, the provider reads
 the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
 relationship from their admission tags. It never searches or inventories Conversations.
+The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
+refresh lifecycle.
 
 The provider then posts one bounded user event and returns `accepted: true` only after OpenHands accepts
 that request. `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are

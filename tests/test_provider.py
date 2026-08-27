@@ -103,7 +103,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 self.parent,
                 self.spec,
                 checkout,
-                "evx1_spec",
+                "evx2_spec",
             )
 
         self.assertTrue(result["created"])
@@ -114,6 +114,66 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
         self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
+
+    def test_reused_spec_chat_receives_the_current_durable_capability(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+            evexsourcebasehead="a" * 40,
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        existing = discussion(
+            self.spec,
+            "spec",
+            evexrole="role-child",
+            evextask="issue-40-spec",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexparent=str(self.parent),
+            evexrepository="EvexU2/evex-u-workspace",
+            evexbranch="main",
+            evexbasehead="a" * 40,
+            evexmodel="gpt-5.6-sol",
+            evexreasoning="high",
+        )
+        existing["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
+        existing["current_model_id"] = "gpt-5.6-sol"
+        provider, transport = self.provider([parent, existing, {}, existing, {}])
+        provider.workspace_root = "/tmp"
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "main",
+            "headSha": "a" * 40,
+        }
+
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+            ),
+            patch.object(provider, "_validate_existing_checkout"),
+            patch.object(provider, "_has_initial_prompt", return_value=True),
+        ):
+            result = provider.create_spec_chat(
+                self.parent,
+                self.spec,
+                checkout,
+                "evx2_current",
+            )
+
+        self.assertFalse(result["created"])
+        self.assertIn((
+            "POST",
+            f"/api/conversations/{self.spec}/secrets",
+            {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                "kind": "StaticSecret", "value": "evx2_current",
+            }}},
+        ), transport.calls)
 
     def test_spec_chat_checkout_is_derived_from_exact_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:

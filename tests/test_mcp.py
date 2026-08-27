@@ -20,6 +20,10 @@ class FakeService:
         self.calls.append(args)
         return {"accepted": True, "messageKey": args[2]}
 
+    def create_spec_chat(self, *args):
+        self.calls.append(args)
+        return {"created": True, "specChatId": "spec-id"}
+
     def readiness(self):
         return True
 
@@ -29,10 +33,29 @@ class McpServerTest(unittest.TestCase):
         self.service, self.server = FakeService(), McpServer(FakeService())
         self.service = self.server._service
 
-    def test_lists_exactly_one_tool(self):
+    def test_lists_only_spec_lifecycle_and_message_tools(self):
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
-        self.assertEqual([tool["name"] for tool in response["result"]["tools"]], ["send_message"])
-        self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["targetId", "messageKey", "text"])
+        self.assertEqual(
+            [tool["name"] for tool in response["result"]["tools"]],
+            ["create_spec_chat", "send_message"],
+        )
+        self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["checkout"])
+        self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "text"])
+
+    def test_create_spec_chat_uses_transport_bound_parent_capability(self):
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-42",
+            "headSha": "a" * 40,
+        }
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "create_spec_chat", "arguments": {"checkout": checkout}},
+        }, capability_ref="evx1_capability")
+        self.assertEqual(response["result"]["structuredContent"]["specChatId"], "spec-id")
+        self.assertEqual(self.service.calls, [("evx1_capability", checkout)])
 
     def test_send_message_uses_transport_bound_capability(self):
         target = uuid.uuid4()
@@ -55,7 +78,7 @@ class McpServerTest(unittest.TestCase):
 
     def test_initialize_reports_new_contract_version(self):
         response = self.server.handle({"id": 1, "method": "initialize"})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.2.0")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.3.0")
 
     def test_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx1_test"), "evx1_test")

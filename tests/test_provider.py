@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import sys
+import tempfile
+from unittest.mock import patch
 import unittest
 import uuid
 
@@ -37,7 +40,109 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def provider(self, responses):
         transport = FakeTransport(responses)
-        return OpenHandsProvider("http://openhands", "key", transport=transport), transport
+        return OpenHandsProvider(
+            "http://openhands",
+            "key",
+            transport=transport,
+            public_url="http://openhands.local/canvas",
+        ), transport
+
+    def test_create_spec_chat_reuses_exact_parent_issue_and_fixed_role(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+        )
+        created = discussion(
+            self.spec,
+            "spec",
+            evexrole="role-child",
+            evextask="issue-40-spec",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexparent=str(self.parent),
+            evexrepository="EvexU2/evex-u-workspace",
+            evexbranch="spec/issue-40",
+            evexbasehead="a" * 40,
+            evexmodel="gpt-5.6-sol",
+            evexreasoning="high",
+        )
+        created["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
+        created["current_model_id"] = "gpt-5.6-sol"
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": "acp"},
+            {},
+            {},
+            {},
+            created,
+            {},
+        ])
+        provider.workspace_root = "/tmp"
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-40",
+            "headSha": "a" * 40,
+        }
+        with patch.object(provider, "_ensure_checkout") as ensure:
+            result = provider.create_spec_chat(
+                self.parent,
+                self.spec,
+                checkout,
+                "evx1_spec",
+            )
+
+        self.assertTrue(result["created"])
+        self.assertEqual(result["conversationUrl"], f"http://openhands.local/canvas/conversations/{self.spec}")
+        ensure.assert_called_once_with(self.spec, checkout)
+        create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
+        self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
+        self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
+        self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
+        self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
+
+    def test_spec_chat_checkout_is_created_from_exact_mirror_head(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            mirror = root / "mirrors" / "EvexU2--evex-u-workspace.git"
+            source.mkdir()
+            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            (source / "spec.md").write_text("spec\n")
+            subprocess.run(["git", "-C", str(source), "add", "spec.md"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-q", "-m", "base"], check=True)
+            head = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            mirror.parent.mkdir()
+            subprocess.run(["git", "clone", "-q", "--mirror", str(source), str(mirror)], check=True)
+            subprocess.run(
+                ["git", "--git-dir", str(mirror), "remote", "set-url", "origin", "https://github.com/EvexU2/evex-u-workspace.git"],
+                check=True,
+            )
+            provider = OpenHandsProvider(
+                "http://openhands",
+                "key",
+                public_url="http://openhands.local/canvas",
+                workspace_root=str(root / "delivery"),
+            )
+            checkout = {
+                "repository": "EvexU2/evex-u-workspace",
+                "branch": "spec/issue-40",
+                "headSha": head,
+            }
+
+            provider._ensure_checkout(self.spec, checkout)
+
+            path = provider._checkout_path(self.spec)
+            self.assertEqual((path / "spec.md").read_text(), "spec\n")
+            self.assertEqual(provider._git(path, "branch", "--show-current"), "spec/issue-40")
+            self.assertEqual(provider._git(path, "rev-parse", "HEAD"), head)
 
     def test_child_and_spec_can_target_only_their_bound_parent(self):
         for role in ("deputy", "spec"):

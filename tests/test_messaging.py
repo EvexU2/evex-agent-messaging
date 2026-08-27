@@ -14,6 +14,7 @@ from evex_agent_messaging.capability import (  # noqa: E402
     capability_token,
     inspect_capability,
     main_capability_token,
+    deterministic_spec_chat_id,
     verify_capability,
 )
 from evex_agent_messaging.service import MessagingService  # noqa: E402
@@ -30,6 +31,10 @@ class FakeProvider:
     def send_message(self, *args):
         self.calls.append(("send", args))
         return {"accepted": True, "messageKey": args[2]}
+
+    def create_spec_chat(self, *args):
+        self.calls.append(("create-spec", args))
+        return {"created": True, "conversationUrl": "http://openhands/spec"}
 
     def readiness(self):
         return self.ready
@@ -83,6 +88,37 @@ class MessagingServiceTest(unittest.TestCase):
         result = service.send_message(self.child_token(), self.parent, "result-1", "PR passed")
         self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual([call[0] for call in provider.calls], ["allowed", "send"])
+
+    def test_only_parent_main_can_create_one_deterministic_spec_chat(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-42",
+            "headSha": "a" * 40,
+        }
+
+        result = service.create_spec_chat(self.main_token(), checkout)
+
+        expected = deterministic_spec_chat_id(self.parent)
+        self.assertEqual(result["specChatId"], str(expected))
+        self.assertNotIn("capabilityRef", result)
+        self.assertEqual(provider.calls[0][0], "create-spec")
+        self.assertEqual(provider.calls[0][1][:3], (self.parent, expected, checkout))
+        with self.assertRaisesRegex(CapabilityError, "Parent Main"):
+            service.create_spec_chat(self.child_token(), checkout)
+
+    def test_spec_chat_checkout_is_exact_and_bounded(self):
+        service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
+        invalid = (
+            {},
+            {"repository": "EvexU2/evex-u-workspace", "branch": "spec/42", "headSha": "bad"},
+            {"repository": "invalid", "branch": "spec/42", "headSha": "a" * 40},
+            {"repository": "EvexU2/evex-u-workspace", "branch": "../escape", "headSha": "a" * 40},
+        )
+        for checkout in invalid:
+            with self.subTest(checkout=checkout), self.assertRaises(CapabilityError):
+                service.create_spec_chat(self.main_token(), checkout)
 
     def test_wrong_target_and_self_target_fail_closed(self):
         denied = FakeProvider(allowed=False)

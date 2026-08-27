@@ -13,12 +13,14 @@ import uuid
 
 
 REFERENCE_PREFIX = "evx1_"
+SPEC_CHAT_NAMESPACE = uuid.UUID("ab1fbaf1-cc0e-4a2e-9cf2-6e4cb2ee8c89")
 TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEADER = struct.Struct(">B16s16sIIBBH")
 _SIGNATURE_BYTES = 32
 _ROLE_IDS = {"main": 1, "deputy": 2, "spec": 3}
 _ROLES = {value: key for key, value in _ROLE_IDS.items()}
 _SEND_MESSAGE_BIT = 2
+_CREATE_SPEC_CHAT_BIT = 1
 
 
 class CapabilityError(ValueError):
@@ -33,6 +35,12 @@ class Capability:
     role: str
     issued_at: datetime
     expires_at: datetime
+
+
+def deterministic_spec_chat_id(owning_main_id: uuid.UUID) -> uuid.UUID:
+    if not isinstance(owning_main_id, uuid.UUID):
+        raise CapabilityError("invalid owning Main")
+    return uuid.uuid5(SPEC_CHAT_NAMESPACE, f"{owning_main_id}:spec")
 
 
 def _b64(value: bytes) -> str:
@@ -72,6 +80,7 @@ def capability_token(
     ):
         raise CapabilityError("invalid capability inputs")
     task = task_key.encode()
+    actions = _SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "main" else 0)
     payload = _HEADER.pack(
         1,
         owning_main_id.bytes,
@@ -79,7 +88,7 @@ def capability_token(
         _epoch(issued_at),
         _epoch(expires_at),
         _ROLE_IDS[role],
-        _SEND_MESSAGE_BIT,
+        actions,
         len(task),
     ) + task
     signature = hmac.new(secret, payload, hashlib.sha256).digest()
@@ -125,7 +134,8 @@ def inspect_capability(token: str, secret: bytes) -> Capability:
         role = _ROLES[role_id]
         if (
             version != 1
-            or actions != _SEND_MESSAGE_BIT
+            or actions
+            != (_SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "main" else 0))
             or len(task.encode()) != task_length
             or not TASK_KEY_RE.fullmatch(task)
         ):

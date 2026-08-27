@@ -13,6 +13,26 @@ from .service import MessagingService
 
 
 TOOLS = [{
+    "name": "create_spec_chat",
+    "description": "Create or reuse the one interactive Spec Chat owned by this Parent Main.",
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["checkout"],
+        "properties": {
+            "checkout": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["repository", "branch", "headSha"],
+                "properties": {
+                    "repository": {"type": "string", "minLength": 3, "maxLength": 200},
+                    "branch": {"type": "string", "minLength": 1, "maxLength": 160},
+                    "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+                },
+            },
+        },
+    },
+}, {
     "name": "send_message",
     "description": "Send bounded text to one exact known durable Discussion target.",
     "inputSchema": {
@@ -40,7 +60,7 @@ class McpServer:
             return self._result(request_id, {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "evex-agent-messaging", "version": "0.2.0"},
+                "serverInfo": {"name": "evex-agent-messaging", "version": "0.3.0"},
             })
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
@@ -49,16 +69,23 @@ class McpServer:
         params = request.get("params") or {}
         arguments = params.get("arguments") or {}
         try:
-            if params.get("name") != "send_message":
+            name = params.get("name")
+            if name not in {"create_spec_chat", "send_message"}:
                 return self._error(request_id, -32602, "unknown messaging tool")
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
-            value = self._service.send_message(
-                capability_ref,
-                uuid.UUID(arguments["targetId"]),
-                arguments["messageKey"],
-                arguments["text"],
-            )
+            if name == "create_spec_chat":
+                value = self._service.create_spec_chat(
+                    capability_ref,
+                    arguments["checkout"],
+                )
+            else:
+                value = self._service.send_message(
+                    capability_ref,
+                    uuid.UUID(arguments["targetId"]),
+                    arguments["messageKey"],
+                    arguments["text"],
+                )
         except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, f"invalid tool arguments: {exc}")
         except Exception as exc:
@@ -156,7 +183,13 @@ def main() -> int:
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
     if not all(value.strip() for value in (secret, base_url, api_key)):
         raise SystemExit("EVEX_MESSAGING_SECRET, OPENHANDS_URL, and OPENHANDS_API_KEY are required")
-    server = McpServer(MessagingService(OpenHandsProvider(base_url, api_key), secret.encode()))
+    public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
+    if not public_url.strip():
+        raise SystemExit("OPENHANDS_PUBLIC_URL is required")
+    server = McpServer(MessagingService(
+        OpenHandsProvider(base_url, api_key, public_url=public_url),
+        secret.encode(),
+    ))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
     else:

@@ -6,7 +6,9 @@ from dataclasses import dataclass
 import http.client
 import json
 from pathlib import Path
+import shutil
 import subprocess
+import tempfile
 import threading
 from typing import Any, Callable
 import urllib.error
@@ -81,9 +83,8 @@ class OpenHandsProvider:
         checkout: dict[str, str],
         capability_ref: str,
     ) -> dict[str, Any]:
-        parent_identity, parent_tags, parent_role = self._identity(
-            self._request("GET", f"/api/conversations/{parent_id}")
-        )
+        parent_value = self._request("GET", f"/api/conversations/{parent_id}")
+        parent_identity, parent_tags, parent_role = self._identity(parent_value)
         issue_ref = parent_tags.get("evexissue")
         if (
             parent_identity != parent_id
@@ -95,6 +96,9 @@ class OpenHandsProvider:
         issue_repository, issue_number = issue_ref.rsplit("#", 1)
         if checkout["repository"] != issue_repository or not issue_number.isdigit():
             raise ProviderError("Spec Chat checkout does not match the owning Issue")
+        parent_checkout = self._validated_parent_checkout(
+            parent_value, parent_tags, issue_number, checkout
+        )
 
         lock = _CHECKOUT_LOCKS[spec_chat_id.int % len(_CHECKOUT_LOCKS)]
         with lock:
@@ -104,6 +108,7 @@ class OpenHandsProvider:
                 issue_ref,
                 issue_number,
                 checkout,
+                parent_checkout,
                 capability_ref,
             )
 
@@ -114,6 +119,7 @@ class OpenHandsProvider:
         issue_ref: str,
         issue_number: str,
         checkout: dict[str, str],
+        parent_checkout: Path,
         capability_ref: str,
     ) -> dict[str, Any]:
         prompt = (
@@ -129,7 +135,7 @@ class OpenHandsProvider:
         except ProviderError as exc:
             if exc.status != 404:
                 raise
-            self._ensure_checkout(spec_chat_id, checkout)
+            self._ensure_checkout(spec_chat_id, checkout, parent_checkout)
             profiles = self._request("GET", "/api/agent-profiles")
             profile_id = profiles.get("active_agent_profile_id")
             if not isinstance(profile_id, str) or not profile_id:
@@ -284,50 +290,102 @@ class OpenHandsProvider:
     def _checkout_path(self, spec_chat_id: uuid.UUID) -> Path:
         return Path(self.workspace_root).resolve() / f"spec-{spec_chat_id}"
 
+    def _validated_parent_checkout(
+        self,
+        parent: dict,
+        tags: dict[str, Any],
+        issue_number: str,
+        checkout: dict[str, str],
+    ) -> Path:
+        if (
+            tags.get("evexsourcerepository") != checkout["repository"]
+            or tags.get("evexsourcebranch") != "main"
+            or tags.get("evexsourcebasehead") != checkout["headSha"]
+            or checkout["branch"] != f"spec/issue-{issue_number}"
+        ):
+            raise ProviderError("Parent Main checkout authority does not match Spec request")
+        workspace = parent.get("workspace")
+        working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
+        expected = (
+            Path(self.workspace_root).resolve()
+            / f"issue-{issue_number}-source"
+            / "evex-u-workspace"
+        )
+        path = Path(working_dir) if isinstance(working_dir, str) else None
+        if path != expected or path.is_symlink():
+            raise ProviderError("Parent Main checkout path does not match authority")
+        self._validate_existing_checkout(
+            expected,
+            {
+                "repository": checkout["repository"],
+                "branch": "main",
+                "headSha": checkout["headSha"],
+            },
+            exact=True,
+        )
+        return expected
+
     def _ensure_checkout(
-        self, spec_chat_id: uuid.UUID, checkout: dict[str, str]
+        self,
+        spec_chat_id: uuid.UUID,
+        checkout: dict[str, str],
+        parent_checkout: Path,
     ) -> None:
         path = self._checkout_path(spec_chat_id)
         if path.is_symlink():
             raise ProviderError("Spec Chat checkout is not an isolated directory")
         if not path.exists():
-            self._provision_checkout(path, checkout)
+            self._provision_checkout(path, checkout, parent_checkout)
         self._validate_existing_checkout(path, checkout, exact=True)
 
-    def _provision_checkout(self, path: Path, checkout: dict[str, str]) -> None:
+    def _provision_checkout(
+        self,
+        path: Path,
+        checkout: dict[str, str],
+        parent_checkout: Path,
+    ) -> None:
         repository = checkout["repository"]
-        owner, name = repository.split("/", 1)
-        mirror = Path(self.workspace_root).resolve().parent / "mirrors" / f"{owner}--{name}.git"
-        if mirror.is_symlink() or not mirror.is_dir():
-            raise ProviderError("Spec Chat checkout mirror is unavailable")
-        if self._repository_from_remote(self._git(mirror, "remote", "get-url", "origin")).lower() != repository.lower():
-            raise ProviderError("Spec Chat checkout mirror origin does not match authority")
-        self._git(mirror, "check-ref-format", "--branch", checkout["branch"])
-        self._git(mirror, "cat-file", "-e", f"{checkout['headSha']}^{{commit}}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = Path(tempfile.mkdtemp(prefix=f".{path.name}.", dir=path.parent))
         try:
             subprocess.run(
                 [
                     "git",
                     "--no-optional-locks",
-                    "--git-dir",
-                    str(mirror),
-                    "worktree",
-                    "add",
-                    "--no-track",
-                    "--no-guess-remote",
-                    "-b",
-                    checkout["branch"],
-                    str(path),
-                    checkout["headSha"],
+                    "clone",
+                    "--quiet",
+                    "--no-checkout",
+                    "--no-hardlinks",
+                    str(parent_checkout),
+                    str(temporary),
                 ],
                 check=True,
                 capture_output=True,
                 text=True,
                 timeout=20,
             )
+            self._git(
+                temporary,
+                "remote",
+                "set-url",
+                "origin",
+                f"https://github.com/{repository}.git",
+            )
+            self._git(temporary, "check-ref-format", "--branch", checkout["branch"])
+            self._git(temporary, "cat-file", "-e", f"{checkout['headSha']}^{{commit}}")
+            self._git(
+                temporary,
+                "checkout",
+                "-b",
+                checkout["branch"],
+                checkout["headSha"],
+            )
+            temporary.rename(path)
         except (OSError, subprocess.SubprocessError) as exc:
             raise ProviderError("Spec Chat checkout provisioning failed") from exc
-        self._git(path, "config", "remote.origin.mirror", "false")
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary, ignore_errors=True)
 
     def _validate_existing_checkout(
         self, path: Path, checkout: dict[str, str], *, exact: bool

@@ -52,7 +52,13 @@ class OpenHandsProviderTest(unittest.TestCase):
             self.parent,
             "parent-main",
             evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+            evexsourcebasehead="a" * 40,
         )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
         created = discussion(
             self.spec,
             "spec",
@@ -84,7 +90,15 @@ class OpenHandsProviderTest(unittest.TestCase):
             "branch": "spec/issue-40",
             "headSha": "a" * 40,
         }
-        with patch.object(provider, "_ensure_checkout") as ensure:
+        parent_checkout = Path("/tmp/issue-40-source/evex-u-workspace")
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=parent_checkout,
+            ),
+            patch.object(provider, "_ensure_checkout") as ensure,
+        ):
             result = provider.create_spec_chat(
                 self.parent,
                 self.spec,
@@ -94,22 +108,22 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertTrue(result["created"])
         self.assertEqual(result["conversationUrl"], f"http://openhands.local/canvas/conversations/{self.spec}")
-        ensure.assert_called_once_with(self.spec, checkout)
+        ensure.assert_called_once_with(self.spec, checkout, parent_checkout)
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
         self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
 
-    def test_spec_chat_checkout_is_created_from_exact_mirror_head(self):
+    def test_spec_chat_checkout_is_derived_from_exact_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            source = root / "source"
-            mirror = root / "mirrors" / "EvexU2--evex-u-workspace.git"
-            source.mkdir()
-            subprocess.run(["git", "init", "-q", str(source)], check=True)
+            source = root / "delivery" / "issue-40-source" / "evex-u-workspace"
+            source.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
             subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
             subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "remote", "add", "origin", "https://github.com/EvexU2/evex-u-workspace.git"], check=True)
             (source / "spec.md").write_text("spec\n")
             subprocess.run(["git", "-C", str(source), "add", "spec.md"], check=True)
             subprocess.run(["git", "-C", str(source), "commit", "-q", "-m", "base"], check=True)
@@ -119,12 +133,6 @@ class OpenHandsProviderTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            mirror.parent.mkdir()
-            subprocess.run(["git", "clone", "-q", "--mirror", str(source), str(mirror)], check=True)
-            subprocess.run(
-                ["git", "--git-dir", str(mirror), "remote", "set-url", "origin", "https://github.com/EvexU2/evex-u-workspace.git"],
-                check=True,
-            )
             provider = OpenHandsProvider(
                 "http://openhands",
                 "key",
@@ -137,12 +145,62 @@ class OpenHandsProviderTest(unittest.TestCase):
                 "headSha": head,
             }
 
-            provider._ensure_checkout(self.spec, checkout)
+            parent = {
+                "workspace": {"working_dir": str(source.resolve())},
+            }
+            parent_tags = {
+                "evexsourcerepository": "EvexU2/evex-u-workspace",
+                "evexsourcebranch": "main",
+                "evexsourcebasehead": head,
+            }
+            self.assertEqual(
+                provider._validated_parent_checkout(
+                    parent, parent_tags, "40", checkout
+                ),
+                source.resolve(),
+            )
+
+            provider._ensure_checkout(self.spec, checkout, source)
 
             path = provider._checkout_path(self.spec)
             self.assertEqual((path / "spec.md").read_text(), "spec\n")
             self.assertEqual(provider._git(path, "branch", "--show-current"), "spec/issue-40")
             self.assertEqual(provider._git(path, "rev-parse", "HEAD"), head)
+            self.assertEqual(
+                provider._git(path, "remote", "get-url", "origin"),
+                "https://github.com/EvexU2/evex-u-workspace.git",
+            )
+            self.assertFalse((root / "mirrors").exists())
+
+    def test_parent_checkout_identity_mismatch_fails_before_spec_mutation(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+            evexsourcebasehead="b" * 40,
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        provider, transport = self.provider([parent])
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-40",
+            "headSha": "a" * 40,
+        }
+
+        with self.assertRaisesRegex(ProviderError, "Parent Main checkout authority"):
+            provider.create_spec_chat(self.parent, self.spec, checkout, "evx1_spec")
+
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_spec_checkout_provisioning_has_no_shared_mirror_or_worktree_path(self):
+        source = (ROOT / "src/evex_agent_messaging/provider.py").read_text()
+
+        self.assertNotIn(' / "mirrors" / ', source)
+        self.assertNotIn('"worktree"', source)
 
     def test_child_and_spec_can_target_only_their_bound_parent(self):
         for role in ("deputy", "spec"):

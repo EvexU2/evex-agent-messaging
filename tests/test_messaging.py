@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import base64
+import hashlib
+import hmac
 import json
 import sys
 import unittest
@@ -20,9 +23,17 @@ class FakeProvider:
     def __init__(self):
         self.calls = []
 
-    def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort):
-        self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort))
+    def create_child(self, parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort, environment_grant=None):
+        self.calls.append(("create", parent_id, child_id, role, task_key, mission, capability_ref, capabilities, model, reasoning_effort, environment_grant))
         return {"created": True}
+
+    def model_pressure_binding(self, child_id, owning_main_id, task_key):
+        self.calls.append(("model-binding", child_id, owning_main_id, task_key))
+        return self.model_binding
+
+    def run_model_pressure(self, request):
+        self.calls.append(("model-run", request))
+        return self.model_result
 
     def send_message(self, target_id, message_key, kind, text):
         self.calls.append(("send", target_id, message_key, kind, text))
@@ -95,6 +106,29 @@ class MessagingTest(unittest.TestCase):
             "https://github.com/EvexU2/evex-u-core/pull/836"
         )
         return value
+
+    def environment_binding(self):
+        digest = lambda character: "sha256:" + character * 64
+        return {
+            "environmentId": digest("1"),
+            "generation": digest("2"),
+            "candidateRevisionId": digest("3"),
+            "configurationDigest": digest("4"),
+            "scenarios": ["governed-runtime-api"],
+            "namespace": "evex-candidate-a-gb",
+            "toolboxPod": "toolbox",
+            "manifestDigest": digest("5"),
+            "expiresAt": "2026-08-20T01:00:00Z",
+        }
+
+    def model_binding(self):
+        return {
+            "skillCandidate": "6" * 40,
+            "scenarioId": "openhands-delivery.governed-runtime-qa",
+            "model": "gpt-5.6-sol",
+            "mode": "forward",
+            "expiresAt": "2026-08-20T01:00:00Z",
+        }
 
     def create(self, service, *args, **kwargs):
         kwargs.setdefault("model", "gpt-5.6-luna")
@@ -212,6 +246,9 @@ class MessagingTest(unittest.TestCase):
             {"ref": "refs/pull/837/head"},
             {"head": "b" * 40},
             {"current_revision": "b" * 40},
+            {"runtimeGrants": {"modelPressure": self.model_binding()}},
+            {"modelPressureGeneration": "evxm1_" + "b" * 64},
+            {"nested": {"environmentGrant": "widened"}},
         ):
             with self.subTest(context=context), self.assertRaises(CapabilityError):
                 service.resume_mission(
@@ -326,7 +363,10 @@ class MessagingTest(unittest.TestCase):
 
     def test_runtime_capability_is_explicit_per_child_mission(self):
         provider = FakeProvider()
-        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        service = MessagingService(
+            provider, self.secret, clock=lambda: self.now,
+            runtime_grant_secret=b"r" * 32,
+        )
 
         self.create(service, self.main_token(), "writer-source", "writer", self.mission())
         self.create(service,
@@ -335,6 +375,7 @@ class MessagingTest(unittest.TestCase):
             "qa",
             self.read_only_mission(),
             capabilities=["runtime_environment"],
+            runtime_grants={"environment": self.environment_binding()},
         )
         self.create(service,
             self.main_token(),
@@ -345,9 +386,9 @@ class MessagingTest(unittest.TestCase):
         )
 
         creates = [call for call in provider.calls if call[0] == "create"]
-        self.assertEqual(creates[0][-3], frozenset())
-        self.assertEqual(creates[1][-3], frozenset({"runtime_environment"}))
-        self.assertEqual(creates[2][-3], frozenset({"runtime_environment"}))
+        self.assertEqual(creates[0][-4], frozenset())
+        self.assertEqual(creates[1][-4], frozenset({"runtime_environment"}))
+        self.assertEqual(creates[2][-4], frozenset({"runtime_environment"}))
         with self.assertRaises(CapabilityError):
             self.create(service,
                 self.main_token(), "writer-broad", "writer", self.mission(), capabilities=["all_tools"]
@@ -360,6 +401,162 @@ class MessagingTest(unittest.TestCase):
                 self.read_only_mission(),
                 capabilities=["runtime_environment"],
             )
+
+    def test_combined_qa_grants_have_independent_immutable_identities(self):
+        provider = FakeProvider()
+        service = MessagingService(
+            provider, self.secret, clock=lambda: self.now,
+            runtime_grant_secret=b"r" * 32,
+        )
+
+        admitted = self.create(
+            service, self.main_token(), "qa-governed", "qa", self.read_only_mission(),
+            capabilities=["runtime_environment", "model_pressure"],
+            runtime_grants={
+                "environment": self.environment_binding(),
+                "modelPressure": self.model_binding(),
+            },
+        )
+
+        created = next(call for call in provider.calls if call[0] == "create")
+        mission = created[5]
+        environment = mission["runtimeGrants"]["environment"]
+        model = mission["runtimeGrants"]["modelPressure"]
+        self.assertEqual(environment["principalId"], admitted["childId"])
+        self.assertEqual(environment["generation"], self.environment_binding()["generation"])
+        self.assertEqual(environment["capabilities"], {"toolbox": True})
+        self.assertRegex(model["modelPressureGeneration"], r"^evxm1_[0-9a-f]{64}$")
+        self.assertNotEqual(environment["generation"], model["modelPressureGeneration"])
+        self.assertTrue(created[-1].startswith("v1."))
+        self.assertNotIn("grantRef", json.dumps(mission))
+        version, payload, signature = created[-1].split(".")
+        decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        expected_signature = hmac.new(
+            b"r" * 32, f"{version}.{payload}".encode(), hashlib.sha256
+        ).digest()
+        actual_signature = base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4))
+        self.assertTrue(hmac.compare_digest(actual_signature, expected_signature))
+        self.assertEqual(set(decoded), {
+            "schemaVersion", "principalId", "environmentId", "generation",
+            "candidateRevisionId", "configurationDigest", "scenarios", "namespace",
+            "toolboxPod", "manifestDigest", "expiresAt", "capabilities",
+        })
+
+    def test_new_grants_fail_closed_when_absent_widened_expired_or_role_foreign(self):
+        provider = FakeProvider()
+        service = MessagingService(
+            provider, self.secret, clock=lambda: self.now,
+            runtime_grant_secret=b"r" * 32,
+        )
+        cases = []
+        cases.append((
+            "absent QA Environment",
+            dict(capabilities=["runtime_environment"]),
+        ))
+        widened = self.environment_binding()
+        widened["rawShell"] = True
+        cases.append((
+            "widened Environment",
+            dict(capabilities=["runtime_environment"], runtime_grants={"environment": widened}),
+        ))
+        expired = self.model_binding()
+        expired["expiresAt"] = "2026-08-19T23:59:59Z"
+        cases.append((
+            "expired model",
+            dict(capabilities=["model_pressure"], runtime_grants={"modelPressure": expired}),
+        ))
+        for label, kwargs in cases:
+            with self.subTest(label=label), self.assertRaises(CapabilityError):
+                self.create(
+                    service, self.main_token(), "qa-denied-" + label.split()[0],
+                    "qa", self.read_only_mission(), **kwargs,
+                )
+        with self.assertRaisesRegex(CapabilityError, "skill-authoring"):
+            self.create(
+                service, self.main_token(), "writer-model-foreign", "writer", self.mission(),
+                capabilities=["model_pressure"],
+                runtime_grants={"modelPressure": self.model_binding()},
+            )
+        with self.assertRaisesRegex(CapabilityError, "limited to skill-authoring Writer or QA"):
+            self.create(
+                service, self.main_token(), "repair-model-foreign", "repair", self.mission(),
+                capabilities=["model_pressure"],
+                runtime_grants={"modelPressure": self.model_binding()},
+            )
+        self.assertEqual(provider.calls, [])
+
+    def test_skill_authoring_writer_receives_only_its_bound_model_pressure_mode(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        mission = self.mission()
+        mission["skills"].append("evex-skill-authoring")
+        binding = self.model_binding()
+        binding["mode"] = "red"
+
+        self.create(
+            service, self.main_token(), "writer-model-red", "writer", mission,
+            capabilities=["model_pressure"],
+            runtime_grants={"modelPressure": binding},
+        )
+
+        bound = provider.calls[0][5]["runtimeGrants"]["modelPressure"]
+        self.assertEqual(bound["mode"], "red")
+        self.assertEqual(bound["skillCandidate"], binding["skillCandidate"])
+
+    def test_model_pressure_revalidates_each_call_and_returns_only_sanitized_report(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret, clock=lambda: self.now)
+        admitted = self.create(
+            service, self.main_token(), "qa-model", "qa", self.read_only_mission(),
+            capabilities=["model_pressure"],
+            runtime_grants={"modelPressure": self.model_binding()},
+        )
+        mission = next(call for call in provider.calls if call[0] == "create")[5]
+        provider.model_binding = mission["runtimeGrants"]["modelPressure"]
+        provider.model_result = {
+            "assertions": [{"id": "no-secret", "passed": True}],
+            "outcome": "PASS",
+            "failureDiagnosis": None,
+            "usage": {"inputTokens": 12, "outputTokens": 4},
+            "excerpts": ["bounded evidence"],
+        }
+        identity = provider.model_binding
+        request = {
+            **{key: identity[key] for key in (
+                "scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode"
+            )},
+            "prompt": "evaluation prompt that must not be returned",
+            "assertions": ["no-secret"],
+        }
+
+        report = service.run_model_pressure(admitted["capabilityRef"], request)
+
+        self.assertEqual(report["outcome"], "PASS")
+        self.assertEqual(report["modelPressureGeneration"], identity["modelPressureGeneration"])
+        self.assertNotIn("prompt", report)
+        self.assertNotIn("completion", report)
+        self.assertEqual([call[0] for call in provider.calls[-2:]], ["model-binding", "model-run"])
+
+        mismatched = dict(request, scenarioId="foreign-scenario")
+        before = len(provider.calls)
+        with self.assertRaisesRegex(CapabilityError, "stale, foreign, expired, or mismatched"):
+            service.run_model_pressure(admitted["capabilityRef"], mismatched)
+        self.assertEqual([call[0] for call in provider.calls[before:]], ["model-binding"])
+
+        provider.model_binding = {**identity, "expiresAt": "2026-08-19T23:59:59Z"}
+        before = len(provider.calls)
+        with self.assertRaisesRegex(CapabilityError, "stale, foreign, expired, or mismatched"):
+            service.run_model_pressure(admitted["capabilityRef"], request)
+        self.assertEqual([call[0] for call in provider.calls[before:]], ["model-binding"])
+        provider.model_binding = identity
+
+        provider.model_result = {**provider.model_result, "completion": "raw transcript"}
+        with self.assertRaisesRegex(CapabilityError, "unsafe report"):
+            service.run_model_pressure(admitted["capabilityRef"], request)
+        provider.model_result.pop("completion")
+        provider.model_result["excerpts"] = [request["prompt"]]
+        with self.assertRaisesRegex(CapabilityError, "unsafe report"):
+            service.run_model_pressure(admitted["capabilityRef"], request)
 
     def test_plan_author_mission_is_read_only(self):
         service = MessagingService(FakeProvider(), self.secret, clock=lambda: self.now)
@@ -549,6 +746,7 @@ class MessagingTest(unittest.TestCase):
             },
         )
         self.assertNotIn("capabilityRef", mission["callback"])
+        self.assertNotIn("runtimeGrants", mission)
 
     def test_display_title_is_normalized_and_bound_for_navigation(self):
         provider = FakeProvider()
@@ -774,7 +972,7 @@ class MessagingTest(unittest.TestCase):
             reasoning_effort="high",
         )
         created = provider.calls[-1]
-        self.assertEqual(created[-2:], ("gpt-5.6-sol", "high"))
+        self.assertEqual(created[-3:-1], ("gpt-5.6-sol", "high"))
 
         with self.assertRaisesRegex(CapabilityError, "read-only"):
             self.create(service,

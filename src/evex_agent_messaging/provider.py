@@ -109,6 +109,8 @@ class OpenHandsProvider:
     workspace_root: str = "/home/openhands/workspace/delivery"
     write_mission_admission_paused: bool = False
     github_token: str | None = field(default=None, repr=False)
+    model_pressure_url: str | None = None
+    model_pressure_api_key: str | None = field(default=None, repr=False)
 
     def _request(
         self, method: str, path: str, body: dict | None = None, *, timeout: float | None = None
@@ -236,6 +238,86 @@ class OpenHandsProvider:
         profile_id = profiles.get("active_agent_profile_id")
         return isinstance(profile_id, str) and bool(profile_id)
 
+    def model_pressure_binding(
+        self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str
+    ) -> dict:
+        """Re-read the signed Mission and live Child identity for every eval."""
+        conversation = self._request("GET", f"/api/conversations/{child_id}")
+        tags = conversation.get("tags")
+        if (
+            str(conversation.get("id") or conversation.get("conversation_id") or "") != str(child_id)
+            or not isinstance(tags, dict)
+            or tags.get("evexparent") != str(owning_main_id)
+            or tags.get("evextask") != task_key
+            or "model_pressure" not in str(tags.get("evexcaps", "")).split(",")
+        ):
+            raise ProviderError("model-pressure Child authority is stale or foreign")
+        bindings = []
+        for envelope in self._control_envelopes(child_id, "MISSION"):
+            if (
+                not self._valid_control_schema("MISSION", envelope)
+                or not self._valid_control_signature("MISSION", envelope)
+                or not self._matches_control_identity(
+                    envelope, child_id, owning_main_id, task_key
+                )
+                or "model_pressure" not in envelope.get("capabilities", [])
+            ):
+                continue
+            grants = envelope.get("runtimeGrants")
+            binding = grants.get("modelPressure") if isinstance(grants, dict) else None
+            if isinstance(binding, dict):
+                bindings.append(binding)
+        canonical = {
+            _compact_json(binding): binding
+            for binding in bindings
+        }
+        if len(canonical) != 1:
+            raise ProviderError("model-pressure Mission authority is missing or ambiguous")
+        return dict(next(iter(canonical.values())))
+
+    def run_model_pressure(self, request_body: dict) -> dict:
+        """Call the isolated model provider without exposing its credential."""
+        url = self.model_pressure_url
+        api_key = self.model_pressure_api_key
+        if not isinstance(url, str) or not url.strip() or not isinstance(api_key, str) or not api_key.strip():
+            raise ProviderError("model-pressure provider is unavailable")
+        parsed_url = urllib.parse.urlparse(url.strip())
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ProviderError("model-pressure provider is unavailable")
+        request = urllib.request.Request(
+            url.strip(),
+            data=_compact_json(request_body).encode(),
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key.strip()}",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                declared_size = response.headers.get("Content-Length")
+                if isinstance(declared_size, str) and (
+                    not declared_size.isdecimal()
+                    or int(declared_size) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES
+                ):
+                    raise ProviderError("model-pressure provider returned an invalid report")
+                raw = response.read(_CONTROL_HISTORY_MAX_RESPONSE_BYTES + 1)
+                if isinstance(declared_size, str) and len(raw) != int(declared_size):
+                    raise ProviderError("model-pressure provider returned an invalid report")
+        except ProviderError:
+            raise
+        except (OSError, http.client.IncompleteRead) as exc:
+            raise ProviderError("model-pressure provider request failed") from exc
+        if not isinstance(raw, bytes) or len(raw) > _CONTROL_HISTORY_MAX_RESPONSE_BYTES:
+            raise ProviderError("model-pressure provider returned an invalid report")
+        try:
+            value = json.loads(raw)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise ProviderError("model-pressure provider returned an invalid report") from exc
+        if not isinstance(value, dict):
+            raise ProviderError("model-pressure provider returned an invalid report")
+        return value
+
     def create_child(
         self,
         parent_id: uuid.UUID,
@@ -247,6 +329,7 @@ class OpenHandsProvider:
         capabilities: frozenset[str],
         model: str,
         reasoning_effort: str,
+        environment_grant: str | None = None,
     ) -> dict:
         if role in {"spec", "writer"} and self.write_mission_admission_paused:
             raise ProviderError("write_mission_admission_paused")
@@ -262,6 +345,7 @@ class OpenHandsProvider:
                 capabilities,
                 model,
                 reasoning_effort,
+                environment_grant,
             )
 
     def _create_child_locked(
@@ -275,6 +359,7 @@ class OpenHandsProvider:
         capabilities: frozenset[str],
         model: str,
         reasoning_effort: str,
+        environment_grant: str | None = None,
     ) -> dict:
         delivered_mission = {
             **mission,
@@ -363,6 +448,16 @@ class OpenHandsProvider:
                         "kind": "StaticSecret",
                         "value": ",".join(sorted(capabilities)),
                     },
+                    **(
+                        {
+                            "EVEX_RUNTIME_ENVIRONMENT_GRANT": {
+                                "kind": "StaticSecret",
+                                "value": environment_grant,
+                            }
+                        }
+                        if environment_grant is not None
+                        else {}
+                    ),
                 },
                 "agent_launch_additions": {
                     "system_message_suffix_append": (

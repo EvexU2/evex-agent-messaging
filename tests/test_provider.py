@@ -467,6 +467,83 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         self.assertEqual(create["tags"]["evexcaps"], "runtime_environment")
 
+    def test_environment_grant_is_injected_only_for_the_exact_admitted_child(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        provider._ensure_checkout = Mock()
+        provider._validate_existing_checkout = Mock()
+        provider._request = Mock(side_effect=[
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": "acp"}, {"id": str(child)}, {}, {}, {},
+        ])
+
+        self.create_provider_child(
+            provider, parent, child, "qa", "qa-bound",
+            {"checkout": {"repository": "EvexU2/evex-u-core", "branch": "fix/qa", "headSha": "a" * 40}},
+            "evx1_opaque", frozenset({"runtime_environment"}),
+            environment_grant="v1.opaque.signature",
+        )
+
+        create = provider._request.call_args_list[2].args[2]
+        self.assertEqual(
+            create["secrets"]["EVEX_RUNTIME_ENVIRONMENT_GRANT"]["value"],
+            "v1.opaque.signature",
+        )
+        self.assertNotIn("KUBECONFIG", create["secrets"])
+        self.assertNotIn("SERVICEACCOUNT", json.dumps(create).upper())
+
+    def test_model_pressure_binding_revalidates_live_child_and_signed_mission(self) -> None:
+        parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        child = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        task_key = "qa-model"
+        provider = OpenHandsProvider("http://openhands", "key", "http://public")
+        binding = {
+            "skillCandidate": "a" * 40,
+            "scenarioId": "governed-runtime",
+            "model": "gpt-5.6-sol",
+            "mode": "forward",
+            "expiresAt": "2026-08-20T01:00:00Z",
+            "modelPressureGeneration": "evxm1_" + "b" * 64,
+        }
+        mission = provider._signed_control_envelope("MISSION", {
+            "callbackGeneration": provider._initial_callback_generation(parent, child, task_key),
+            "childId": str(child), "owningMainId": str(parent), "taskKey": task_key,
+            "capabilities": ["model_pressure"],
+            "runtimeGrants": {"modelPressure": binding},
+        })
+        provider._request = Mock(return_value={
+            "id": str(child),
+            "tags": {"evexparent": str(parent), "evextask": task_key, "evexcaps": "model_pressure,runtime_environment"},
+        })
+        provider._event_texts = Mock(return_value=["MISSION\n" + _compact_json(mission)])
+
+        self.assertEqual(provider.model_pressure_binding(child, parent, task_key), binding)
+
+        mission["runtimeGrants"]["modelPressure"]["scenarioId"] = "widened"
+        provider._event_texts = Mock(return_value=["MISSION\n" + _compact_json(mission)])
+        with self.assertRaisesRegex(ProviderError, "missing or ambiguous"):
+            provider.model_pressure_binding(child, parent, task_key)
+
+    def test_model_pressure_provider_uses_server_credential_and_bounded_json(self) -> None:
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public",
+            model_pressure_url="http://model-provider/evaluate",
+            model_pressure_api_key="server-only-model-key",
+        )
+        response = MagicMock()
+        response.read.return_value = b'{"assertions":[],"outcome":"PASS","failureDiagnosis":null,"usage":{},"excerpts":[]}'
+        response.__enter__.return_value = response
+        response.__exit__.return_value = False
+        with patch("urllib.request.urlopen", return_value=response) as opened:
+            result = provider.run_model_pressure({"prompt": "bounded"})
+
+        request = opened.call_args.args[0]
+        self.assertEqual(request.full_url, "http://model-provider/evaluate")
+        self.assertEqual(request.get_header("Authorization"), "Bearer server-only-model-key")
+        self.assertNotIn(b"server-only-model-key", request.data)
+        self.assertEqual(result["outcome"], "PASS")
+
     def test_child_mission_is_not_sent_when_exact_admission_fails(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")
         child = uuid.UUID("22222222-2222-4222-8222-222222222222")

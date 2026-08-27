@@ -16,6 +16,7 @@ from .capability import (
     inspect_capability,
     verify_capability,
 )
+from .runtime_grant import environment_grant_claims, mint_environment_grant
 
 
 _WORKSPACE_ISSUE_URL = re.compile(
@@ -46,12 +47,19 @@ _RESUME_AUTHORITY_KEYS = frozenset(
         "role",
         "skills",
         "specificationpr",
+        "runtimegrants",
+        "environmentgrant",
+        "modelpressuregrant",
+        "environmentgeneration",
+        "modelpressuregeneration",
     }
 )
 
 
 class MessagingProvider(Protocol):
-    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str], model: str, reasoning_effort: str) -> dict[str, Any]: ...
+    def create_child(self, parent_id: uuid.UUID, child_id: uuid.UUID, role: str, task_key: str, mission: dict[str, Any], capability_ref: str, capabilities: frozenset[str], model: str, reasoning_effort: str, environment_grant: str | None = None) -> dict[str, Any]: ...
+    def model_pressure_binding(self, child_id: uuid.UUID, owning_main_id: uuid.UUID, task_key: str) -> dict[str, Any]: ...
+    def run_model_pressure(self, request: dict[str, Any]) -> dict[str, Any]: ...
     def send_message(self, target_id: uuid.UUID, message_key: str, kind: str, text: str) -> dict[str, Any]: ...
     def cancel_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, owning_main_id: uuid.UUID) -> dict[str, Any]: ...
     def resume_mission(self, target_id: uuid.UUID, message_key: str, task_key: str, context: dict[str, Any], owning_main_id: uuid.UUID) -> dict[str, Any]: ...
@@ -72,6 +80,7 @@ class MessagingService:
         *,
         clock=None,
         write_mission_admission_paused: bool = False,
+        runtime_grant_secret: bytes | None = None,
     ) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
@@ -81,6 +90,7 @@ class MessagingService:
         self._secret = secret
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._write_mission_admission_paused = write_mission_admission_paused
+        self._runtime_grant_secret = runtime_grant_secret
 
     def readiness(self) -> bool:
         """Return whether this configured provider can serve its active role now."""
@@ -88,6 +98,124 @@ class MessagingService:
             return bool(self._provider.readiness())
         except Exception:
             return False
+
+    def run_model_pressure(self, token: str, request: dict[str, Any]) -> dict[str, Any]:
+        """Execute one exact Mission-bound eval and return only sanitized evidence."""
+        capability = verify_capability(
+            token, self._secret, now=self._clock(), action="send_message",
+            target_id=self._capability_target(token),
+        )
+        if capability.role not in {"writer", "qa"}:
+            raise CapabilityError("model_pressure is limited to skill-authoring Writer or QA")
+        required = {
+            "scenarioId", "skillCandidate", "modelPressureGeneration", "model",
+            "mode", "prompt", "assertions",
+        }
+        if not isinstance(request, dict) or set(request) != required:
+            raise CapabilityError("model-pressure request is incomplete or widened")
+        prompt = request.get("prompt")
+        assertions = request.get("assertions")
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode()) > 100_000:
+            raise CapabilityError("model-pressure prompt is invalid")
+        if (
+            not isinstance(assertions, list) or not 1 <= len(assertions) <= 64
+            or any(not isinstance(item, str) or not item.strip() or len(item) > 500 for item in assertions)
+            or len(set(assertions)) != len(assertions)
+        ):
+            raise CapabilityError("model-pressure assertions are invalid")
+        binding = self._provider.model_pressure_binding(
+            capability.child_id, capability.owning_main_id, capability.task_key
+        )
+        expected = {
+            key: binding.get(key)
+            for key in ("scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode")
+        }
+        supplied = {key: request.get(key) for key in expected}
+        expires = binding.get("expiresAt")
+        if (
+            set(binding) != {
+                "scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode", "expiresAt"
+            }
+            or supplied != expected
+            or not isinstance(expires, str)
+            or not expires.endswith("Z")
+        ):
+            raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched")
+        try:
+            expiry = datetime.fromisoformat(expires[:-1] + "+00:00")
+        except ValueError as exc:
+            raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched") from exc
+        if expiry <= self._clock().astimezone(timezone.utc):
+            raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched")
+        raw = self._provider.run_model_pressure({
+            **expected,
+            "prompt": prompt,
+            "assertions": list(assertions),
+        })
+        return self._sanitized_model_pressure_report(
+            expected, raw, prompt=prompt, requested_assertions=assertions
+        )
+
+    @staticmethod
+    def _sanitized_model_pressure_report(
+        identity: dict[str, Any], raw: object, *, prompt: str,
+        requested_assertions: list[str],
+    ) -> dict[str, Any]:
+        required = {"assertions", "outcome", "failureDiagnosis", "usage", "excerpts"}
+        if not isinstance(raw, dict) or set(raw) != required:
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        assertions = raw.get("assertions")
+        if (
+            not isinstance(assertions, list) or len(assertions) > 64
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"id", "passed"}
+                or not isinstance(item.get("id"), str)
+                or not item["id"]
+                or len(item["id"]) > 200
+                or not isinstance(item.get("passed"), bool)
+                for item in assertions
+            )
+            or {item["id"] for item in assertions} != set(requested_assertions)
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        if raw.get("outcome") not in {"PASS", "FAIL", "ERROR"}:
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        diagnosis = raw.get("failureDiagnosis")
+        if diagnosis is not None and (
+            not isinstance(diagnosis, str) or len(diagnosis) > 1_000
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        usage = raw.get("usage")
+        if (
+            not isinstance(usage, dict)
+            or any(key not in {"inputTokens", "cachedInputTokens", "outputTokens", "reasoningTokens"} for key in usage)
+            or any(not isinstance(value, int) or isinstance(value, bool) or value < 0 for value in usage.values())
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        excerpts = raw.get("excerpts")
+        if (
+            not isinstance(excerpts, list) or len(excerpts) > 5
+            or any(not isinstance(item, str) or len(item) > 500 for item in excerpts)
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        evidence_strings = [item for item in excerpts]
+        if diagnosis is not None:
+            evidence_strings.append(diagnosis)
+        forbidden_markers = ("authorization:", "bearer ", "api_key", "api-key", "callback secret")
+        if any(
+            item == prompt or any(marker in item.lower() for marker in forbidden_markers)
+            for item in evidence_strings
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        return {
+            **identity,
+            "assertions": assertions,
+            "outcome": raw["outcome"],
+            "failureDiagnosis": diagnosis,
+            "usage": usage,
+            "excerpts": excerpts,
+        }
 
     def create_child(
         self,
@@ -99,6 +227,7 @@ class MessagingService:
         model: str | None = None,
         reasoning_effort: str | None = None,
         replacement: dict[str, Any] | None = None,
+        runtime_grants: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         parent = verify_capability(
             parent_capability,
@@ -130,12 +259,14 @@ class MessagingService:
         requested_capabilities = capabilities or []
         if (
             not isinstance(requested_capabilities, list)
-            or len(requested_capabilities) > 1
-            or any(value != "runtime_environment" for value in requested_capabilities)
+            or len(requested_capabilities) > 2
+            or any(not isinstance(value, str) for value in requested_capabilities)
+            or len(set(requested_capabilities)) != len(requested_capabilities)
+            or any(value not in {"runtime_environment", "model_pressure"} for value in requested_capabilities)
         ):
             raise CapabilityError("unsupported Child capability")
         if requested_capabilities and role not in {"writer", "qa", "repair"}:
-            raise CapabilityError("runtime environment is limited to writer, QA, or repair Children")
+            raise CapabilityError("runtime capabilities are limited to writer, QA, or repair Children")
         child_id = deterministic_child_id(parent.child_id, task_key)
         now = self._clock()
         token = capability_token(
@@ -147,6 +278,17 @@ class MessagingService:
             allowed_actions={"send_message", "cancel_mission", "resume_mission"},
             issued_at=now,
             expires_at=now + timedelta(hours=24),
+        )
+        runtime_grants_payload, environment_grant = self._runtime_grants(
+            parent=parent,
+            child_id=child_id,
+            task_key=task_key,
+            role=role,
+            mission=mission_payload,
+            capabilities=frozenset(requested_capabilities),
+            bindings=runtime_grants,
+            now=now,
+            child_expires_at=now + timedelta(hours=24),
         )
         bound_mission = {
             **mission_payload,
@@ -164,6 +306,7 @@ class MessagingService:
                 ),
             },
             "capabilities": requested_capabilities,
+            **({"runtimeGrants": runtime_grants_payload} if runtime_grants_payload else {}),
         }
         result = self._provider.create_child(
             parent.child_id,
@@ -175,8 +318,87 @@ class MessagingService:
             frozenset(requested_capabilities),
             model,
             reasoning_effort,
+            environment_grant,
         )
         return {**result, "childId": str(child_id), "capabilityRef": token}
+
+    def _runtime_grants(
+        self,
+        *,
+        parent,
+        child_id: uuid.UUID,
+        task_key: str,
+        role: str,
+        mission: dict[str, Any],
+        capabilities: frozenset[str],
+        bindings: object,
+        now: datetime,
+        child_expires_at: datetime,
+    ) -> tuple[dict[str, Any], str | None]:
+        if bindings is None:
+            bindings = {}
+        if not isinstance(bindings, dict) or any(
+            key not in {"environment", "modelPressure"} for key in bindings
+        ):
+            raise CapabilityError("runtimeGrants is incomplete or widened")
+        if "environment" in bindings and "runtime_environment" not in capabilities:
+            raise CapabilityError("Environment binding requires runtime_environment")
+        if "modelPressure" in bindings and "model_pressure" not in capabilities:
+            raise CapabilityError("model-pressure binding requires model_pressure")
+        if "runtime_environment" in capabilities and role == "qa" and "environment" not in bindings:
+            raise CapabilityError("QA runtime_environment requires an immutable Environment grant")
+        if "model_pressure" in capabilities and "modelPressure" not in bindings:
+            raise CapabilityError("model_pressure requires an immutable model-pressure grant")
+        if "model_pressure" in capabilities and role == "writer" and "evex-skill-authoring" not in mission["skills"]:
+            raise CapabilityError("model_pressure Writer must be an explicit skill-authoring Mission")
+        if "model_pressure" in capabilities and role == "repair":
+            raise CapabilityError("model_pressure is limited to skill-authoring Writer or QA")
+
+        output: dict[str, Any] = {}
+        environment_token = None
+        if "environment" in bindings:
+            claims = environment_grant_claims(
+                bindings["environment"], principal_id=child_id, now=now
+            )
+            if datetime.fromisoformat(claims["expiresAt"][:-1] + "+00:00") > child_expires_at:
+                raise CapabilityError("Environment grant expiry is outside Child authority")
+            if not isinstance(self._runtime_grant_secret, bytes):
+                raise CapabilityError("Runtime MCP grant secret is unavailable")
+            environment_token = mint_environment_grant(self._runtime_grant_secret, claims)
+            output["environment"] = claims
+        if "modelPressure" in bindings:
+            binding = self._model_pressure_binding(bindings["modelPressure"], now, child_expires_at)
+            generation_input = {
+                "owningMainId": str(parent.child_id), "childId": str(child_id),
+                "taskKey": task_key, "role": role, **binding,
+            }
+            generation = "evxm1_" + hashlib.sha256(_compact(generation_input).encode()).hexdigest()
+            output["modelPressure"] = {**binding, "modelPressureGeneration": generation}
+        return output, environment_token
+
+    @staticmethod
+    def _model_pressure_binding(value: object, now: datetime, child_expires_at: datetime) -> dict[str, Any]:
+        required = {"skillCandidate", "scenarioId", "model", "mode", "expiresAt"}
+        if not isinstance(value, dict) or set(value) != required:
+            raise CapabilityError("model-pressure grant binding is incomplete or widened")
+        candidate = value.get("skillCandidate")
+        if not isinstance(candidate, str) or re.fullmatch(r"[0-9a-f]{40}", candidate) is None:
+            raise CapabilityError("model-pressure skill Candidate is invalid")
+        scenario = value.get("scenarioId")
+        if not isinstance(scenario, str) or not scenario.strip() or len(scenario) > 200:
+            raise CapabilityError("model-pressure scenario is invalid")
+        if value.get("model") not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or value.get("mode") not in {"red", "green", "forward"}:
+            raise CapabilityError("model-pressure model or mode is invalid")
+        expires = value.get("expiresAt")
+        if not isinstance(expires, str) or not expires.endswith("Z"):
+            raise CapabilityError("model-pressure expiry must be UTC")
+        try:
+            expiry = datetime.fromisoformat(expires[:-1] + "+00:00")
+        except ValueError as exc:
+            raise CapabilityError("model-pressure expiry must be UTC") from exc
+        if expiry <= now.astimezone(timezone.utc) or expiry > child_expires_at:
+            raise CapabilityError("model-pressure grant expiry is outside Child authority")
+        return json.loads(_compact(value))
 
     @staticmethod
     def _validated_mission(mission: object) -> dict[str, Any]:
@@ -189,7 +411,7 @@ class MessagingService:
             "skills",
             "evidence",
         }
-        reserved = {"owningMainId", "childId", "taskKey", "role", "callback", "capabilities"}
+        reserved = {"owningMainId", "childId", "taskKey", "role", "callback", "capabilities", "runtimeGrants"}
         if not isinstance(mission, dict):
             raise CapabilityError("mission must be an object")
         missing = sorted(required.difference(mission))

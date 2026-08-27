@@ -17,7 +17,12 @@ TOOLS = [
     {
         "name": "create_child",
         "description": "Create or recover one deterministic Child Conversation using the transport-bound Main capability. Use only for a bounded mission; never use it to create peer or nested delivery owners.",
-        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "replacement": {"type": "object", "additionalProperties": False, "required": ["cancelledChildId", "cancelledTaskKey", "cancellationKey", "postTerminalProjection", "preAdmissionProjection"], "properties": {"cancelledChildId": {"type": "string", "format": "uuid"}, "cancelledTaskKey": {"type": "string"}, "cancellationKey": {"type": "string"}, "postTerminalProjection": {"type": "object"}, "preAdmissionProjection": {"type": "object"}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment"]}, "maxItems": 1, "uniqueItems": True}}},
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["taskKey", "role", "model", "reasoningEffort", "mission"], "properties": {"taskKey": {"type": "string"}, "role": {"type": "string", "enum": ["spec", "plan-author", "writer", "reviewer", "qa", "repair"]}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "reasoningEffort": {"type": "string", "enum": ["medium", "high"]}, "mission": {"type": "object", "additionalProperties": True, "required": ["immediateTask", "links", "checkout", "allowedMutations", "prohibitions", "skills", "evidence"], "properties": {"immediateTask": {"type": "string", "pattern": "^Your task now:"}, "displayTitle": {"type": "string", "minLength": 3, "maxLength": 60}, "links": {"type": "object"}, "checkout": {"type": "object", "additionalProperties": False, "required": ["repository", "branch", "headSha"], "properties": {"repository": {"type": "string"}, "branch": {"type": "string"}, "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}}, "allowedMutations": {"type": "array", "items": {"type": "string"}}, "prohibitions": {"type": "array", "items": {"type": "string"}}, "skills": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "evidence": {"type": "array", "items": {"type": "string"}}}}, "replacement": {"type": "object", "additionalProperties": False, "required": ["cancelledChildId", "cancelledTaskKey", "cancellationKey", "postTerminalProjection", "preAdmissionProjection"], "properties": {"cancelledChildId": {"type": "string", "format": "uuid"}, "cancelledTaskKey": {"type": "string"}, "cancellationKey": {"type": "string"}, "postTerminalProjection": {"type": "object"}, "preAdmissionProjection": {"type": "object"}}}, "capabilities": {"type": "array", "items": {"type": "string", "enum": ["runtime_environment", "model_pressure"]}, "maxItems": 2, "uniqueItems": True}, "runtimeGrants": {"type": "object", "additionalProperties": False, "properties": {"environment": {"type": "object"}, "modelPressure": {"type": "object"}}}}},
+    },
+    {
+        "name": "run_model_pressure",
+        "description": "Run one exact Mission-bound RED, GREEN, or independent forward eval through the provider-held model credential and return only sanitized evidence.",
+        "inputSchema": {"type": "object", "additionalProperties": False, "required": ["scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode", "prompt", "assertions"], "properties": {"scenarioId": {"type": "string"}, "skillCandidate": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "modelPressureGeneration": {"type": "string", "pattern": "^evxm1_[0-9a-f]{64}$"}, "model": {"type": "string", "enum": ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]}, "mode": {"type": "string", "enum": ["red", "green", "forward"]}, "prompt": {"type": "string"}, "assertions": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 64}}},
     },
     {
         "name": "send_to_parent",
@@ -76,8 +81,10 @@ class McpServer:
             if not isinstance(capability_ref, str) or not capability_ref.startswith("evx1_"):
                 raise ValueError("transport capability is required")
             if name == "create_child":
-                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"], replacement=args.get("replacement"))
+                value = self._service.create_child(capability_ref, args["taskKey"], args["role"], args["mission"], args.get("capabilities"), model=args["model"], reasoning_effort=args["reasoningEffort"], replacement=args.get("replacement"), runtime_grants=args.get("runtimeGrants"))
                 value = {key: item for key, item in value.items() if key != "capabilityRef"}
+            elif name == "run_model_pressure":
+                value = self._service.run_model_pressure(capability_ref, args)
             elif name == "send_to_parent":
                 value = self._service.send_to_parent(capability_ref, args["result"])
             elif name == "request_user_decision":
@@ -218,6 +225,10 @@ def main() -> int:
         raise SystemExit("EVEX_WRITE_MISSION_ADMISSION_PAUSED must be true or false")
     write_mission_admission_paused = pause_value == "true"
     secret = secret_value.encode()
+    runtime_grant_secret_value = os.environ.get("RUNTIME_MCP_GRANT_SECRET", "")
+    runtime_grant_secret = (
+        runtime_grant_secret_value.encode() if runtime_grant_secret_value else None
+    )
     server = McpServer(
         MessagingService(
             OpenHandsProvider(
@@ -225,9 +236,12 @@ def main() -> int:
                 api_key,
                 public_url,
                 write_mission_admission_paused=write_mission_admission_paused,
+                model_pressure_url=os.environ.get("EVEX_MODEL_PRESSURE_PROVIDER_URL"),
+                model_pressure_api_key=os.environ.get("EVEX_MODEL_PRESSURE_PROVIDER_API_KEY"),
             ),
             secret,
             write_mission_admission_paused=write_mission_admission_paused,
+            runtime_grant_secret=runtime_grant_secret,
         )
     )
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":

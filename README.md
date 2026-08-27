@@ -13,9 +13,19 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   Conversation API call occurs when checkout authority is missing or mismatched. The provider switches
   and verifies the requested model before Mission delivery. Read-only Review/QA require no mutations;
   Spec/Writer/Repair require exact mutations; Plan Author/Review/QA are read-only. Source roles receive only Messaging; only
-  explicit integrated Writer/QA/Repair Missions may request `capabilities: ["runtime_environment"]`; the provider
-  binds that exact capability into the Child launch so the pod wrapper materializes Runtime MCP only
-  for that Child.
+  explicit integrated Writer/QA/Repair Missions may request `runtime_environment`; existing narrower
+  Writer/Repair exceptions remain compatible. A QA Environment grant additionally binds the exact
+  Environment/generation, Candidate/configuration digests, scenarios, namespace, literal `toolbox`
+  Pod, reviewed manifest digest, and expiry. Messaging injects only its opaque
+  `EVEX_RUNTIME_ENVIRONMENT_GRANT`; the Runtime MCP revalidates the signed claims before every
+  invocation. Skill-authoring Writer and QA Missions may separately request `model_pressure`; the
+  independently derived `modelPressureGeneration` never reuses Environment identity.
+- `run_model_pressure`: re-read the signed Mission and live Child identity, revalidate exact skill
+  Candidate, scenario, model/mode, expiry, and `modelPressureGeneration`, then invoke the isolated
+  provider-held model credential. The result is a strict allowlisted report containing only binding
+  identity, assertion outcomes, outcome, bounded failure diagnosis, necessary token usage, and bounded
+  evaluation-essential excerpts. Full prompts/completions, raw provider requests/logs, credentials,
+  callback secrets, and transcript archives are never returned.
 - `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives
   identity, kind, and replay key. Each Child Mission and authorized `RESUME_MISSION` event carries a
   provider-derived opaque `callbackGeneration`; `send_to_parent.result.callbackGeneration` must echo
@@ -97,6 +107,11 @@ export EVEX_MESSAGING_SECRET='long-random-secret'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_API_KEY='server-only-key'
 export OPENHANDS_PUBLIC_URL='http://openhands.example/canvas'
+# Required only when Environment grants are admitted; shared server-side with Runtime MCP.
+export RUNTIME_MCP_GRANT_SECRET='at-least-32-random-bytes-server-only'
+# Required only for model-pressure execution; never exposed to the Child.
+export EVEX_MODEL_PRESSURE_PROVIDER_URL='http://model-pressure-provider/evaluate'
+export EVEX_MODEL_PRESSURE_PROVIDER_API_KEY='server-only-model-key'
 # Required only for Reviewer Missions that bind links.specificationPr.
 export GITHUB_TOKEN='server-only-platform-token'
 export EVEX_MESSAGING_TRANSPORT=http

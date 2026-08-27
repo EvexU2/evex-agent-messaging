@@ -30,6 +30,10 @@ class FakeService:
         self.calls.append(("create_child", args, kwargs))
         return {"childId": "11111111-1111-4111-8111-111111111111", "capabilityRef": "evx1_opaque"}
 
+    def run_model_pressure(self, *args):
+        self.calls.append(("run_model_pressure", args))
+        return {"scenarioId": "governed", "outcome": "PASS"}
+
     def send_message(self, *args):
         return {"accepted": True}
 
@@ -91,7 +95,7 @@ class McpServerTest(unittest.TestCase):
         initialized = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize"})
         self.assertEqual(initialized["result"]["serverInfo"]["name"], "evex-agent-messaging")
         listed = self.server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
+        self.assertEqual({tool["name"] for tool in listed["result"]["tools"]}, {"create_child", "run_model_pressure", "send_to_parent", "request_user_decision", "cancel_mission", "resume_mission", "publish_navigation_links", "get_usage"})
         create = next(tool for tool in listed["result"]["tools"] if tool["name"] == "create_child")
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["required"])
         self.assertNotIn("parentCapabilityRef", create["inputSchema"]["properties"])
@@ -99,7 +103,15 @@ class McpServerTest(unittest.TestCase):
         self.assertNotIn("terminal_wake", {tool["name"] for tool in listed["result"]["tools"]})
         self.assertEqual(
             create["inputSchema"]["properties"]["capabilities"]["items"]["enum"],
-            ["runtime_environment"],
+            ["runtime_environment", "model_pressure"],
+        )
+        self.assertIn("runtimeGrants", create["inputSchema"]["properties"])
+        model_pressure = next(
+            tool for tool in listed["result"]["tools"] if tool["name"] == "run_model_pressure"
+        )
+        self.assertEqual(
+            model_pressure["inputSchema"]["properties"]["mode"]["enum"],
+            ["red", "green", "forward"],
         )
         self.assertEqual(create["inputSchema"]["properties"]["mission"]["type"], "object")
         self.assertIn("checkout", create["inputSchema"]["properties"]["mission"]["required"])
@@ -189,6 +201,27 @@ class McpServerTest(unittest.TestCase):
         })
         self.assertEqual(result["error"]["code"], -32602)
         self.assertIn("transport capability", result["error"]["message"])
+
+    def test_model_pressure_uses_only_transport_capability_and_returns_sanitized_result(self):
+        arguments = {
+            "scenarioId": "governed",
+            "skillCandidate": "a" * 40,
+            "modelPressureGeneration": "evxm1_" + "b" * 64,
+            "model": "gpt-5.6-sol",
+            "mode": "forward",
+            "prompt": "bounded eval",
+            "assertions": ["passes"],
+        }
+        result = self.server.handle({
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {"name": "run_model_pressure", "arguments": arguments},
+        }, capability_ref="evx1_child")
+
+        self.assertEqual(result["result"]["structuredContent"]["outcome"], "PASS")
+        self.assertEqual(self.service.calls[-1], (
+            "run_model_pressure", ("evx1_child", arguments)
+        ))
+        self.assertNotIn("grantRef", arguments)
 
     def test_unknown_tool_is_a_client_error(self):
         result = self.server.handle({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "raw_openhands_api", "arguments": {}}})

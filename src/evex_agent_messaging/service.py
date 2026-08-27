@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 import re
 from typing import Any, Protocol
 import uuid
@@ -11,7 +10,7 @@ from .capability import (
     CapabilityError,
     capability_token,
     deterministic_spec_chat_id,
-    verify_capability,
+    inspect_capability,
 )
 
 
@@ -49,12 +48,11 @@ class MessagingProvider(Protocol):
 
 
 class MessagingService:
-    def __init__(self, provider: MessagingProvider, secret: bytes, *, clock=None) -> None:
+    def __init__(self, provider: MessagingProvider, secret: bytes) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
         self._provider = provider
         self._secret = secret
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def readiness(self) -> bool:
         try:
@@ -67,7 +65,7 @@ class MessagingService:
         token: str,
         checkout: object,
     ) -> dict[str, Any]:
-        capability = verify_capability(token, self._secret, now=self._clock())
+        capability = inspect_capability(token, self._secret)
         if (
             capability.role != "main"
             or capability.sender_id != capability.owning_main_id
@@ -75,15 +73,12 @@ class MessagingService:
             raise CapabilityError("only a Parent Main may create the Spec Chat")
         bound_checkout = self._validated_checkout(checkout)
         spec_chat_id = deterministic_spec_chat_id(capability.sender_id)
-        now = self._clock()
         spec_capability = capability_token(
             self._secret,
             owning_main_id=capability.sender_id,
             sender_id=spec_chat_id,
             task_key="spec",
             role="spec",
-            issued_at=now,
-            expires_at=now + timedelta(hours=24),
         )
         result = self._provider.create_spec_chat(
             capability.sender_id,
@@ -129,7 +124,7 @@ class MessagingService:
         message_key: str,
         text: str,
     ) -> dict[str, Any]:
-        capability = verify_capability(token, self._secret, now=self._clock())
+        capability = inspect_capability(token, self._secret)
         if target_id == capability.sender_id:
             raise CapabilityError("message target is not allowed")
         if not isinstance(message_key, str) or not 1 <= len(message_key.encode()) <= 200:

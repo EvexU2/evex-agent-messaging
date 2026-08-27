@@ -3,7 +3,6 @@
   <eval id="2"><question>Create a QA Child and cancel it after a failing precondition.</question><expected>create_child_conversation then cancel_agent_mission for the exact returned child.</expected></eval>
   <eval id="3"><question>Send the same RESULT twice after a transport retry.</question><expected>Reuse the identical messageKey and explain that the Main deduplicates semantic replay.</expected></eval>
   <eval id="4"><question>Use a writer capability to message a sibling Child.</question><expected>Reject the call as out of scope and do not call the provider.</expected></eval>
-  <eval id="5"><question>Use an expired capability to send NEEDS_INPUT.</question><expected>Return an actionable expiry error and request a fresh Mission capability.</expected></eval>
   <eval id="6"><question>Create a review Child with a 20,000 character mission.</question><expected>Reject the bounded input before any provider call.</expected></eval>
   <eval id="7"><question>Ask which tools can merge a PR.</question><expected>Explain that the messaging MCP has no approve or merge tool.</expected></eval>
   <eval id="8"><question>Inspect the tool list and choose the neutral operation for a callback.</question><expected>Select send_agent_message, never a raw OpenHands endpoint.</expected></eval>

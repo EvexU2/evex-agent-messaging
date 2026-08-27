@@ -195,6 +195,14 @@ class OpenHandsProvider:
             self._validate_existing_checkout(
                 self._checkout_path(spec_chat_id), checkout, exact=False
             )
+            self._request(
+                "POST",
+                f"/api/conversations/{spec_chat_id}/secrets",
+                {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                    "kind": "StaticSecret",
+                    "value": capability_ref,
+                }}},
+            )
         if created or not self._has_initial_prompt(spec_chat_id, prompt):
             self._request(
                 "POST",

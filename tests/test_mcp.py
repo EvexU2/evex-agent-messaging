@@ -53,9 +53,9 @@ class McpServerTest(unittest.TestCase):
             "id": 1,
             "method": "tools/call",
             "params": {"name": "create_spec_chat", "arguments": {"checkout": checkout}},
-        }, capability_ref="evx1_capability")
+        }, capability_ref="evx2_capability")
         self.assertEqual(response["result"]["structuredContent"]["specChatId"], "spec-id")
-        self.assertEqual(self.service.calls, [("evx1_capability", checkout)])
+        self.assertEqual(self.service.calls, [("evx2_capability", checkout)])
 
     def test_send_message_uses_transport_bound_capability(self):
         target = uuid.uuid4()
@@ -64,14 +64,14 @@ class McpServerTest(unittest.TestCase):
             "id": 2,
             "method": "tools/call",
             "params": {"name": "send_message", "arguments": {"targetId": str(target), "messageKey": "key", "text": "hello"}},
-        }, capability_ref="evx1_capability")
+        }, capability_ref="evx2_capability")
         self.assertEqual(response["result"]["structuredContent"], {"accepted": True, "messageKey": "key"})
-        self.assertEqual(self.service.calls, [("evx1_capability", target, "key", "hello")])
+        self.assertEqual(self.service.calls, [("evx2_capability", target, "key", "hello")])
 
     def test_missing_capability_and_unknown_tool_fail_closed(self):
         target = str(uuid.uuid4())
         missing = self.server.handle({"id": 1, "method": "tools/call", "params": {"name": "send_message", "arguments": {"targetId": target, "messageKey": "key", "text": "x"}}})
-        unknown = self.server.handle({"id": 2, "method": "tools/call", "params": {"name": "create_child", "arguments": {}}}, capability_ref="evx1_capability")
+        unknown = self.server.handle({"id": 2, "method": "tools/call", "params": {"name": "create_child", "arguments": {}}}, capability_ref="evx2_capability")
         self.assertEqual(missing["error"]["code"], -32602)
         self.assertEqual(unknown["error"]["code"], -32602)
         self.assertEqual(self.service.calls, [])
@@ -81,8 +81,8 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(response["result"]["serverInfo"]["version"], "0.3.0")
 
     def test_bearer_capability_is_strict(self):
-        self.assertEqual(bearer_capability("Bearer evx1_test"), "evx1_test")
-        for value in (None, "evx1_test", "Bearer secret", "Bearer evx1_test extra"):
+        self.assertEqual(bearer_capability("Bearer evx2_test"), "evx2_test")
+        for value in (None, "evx2_test", "Bearer secret", "Bearer evx2_test extra"):
             self.assertIsNone(bearer_capability(value))
 
 

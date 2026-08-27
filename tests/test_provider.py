@@ -173,6 +173,140 @@ class OpenHandsProviderTest(unittest.TestCase):
             }}},
         ), transport.calls)
 
+    def test_create_spec_chat_reconciles_an_ambiguous_create_response(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        created = discussion(
+            self.spec,
+            "spec",
+            evexrole="role-child",
+            evextask="issue-40-spec",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexparent=str(self.parent),
+            evexrepository="EvexU2/evex-u-workspace",
+            evexbranch="spec/issue-40",
+            evexbasehead="a" * 40,
+            evexmodel="gpt-5.6-sol",
+            evexreasoning="high",
+        )
+        created["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
+        created["current_model_id"] = "gpt-5.6-sol"
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": "acp"},
+            ProviderError("connection closed"),
+            created,
+            {},
+            {},
+            created,
+            {},
+        ])
+        provider.workspace_root = "/tmp"
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-40",
+            "headSha": "a" * 40,
+        }
+
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+            ),
+            patch.object(provider, "_ensure_checkout"),
+        ):
+            result = provider.create_spec_chat(
+                self.parent,
+                self.spec,
+                checkout,
+                "evx2_spec",
+            )
+
+        self.assertTrue(result["created"])
+        self.assertIn(("GET", f"/api/conversations/{self.spec}", None), transport.calls)
+
+    def test_create_spec_chat_reconciles_an_ambiguous_initial_prompt(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        existing = discussion(
+            self.spec,
+            "spec",
+            evexrole="role-child",
+            evextask="issue-40-spec",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexparent=str(self.parent),
+            evexrepository="EvexU2/evex-u-workspace",
+            evexbranch="spec/issue-40",
+            evexbasehead="a" * 40,
+            evexmodel="gpt-5.6-sol",
+            evexreasoning="high",
+        )
+        existing["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
+        existing["current_model_id"] = "gpt-5.6-sol"
+        expected_prompt = (
+            "EVEX_SPEC_CHAT\n"
+            "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
+            f"Parent Main: {self.parent}\n"
+            "Your task now: run the interactive Spec Chat for this Issue using the admitted "
+            "EVEX Spec skills. Start by reading the current Issue and living Specification."
+        )
+        prompt_event = {
+            "kind": "MessageEvent",
+            "source": "user",
+            "llm_message": {"content": [{"type": "text", "text": expected_prompt}]},
+        }
+        provider, _ = self.provider([
+            parent,
+            existing,
+            {},
+            existing,
+            {},
+            {"items": []},
+            ProviderError("connection closed"),
+            {"items": [prompt_event]},
+        ])
+        provider.workspace_root = "/tmp"
+        checkout = {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-40",
+            "headSha": "a" * 40,
+        }
+
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+            ),
+            patch.object(provider, "_validate_existing_checkout"),
+        ):
+            result = provider.create_spec_chat(
+                self.parent,
+                self.spec,
+                checkout,
+                "evx2_spec",
+            )
+
+        self.assertFalse(result["created"])
+
     def test_spec_chat_checkout_is_derived_from_exact_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -16,16 +16,26 @@ Agents call this MCP; they do not call OpenHands' Conversation API directly.
   explicit integrated Writer/QA/Repair Missions may request `runtime_environment`; existing narrower
   Writer/Repair exceptions remain compatible. A QA Environment grant additionally binds the exact
   Environment/generation, Candidate/configuration digests, scenarios, namespace, literal `toolbox`
-  Pod, reviewed manifest digest, and expiry. Messaging injects only its opaque
+  Pod, reviewed manifest digest, and expiry. Its `principalId` is `sha256:` plus the lowercase
+  SHA-256 hex digest of UTF-8 canonical JSON (recursive key sort and no whitespace) for exactly
+  `schemaVersion`, `owningMainId`, `childId`, `taskKey`, and `role`; UUIDs are lowercase canonical
+  strings. Scenarios are lowercase, sorted, unique identifiers matching
+  `[a-z0-9][a-z0-9._-]*`. The frozen cross-runtime vector is
+  `tests/fixtures/environment-grant-v1.json`. Messaging injects only its opaque
   `EVEX_RUNTIME_ENVIRONMENT_GRANT`; the Runtime MCP revalidates the signed claims before every
   invocation. Skill-authoring Writer and QA Missions may separately request `model_pressure`; the
   independently derived `modelPressureGeneration` never reuses Environment identity.
 - `run_model_pressure`: re-read the signed Mission and live Child identity, revalidate exact skill
   Candidate, scenario, model/mode, expiry, and `modelPressureGeneration`, then invoke the isolated
-  provider-held model credential. The result is a strict allowlisted report containing only binding
-  identity, assertion outcomes, outcome, bounded failure diagnosis, necessary token usage, and bounded
-  evaluation-essential excerpts. Full prompts/completions, raw provider requests/logs, credentials,
-  callback secrets, and transcript archives are never returned.
+  provider-held model credential. Writer grants admit only `red|green`; QA grants admit only `forward`.
+  The capability and live signed binding are checked again after completion and before any report is
+  returned. The provider endpoint must be public HTTPS on effective port 443; userinfo, query,
+  fragment, redirects, non-public/reserved addresses, and local/service DNS suffixes fail before an
+  Authorization header is constructed. The result is a strict typed report containing only binding
+  identity, boolean assertion outcomes, outcome, allowlisted diagnosis codes, bounded token counts,
+  and assertion-keyed evaluator-status enums with no free-form provider text. Prompt-containing
+  evidence, full prompts/completions, raw provider requests/logs, credentials, callback secrets, and
+  transcript archives are never returned.
 - `send_to_parent`: deliver a structured `RESULT` to the capability's owning Main; transport derives
   identity, kind, and replay key. Each Child Mission and authorized `RESUME_MISSION` event carries a
   provider-derived opaque `callbackGeneration`; `send_to_parent.result.callbackGeneration` must echo
@@ -110,7 +120,7 @@ export OPENHANDS_PUBLIC_URL='http://openhands.example/canvas'
 # Required only when Environment grants are admitted; shared server-side with Runtime MCP.
 export RUNTIME_MCP_GRANT_SECRET='at-least-32-random-bytes-server-only'
 # Required only for model-pressure execution; never exposed to the Child.
-export EVEX_MODEL_PRESSURE_PROVIDER_URL='http://model-pressure-provider/evaluate'
+export EVEX_MODEL_PRESSURE_PROVIDER_URL='https://example.com/model-pressure/evaluate'
 export EVEX_MODEL_PRESSURE_PROVIDER_API_KEY='server-only-model-key'
 # Required only for Reviewer Missions that bind links.specificationPr.
 export GITHUB_TOKEN='server-only-platform-token'

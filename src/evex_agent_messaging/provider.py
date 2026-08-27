@@ -6,11 +6,13 @@ from dataclasses import dataclass, field
 import hashlib
 import hmac
 import http.client
+import ipaddress
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import socket
 import threading
 import time
 import urllib.error
@@ -25,6 +27,13 @@ class ProviderError(RuntimeError):
     def __init__(self, message: str, *, status: int | None = None) -> None:
         super().__init__(message)
         self.status = status
+
+
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never forward a provider credential to a redirected destination."""
+
+    def redirect_request(self, request, file_pointer, code, message, headers, new_url):
+        return None
 
 
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
@@ -97,6 +106,68 @@ _ROLE_TITLES = {
 
 def _compact_json(value: dict) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _public_model_pressure_url(value: object) -> str:
+    """Validate the credentialed provider endpoint before constructing a request."""
+    if not isinstance(value, str) or not value.strip():
+        raise ProviderError("model-pressure provider is unavailable")
+    try:
+        parsed = urllib.parse.urlparse(value.strip())
+        port = parsed.port
+    except ValueError as exc:
+        raise ProviderError("model-pressure provider URL is invalid") from exc
+    host = parsed.hostname
+    if (
+        parsed.scheme != "https"
+        or port not in {None, 443}
+        or not isinstance(host, str)
+        or not host
+        or parsed.username is not None
+        or parsed.password is not None
+        or bool(parsed.query)
+        or bool(parsed.fragment)
+    ):
+        raise ProviderError("model-pressure provider URL is invalid")
+    normalized_host = host.lower()
+    if (
+        normalized_host != host
+        or normalized_host == "localhost"
+        or normalized_host.endswith((".localhost", ".svc", ".cluster.local"))
+    ):
+        raise ProviderError("model-pressure provider URL is not public")
+    try:
+        literal = ipaddress.ip_address(normalized_host)
+        addresses = [literal]
+    except ValueError:
+        if (
+            len(normalized_host) > 253
+            or any(
+                not label or len(label) > 63
+                or re.fullmatch(r"[a-z0-9](?:[-a-z0-9]*[a-z0-9])?", label) is None
+                for label in normalized_host.split(".")
+            )
+        ):
+            raise ProviderError("model-pressure provider URL is invalid")
+        try:
+            resolved = socket.getaddrinfo(
+                normalized_host, 443, type=socket.SOCK_STREAM
+            )
+            addresses = list({ipaddress.ip_address(item[4][0]) for item in resolved})
+        except (OSError, ValueError) as exc:
+            raise ProviderError("model-pressure provider is unavailable") from exc
+    if not addresses or any(
+        not address.is_global
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_private
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+        for address in addresses
+    ):
+        raise ProviderError("model-pressure provider URL is not public")
+    return urllib.parse.urlunparse(parsed)
 
 
 @dataclass
@@ -277,15 +348,12 @@ class OpenHandsProvider:
 
     def run_model_pressure(self, request_body: dict) -> dict:
         """Call the isolated model provider without exposing its credential."""
-        url = self.model_pressure_url
+        validated_url = _public_model_pressure_url(self.model_pressure_url)
         api_key = self.model_pressure_api_key
-        if not isinstance(url, str) or not url.strip() or not isinstance(api_key, str) or not api_key.strip():
-            raise ProviderError("model-pressure provider is unavailable")
-        parsed_url = urllib.parse.urlparse(url.strip())
-        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        if not isinstance(api_key, str) or not api_key.strip():
             raise ProviderError("model-pressure provider is unavailable")
         request = urllib.request.Request(
-            url.strip(),
+            validated_url,
             data=_compact_json(request_body).encode(),
             method="POST",
             headers={
@@ -293,8 +361,9 @@ class OpenHandsProvider:
                 "Authorization": f"Bearer {api_key.strip()}",
             },
         )
+        opener = urllib.request.build_opener(_NoRedirectHandler())
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            with opener.open(request, timeout=self.timeout) as response:
                 declared_size = response.headers.get("Content-Length")
                 if isinstance(declared_size, str) and (
                     not declared_size.isdecimal()

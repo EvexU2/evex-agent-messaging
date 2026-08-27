@@ -4,6 +4,7 @@ from unittest.mock import ANY, MagicMock, Mock, patch
 import http.client
 from pathlib import Path
 import json
+import socket
 import subprocess
 import tempfile
 import threading
@@ -528,21 +529,109 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_model_pressure_provider_uses_server_credential_and_bounded_json(self) -> None:
         provider = OpenHandsProvider(
             "http://openhands", "key", "http://public",
-            model_pressure_url="http://model-provider/evaluate",
+            model_pressure_url="https://model.example.com/evaluate",
             model_pressure_api_key="server-only-model-key",
         )
         response = MagicMock()
         response.read.return_value = b'{"assertions":[],"outcome":"PASS","failureDiagnosis":null,"usage":{},"excerpts":[]}'
         response.__enter__.return_value = response
         response.__exit__.return_value = False
-        with patch("urllib.request.urlopen", return_value=response) as opened:
+        opener = MagicMock()
+        opener.open.return_value = response
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        ), patch("urllib.request.build_opener", return_value=opener):
             result = provider.run_model_pressure({"prompt": "bounded"})
 
-        request = opened.call_args.args[0]
-        self.assertEqual(request.full_url, "http://model-provider/evaluate")
+        request = opener.open.call_args.args[0]
+        self.assertEqual(request.full_url, "https://model.example.com/evaluate")
         self.assertEqual(request.get_header("Authorization"), "Bearer server-only-model-key")
         self.assertNotIn(b"server-only-model-key", request.data)
         self.assertEqual(result["outcome"], "PASS")
+
+    def test_model_pressure_provider_never_follows_credentialed_redirects(self) -> None:
+        provider = OpenHandsProvider(
+            "http://openhands", "key", "http://public",
+            model_pressure_url="https://model.example.com/evaluate",
+            model_pressure_api_key="must-not-cross-origin",
+        )
+        opener = MagicMock()
+        opener.open.side_effect = urllib.error.HTTPError(
+            "https://model.example.com/evaluate", 302, "redirect denied",
+            {"Location": "https://other.example.net/capture"}, None,
+        )
+        with patch(
+            "socket.getaddrinfo",
+            return_value=[(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))],
+        ), patch("urllib.request.build_opener", return_value=opener) as build_opener:
+            with self.assertRaisesRegex(ProviderError, "request failed"):
+                provider.run_model_pressure({"prompt": "bounded"})
+
+        self.assertEqual(opener.open.call_count, 1)
+        handler = build_opener.call_args.args[0]
+        self.assertEqual(handler.__class__.__name__, "_NoRedirectHandler")
+        self.assertIsNone(handler.redirect_request(None, None, 302, "", {}, "https://other.example"))
+        self.assertEqual(
+            opener.open.call_args.args[0].get_header("Authorization"),
+            "Bearer must-not-cross-origin",
+        )
+
+    def test_model_pressure_provider_rejects_nonpublic_url_before_credentialed_call(self) -> None:
+        invalid_urls = (
+            "http://93.184.216.34/evaluate",
+            "https://93.184.216.34:444/evaluate",
+            "https://user:password@93.184.216.34/evaluate",
+            "https://93.184.216.34/evaluate?trace=raw",
+            "https://93.184.216.34/evaluate#fragment",
+            "https://model.localhost/evaluate",
+            "https://runtime-mcp.svc/evaluate",
+            "https://runtime-mcp.evex.svc.cluster.local/evaluate",
+            "https://127.0.0.1/evaluate",
+            "https://10.0.0.1/evaluate",
+            "https://169.254.1.1/evaluate",
+            "https://100.64.0.1/evaluate",
+            "https://192.0.2.1/evaluate",
+            "https://224.0.0.1/evaluate",
+            "https://240.0.0.1/evaluate",
+            "https://0.0.0.0/evaluate",
+            "https://[::1]/evaluate",
+            "https://[fe80::1]/evaluate",
+            "https://[fc00::1]/evaluate",
+            "https://[2001:db8::1]/evaluate",
+            "https://[ff00::1]/evaluate",
+            "https://[::]/evaluate",
+        )
+        for url in invalid_urls:
+            with self.subTest(url=url), patch("urllib.request.build_opener") as opener:
+                provider = OpenHandsProvider(
+                    "http://openhands", "key", "http://public",
+                    model_pressure_url=url,
+                    model_pressure_api_key="must-not-leave-process",
+                )
+                with self.assertRaisesRegex(ProviderError, "URL|public"):
+                    provider.run_model_pressure({"prompt": "bounded"})
+                opener.assert_not_called()
+
+        for addresses in (
+            ["10.0.0.1"], ["100.64.0.1"], ["192.0.2.1"],
+            ["93.184.216.34", "127.0.0.1"],
+        ):
+            resolved = [
+                (socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))
+                for address in addresses
+            ]
+            with self.subTest(addresses=addresses), patch(
+                "socket.getaddrinfo", return_value=resolved
+            ), patch("urllib.request.build_opener") as opener:
+                provider = OpenHandsProvider(
+                    "http://openhands", "key", "http://public",
+                    model_pressure_url="https://model.example.com/evaluate",
+                    model_pressure_api_key="must-not-leave-process",
+                )
+                with self.assertRaisesRegex(ProviderError, "not public"):
+                    provider.run_model_pressure({"prompt": "bounded"})
+                opener.assert_not_called()
 
     def test_child_mission_is_not_sent_when_exact_admission_fails(self) -> None:
         parent = uuid.UUID("11111111-1111-4111-8111-111111111111")

@@ -16,6 +16,7 @@ from .capability import CapabilityError
 
 _DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _NAMESPACE = re.compile(r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+_SCENARIO = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MAX_CLAIMS_BYTES = 16_384
 
 
@@ -46,7 +47,7 @@ def _b64(value: bytes) -> str:
 
 
 def environment_grant_claims(
-    binding: object, *, principal_id: uuid.UUID, now: datetime
+    binding: object, *, principal_id: str, now: datetime
 ) -> dict[str, Any]:
     """Validate Main-produced Environment identity and add non-widenable claims."""
     required = {
@@ -65,8 +66,13 @@ def environment_grant_claims(
     if (
         not isinstance(scenarios, list)
         or not 1 <= len(scenarios) <= 32
-        or any(not isinstance(item, str) or not item.strip() or len(item) > 200 for item in scenarios)
+        or any(
+            not isinstance(item, str) or len(item) > 128
+            or _SCENARIO.fullmatch(item) is None
+            for item in scenarios
+        )
         or len(set(scenarios)) != len(scenarios)
+        or scenarios != sorted(scenarios)
     ):
         raise CapabilityError("Environment grant scenarios are invalid")
     namespace = binding.get("namespace")
@@ -74,15 +80,31 @@ def environment_grant_claims(
         raise CapabilityError("Environment grant namespace is invalid")
     if binding.get("toolboxPod") != "toolbox":
         raise CapabilityError("Environment grant Toolbox identity is invalid")
+    if not isinstance(principal_id, str) or _DIGEST.fullmatch(principal_id) is None:
+        raise CapabilityError("Environment grant principal identity is invalid")
     if _utc(binding.get("expiresAt")) <= now.astimezone(timezone.utc):
         raise CapabilityError("Environment grant is expired")
     claims = {
         "schemaVersion": 1,
-        "principalId": str(principal_id),
+        "principalId": principal_id,
         **binding,
         "capabilities": {"toolbox": True},
     }
     return json.loads(_canonical(claims))
+
+
+def runtime_principal_id(
+    *, owning_main_id: uuid.UUID, child_id: uuid.UUID, task_key: str, role: str
+) -> str:
+    """Derive the canonical authenticated principal for one signed Mission."""
+    identity = {
+        "schemaVersion": 1,
+        "owningMainId": str(owning_main_id),
+        "childId": str(child_id),
+        "taskKey": task_key,
+        "role": role,
+    }
+    return "sha256:" + hashlib.sha256(_canonical(identity)).hexdigest()
 
 
 def mint_environment_grant(secret: bytes, claims: object) -> str:

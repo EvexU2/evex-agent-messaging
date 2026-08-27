@@ -1,0 +1,40 @@
+{
+  "claims": {
+    "candidateRevisionId": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "capabilities": {"toolbox": true},
+    "configurationDigest": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "environmentId": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expiresAt": "2026-08-27T12:05:00.000Z",
+    "generation": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "manifestDigest": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "namespace": "evex-env-0aba96680f84",
+    "principalId": "sha256:8dba61ac25e67662bdf54687b7eabf67153cd0d2764c5e745ee3cdb474707234",
+    "scenarios": ["api.health", "runtime.toolbox"],
+    "schemaVersion": 1,
+    "toolboxPod": "toolbox"
+  },
+  "identity": {
+    "childId": "22222222-2222-4222-8222-222222222222",
+    "owningMainId": "11111111-1111-4111-8111-111111111111",
+    "role": "qa",
+    "schemaVersion": 1,
+    "taskKey": "qa-governed-runtime"
+  },
+  "now": "2026-08-27T12:00:00.000Z",
+  "secret": "test-runtime-grant-secret-that-is-at-least-32-bytes",
+  "tokenParts": [
+    "v1.eyJjYW5kaWRhdGVSZXZpc2lvbklkIjoic2hhMjU2OmNjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY",
+    "2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2NjY2MiLCJjYXBhYmlsaXRpZXMiOnsidG9vb",
+    "GJveCI6dHJ1ZX0sImNvbmZpZ3VyYXRpb25EaWdlc3QiOiJzaGEyNTY6ZGRkZGRkZGRkZGRkZGRkZGRkZ",
+    "GRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZCIsImVudmlyb25tZW50S",
+    "WQiOiJzaGEyNTY6YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhY",
+    "WFhYWFhYWFhYWFhYWFhYSIsImV4cGlyZXNBdCI6IjIwMjYtMDgtMjdUMTI6MDU6MDAuMDAwWiIsImdlb",
+    "mVyYXRpb24iOiJzaGEyNTY6YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiY",
+    "mJiYmJiYmJiYmJiYmJiYmJiYmJiYiIsIm1hbmlmZXN0RGlnZXN0Ijoic2hhMjU2OmVlZWVlZWVlZWVlZ",
+    "WVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWVlZWUiLCJuYW1lc",
+    "3BhY2UiOiJldmV4LWVudi0wYWJhOTY2ODBmODQiLCJwcmluY2lwYWxJZCI6InNoYTI1Njo4ZGJhNjFhY",
+    "zI1ZTY3NjYyYmRmNTQ2ODdiN2VhYmY2NzE1M2NkMGQyNzY0YzVlNzQ1ZWUzY2RiNDc0NzA3MjM0Iiwic",
+    "2NlbmFyaW9zIjpbImFwaS5oZWFsdGgiLCJydW50aW1lLnRvb2xib3giXSwic2NoZW1hVmVyc2lvbiI6M",
+    "SwidG9vbGJveFBvZCI6InRvb2xib3gifQ.fXSRRdO98Sh4iiJVtoZx1vgWh2q47tngtawkdtMm9Vg"
+  ]
+}

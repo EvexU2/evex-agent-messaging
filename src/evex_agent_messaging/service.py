@@ -16,7 +16,11 @@ from .capability import (
     inspect_capability,
     verify_capability,
 )
-from .runtime_grant import environment_grant_claims, mint_environment_grant
+from .runtime_grant import (
+    environment_grant_claims,
+    mint_environment_grant,
+    runtime_principal_id,
+)
 
 
 _WORKSPACE_ISSUE_URL = re.compile(
@@ -123,6 +127,34 @@ class MessagingService:
             or len(set(assertions)) != len(assertions)
         ):
             raise CapabilityError("model-pressure assertions are invalid")
+        supplied = {
+            key: request.get(key)
+            for key in ("scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode")
+        }
+        binding, expected = self._current_model_pressure_authority(
+            capability, supplied
+        )
+        raw = self._provider.run_model_pressure({
+            **expected,
+            "prompt": prompt,
+            "assertions": list(assertions),
+        })
+        post_capability = verify_capability(
+            token, self._secret, now=self._clock(), action="send_message",
+            target_id=self._capability_target(token),
+        )
+        post_binding, post_expected = self._current_model_pressure_authority(
+            post_capability, supplied
+        )
+        if post_binding != binding or post_expected != expected:
+            raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched")
+        return self._sanitized_model_pressure_report(
+            expected, raw, requested_assertions=assertions
+        )
+
+    def _current_model_pressure_authority(
+        self, capability, supplied: dict[str, Any]
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         binding = self._provider.model_pressure_binding(
             capability.child_id, capability.owning_main_id, capability.task_key
         )
@@ -130,7 +162,6 @@ class MessagingService:
             key: binding.get(key)
             for key in ("scenarioId", "skillCandidate", "modelPressureGeneration", "model", "mode")
         }
-        supplied = {key: request.get(key) for key in expected}
         expires = binding.get("expiresAt")
         if (
             set(binding) != {
@@ -139,6 +170,7 @@ class MessagingService:
             or supplied != expected
             or not isinstance(expires, str)
             or not expires.endswith("Z")
+            or not self._model_pressure_mode_allowed(capability.role, binding.get("mode"))
         ):
             raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched")
         try:
@@ -147,19 +179,11 @@ class MessagingService:
             raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched") from exc
         if expiry <= self._clock().astimezone(timezone.utc):
             raise CapabilityError("model-pressure grant is stale, foreign, expired, or mismatched")
-        raw = self._provider.run_model_pressure({
-            **expected,
-            "prompt": prompt,
-            "assertions": list(assertions),
-        })
-        return self._sanitized_model_pressure_report(
-            expected, raw, prompt=prompt, requested_assertions=assertions
-        )
+        return binding, expected
 
     @staticmethod
     def _sanitized_model_pressure_report(
-        identity: dict[str, Any], raw: object, *, prompt: str,
-        requested_assertions: list[str],
+        identity: dict[str, Any], raw: object, *, requested_assertions: list[str],
     ) -> dict[str, Any]:
         required = {"assertions", "outcome", "failureDiagnosis", "usage", "excerpts"}
         if not isinstance(raw, dict) or set(raw) != required:
@@ -179,11 +203,28 @@ class MessagingService:
             or {item["id"] for item in assertions} != set(requested_assertions)
         ):
             raise CapabilityError("model-pressure provider returned an unsafe report")
-        if raw.get("outcome") not in {"PASS", "FAIL", "ERROR"}:
+        outcome = raw.get("outcome")
+        if (
+            outcome not in {"PASS", "FAIL", "ERROR"}
+            or (outcome == "PASS" and any(not item["passed"] for item in assertions))
+            or (outcome == "FAIL" and all(item["passed"] for item in assertions))
+        ):
             raise CapabilityError("model-pressure provider returned an unsafe report")
         diagnosis = raw.get("failureDiagnosis")
         if diagnosis is not None and (
-            not isinstance(diagnosis, str) or len(diagnosis) > 1_000
+            not isinstance(diagnosis, dict)
+            or set(diagnosis) != {"code"}
+            or diagnosis.get("code") not in {
+                "assertion_failed", "provider_unavailable", "evaluation_error"
+            }
+        ):
+            raise CapabilityError("model-pressure provider returned an unsafe report")
+        if (
+            (outcome == "PASS") != (diagnosis is None)
+            or outcome == "FAIL" and diagnosis != {"code": "assertion_failed"}
+            or outcome == "ERROR" and diagnosis not in (
+                {"code": "provider_unavailable"}, {"code": "evaluation_error"}
+            )
         ):
             raise CapabilityError("model-pressure provider returned an unsafe report")
         usage = raw.get("usage")
@@ -194,18 +235,24 @@ class MessagingService:
         ):
             raise CapabilityError("model-pressure provider returned an unsafe report")
         excerpts = raw.get("excerpts")
+        assertion_outcomes = {item["id"]: item["passed"] for item in assertions}
         if (
             not isinstance(excerpts, list) or len(excerpts) > 5
-            or any(not isinstance(item, str) or len(item) > 500 for item in excerpts)
-        ):
-            raise CapabilityError("model-pressure provider returned an unsafe report")
-        evidence_strings = [item for item in excerpts]
-        if diagnosis is not None:
-            evidence_strings.append(diagnosis)
-        forbidden_markers = ("authorization:", "bearer ", "api_key", "api-key", "callback secret")
-        if any(
-            item == prompt or any(marker in item.lower() for marker in forbidden_markers)
-            for item in evidence_strings
+            or len({item.get("assertionId") for item in excerpts if isinstance(item, dict)})
+            != len(excerpts)
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"assertionId", "kind"}
+                or item.get("assertionId") not in requested_assertions
+                or item.get("kind") not in {
+                    "assertion_satisfied", "assertion_violated", "evaluation_inconclusive"
+                }
+                or item.get("kind") == "assertion_satisfied"
+                and assertion_outcomes[item["assertionId"]] is not True
+                or item.get("kind") == "assertion_violated"
+                and assertion_outcomes[item["assertionId"]] is not False
+                for item in excerpts
+            )
         ):
             raise CapabilityError("model-pressure provider returned an unsafe report")
         return {
@@ -358,7 +405,14 @@ class MessagingService:
         environment_token = None
         if "environment" in bindings:
             claims = environment_grant_claims(
-                bindings["environment"], principal_id=child_id, now=now
+                bindings["environment"],
+                principal_id=runtime_principal_id(
+                    owning_main_id=parent.child_id,
+                    child_id=child_id,
+                    task_key=task_key,
+                    role=role,
+                ),
+                now=now,
             )
             if datetime.fromisoformat(claims["expiresAt"][:-1] + "+00:00") > child_expires_at:
                 raise CapabilityError("Environment grant expiry is outside Child authority")
@@ -367,7 +421,9 @@ class MessagingService:
             environment_token = mint_environment_grant(self._runtime_grant_secret, claims)
             output["environment"] = claims
         if "modelPressure" in bindings:
-            binding = self._model_pressure_binding(bindings["modelPressure"], now, child_expires_at)
+            binding = self._model_pressure_binding(
+                bindings["modelPressure"], role, now, child_expires_at
+            )
             generation_input = {
                 "owningMainId": str(parent.child_id), "childId": str(child_id),
                 "taskKey": task_key, "role": role, **binding,
@@ -377,7 +433,9 @@ class MessagingService:
         return output, environment_token
 
     @staticmethod
-    def _model_pressure_binding(value: object, now: datetime, child_expires_at: datetime) -> dict[str, Any]:
+    def _model_pressure_binding(
+        value: object, role: str, now: datetime, child_expires_at: datetime
+    ) -> dict[str, Any]:
         required = {"skillCandidate", "scenarioId", "model", "mode", "expiresAt"}
         if not isinstance(value, dict) or set(value) != required:
             raise CapabilityError("model-pressure grant binding is incomplete or widened")
@@ -389,6 +447,8 @@ class MessagingService:
             raise CapabilityError("model-pressure scenario is invalid")
         if value.get("model") not in {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} or value.get("mode") not in {"red", "green", "forward"}:
             raise CapabilityError("model-pressure model or mode is invalid")
+        if not MessagingService._model_pressure_mode_allowed(role, value.get("mode")):
+            raise CapabilityError("model-pressure mode is outside the Child role")
         expires = value.get("expiresAt")
         if not isinstance(expires, str) or not expires.endswith("Z"):
             raise CapabilityError("model-pressure expiry must be UTC")
@@ -399,6 +459,14 @@ class MessagingService:
         if expiry <= now.astimezone(timezone.utc) or expiry > child_expires_at:
             raise CapabilityError("model-pressure grant expiry is outside Child authority")
         return json.loads(_compact(value))
+
+    @staticmethod
+    def _model_pressure_mode_allowed(role: str, mode: object) -> bool:
+        return (
+            role == "writer" and mode in {"red", "green"}
+        ) or (
+            role == "qa" and mode == "forward"
+        )
 
     @staticmethod
     def _validated_mission(mission: object) -> dict[str, Any]:

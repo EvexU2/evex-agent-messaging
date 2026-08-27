@@ -308,7 +308,6 @@ class OpenHandsProvider:
         if (
             tags.get("evexsourcerepository") != checkout["repository"]
             or tags.get("evexsourcebranch") != "main"
-            or tags.get("evexsourcebasehead") != checkout["headSha"]
             or checkout["branch"] != f"spec/issue-{issue_number}"
         ):
             raise ProviderError("Parent Main checkout authority does not match Spec request")

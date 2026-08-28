@@ -97,7 +97,9 @@ class OpenHandsProviderTest(unittest.TestCase):
                 "_validated_parent_checkout",
                 return_value=(parent_checkout, "a" * 40),
             ),
-            patch.object(provider, "_ensure_checkout") as ensure,
+            patch.object(
+                provider, "_ensure_checkout", return_value="a" * 40
+            ) as ensure,
             patch.object(
                 provider, "_validate_existing_checkout", return_value="a" * 40
             ),
@@ -228,7 +230,9 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "a" * 40,
                 ),
             ),
-            patch.object(provider, "_ensure_checkout"),
+            patch.object(
+                provider, "_ensure_checkout", return_value="a" * 40
+            ),
             patch.object(
                 provider, "_validate_existing_checkout", return_value="a" * 40
             ),
@@ -376,6 +380,55 @@ class OpenHandsProviderTest(unittest.TestCase):
             (source / "uncommitted.md").write_text("dirty\n")
             with self.assertRaisesRegex(ProviderError, "must be clean"):
                 provider._validated_parent_checkout(parent, parent_tags, "40")
+
+    def test_deleted_spec_conversation_reuses_its_clean_advanced_checkout(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "delivery" / "issue-40-source" / "evex-u-workspace"
+            source.mkdir(parents=True)
+            subprocess.run(["git", "init", "-q", "-b", "main", str(source)], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(source), "config", "user.name", "Test"], check=True)
+            subprocess.run(["git", "-C", str(source), "remote", "add", "origin", "https://github.com/EvexU2/evex-u-workspace.git"], check=True)
+            (source / "spec.md").write_text("base\n")
+            subprocess.run(["git", "-C", str(source), "add", "spec.md"], check=True)
+            subprocess.run(["git", "-C", str(source), "commit", "-q", "-m", "base"], check=True)
+            parent_head = subprocess.run(
+                ["git", "-C", str(source), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+            provider = OpenHandsProvider(
+                "http://openhands",
+                "key",
+                public_url="http://openhands.local/canvas",
+                workspace_root=str(root / "delivery"),
+            )
+            checkout = {
+                "repository": "EvexU2/evex-u-workspace",
+                "branch": "spec/issue-40",
+                "headSha": parent_head,
+            }
+            provider._ensure_checkout(self.spec, checkout, source)
+            spec_path = provider._checkout_path(self.spec)
+            subprocess.run(["git", "-C", str(spec_path), "config", "user.email", "test@example.com"], check=True)
+            subprocess.run(["git", "-C", str(spec_path), "config", "user.name", "Test"], check=True)
+            (spec_path / "spec.md").write_text("reviewed candidate\n")
+            subprocess.run(["git", "-C", str(spec_path), "add", "spec.md"], check=True)
+            subprocess.run(["git", "-C", str(spec_path), "commit", "-q", "-m", "spec candidate"], check=True)
+            spec_head = subprocess.run(
+                ["git", "-C", str(spec_path), "rev-parse", "HEAD"],
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+
+            self.assertNotEqual(spec_head, parent_head)
+            self.assertEqual(
+                provider._ensure_checkout(self.spec, checkout, source),
+                spec_head,
+            )
 
     def test_parent_checkout_identity_mismatch_fails_before_spec_mutation(self):
         parent = discussion(

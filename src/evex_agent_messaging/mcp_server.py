@@ -35,15 +35,23 @@ TOOLS = [{
     },
 }, {
     "name": "send_message",
-    "description": "Send bounded text to one exact known durable Discussion target.",
+    "description": "Send one bounded structured message to one exact known durable Discussion target.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["targetId", "messageKey", "text"],
+        "required": ["targetId", "messageKey", "message"],
         "properties": {
             "targetId": {"type": "string", "format": "uuid"},
             "messageKey": {"type": "string", "minLength": 1, "maxLength": 200},
-            "text": {"type": "string", "minLength": 1, "maxLength": 20000},
+            "message": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["humanSummary", "aiEvidence"],
+                "properties": {
+                    "humanSummary": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "aiEvidence": {"type": "object"},
+                },
+            },
         },
     },
 }]
@@ -85,12 +93,12 @@ class McpServer:
                     capability_ref,
                     uuid.UUID(arguments["targetId"]),
                     arguments["messageKey"],
-                    arguments["text"],
+                    arguments["message"],
                 )
         except (KeyError, TypeError, ValueError) as exc:
-            return self._error(request_id, -32602, f"invalid tool arguments: {exc}")
+            return self._error(request_id, -32602, "invalid messaging request")
         except Exception as exc:
-            return self._error(request_id, -32000, str(exc))
+            return self._error(request_id, -32000, "messaging operation failed")
         return self._result(request_id, {
             "content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}],
             "structuredContent": value,

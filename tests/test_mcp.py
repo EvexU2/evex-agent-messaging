@@ -33,6 +33,10 @@ class McpServerTest(unittest.TestCase):
         self.service, self.server = FakeService(), McpServer(FakeService())
         self.service = self.server._service
 
+    @staticmethod
+    def message():
+        return {"humanSummary": "Delivery passed", "aiEvidence": {"outcome": "passed", "evidence": [], "findings": [], "nextBoundary": "review"}}
+
     def test_lists_only_spec_lifecycle_and_message_tools(self):
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         self.assertEqual(
@@ -40,7 +44,7 @@ class McpServerTest(unittest.TestCase):
             ["create_spec_chat", "send_message"],
         )
         self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["checkout"])
-        self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "text"])
+        self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):
         checkout = {
@@ -63,14 +67,14 @@ class McpServerTest(unittest.TestCase):
             "jsonrpc": "2.0",
             "id": 2,
             "method": "tools/call",
-            "params": {"name": "send_message", "arguments": {"targetId": str(target), "messageKey": "key", "text": "hello"}},
+            "params": {"name": "send_message", "arguments": {"targetId": str(target), "messageKey": "key", "message": self.message()}},
         }, capability_ref="evx2_capability")
         self.assertEqual(response["result"]["structuredContent"], {"accepted": True, "messageKey": "key"})
-        self.assertEqual(self.service.calls, [("evx2_capability", target, "key", "hello")])
+        self.assertEqual(self.service.calls, [("evx2_capability", target, "key", self.message())])
 
     def test_missing_capability_and_unknown_tool_fail_closed(self):
         target = str(uuid.uuid4())
-        missing = self.server.handle({"id": 1, "method": "tools/call", "params": {"name": "send_message", "arguments": {"targetId": target, "messageKey": "key", "text": "x"}}})
+        missing = self.server.handle({"id": 1, "method": "tools/call", "params": {"name": "send_message", "arguments": {"targetId": target, "messageKey": "key", "message": self.message()}}})
         unknown = self.server.handle({"id": 2, "method": "tools/call", "params": {"name": "create_child", "arguments": {}}}, capability_ref="evx2_capability")
         self.assertEqual(missing["error"]["code"], -32602)
         self.assertEqual(unknown["error"]["code"], -32602)

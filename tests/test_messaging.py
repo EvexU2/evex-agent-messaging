@@ -56,6 +56,18 @@ class MessagingServiceTest(unittest.TestCase):
             role=role,
         )
 
+    @staticmethod
+    def message(summary="Delivery passed"):
+        return {
+            "humanSummary": summary,
+            "aiEvidence": {
+                "outcome": "passed",
+                "evidence": ["tests: PASS"],
+                "findings": [],
+                "nextBoundary": "review",
+            },
+        }
+
     def test_capability_is_signed_sender_bound_and_send_only(self):
         capability = inspect_capability(self.child_token(), self.secret)
         self.assertEqual(capability.owning_main_id, self.parent)
@@ -68,14 +80,14 @@ class MessagingServiceTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
-        result = service.send_message(self.child_token(), self.parent, "late-result", "PR passed")
+        result = service.send_message(self.child_token(), self.parent, "late-result", self.message())
 
         self.assertEqual(result, {"accepted": True, "messageKey": "late-result"})
 
     def test_send_message_checks_relationship_before_provider_post(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
-        result = service.send_message(self.child_token(), self.parent, "result-1", "PR passed")
+        result = service.send_message(self.child_token(), self.parent, "result-1", self.message())
         self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual([call[0] for call in provider.calls], ["allowed", "send"])
 
@@ -84,7 +96,7 @@ class MessagingServiceTest(unittest.TestCase):
         service = MessagingService(provider, self.secret)
         spec_id = deterministic_spec_chat_id(self.parent)
 
-        service.send_message(self.main_token(), spec_id, "review", "Review again")
+        service.send_message(self.main_token(), spec_id, "review", self.message())
 
         send_args = provider.calls[-1][1]
         refreshed = inspect_capability(send_args[4], self.secret)
@@ -97,7 +109,7 @@ class MessagingServiceTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
-        service.send_message(self.main_token(), self.child, "status", "Report status")
+        service.send_message(self.main_token(), self.child, "status", self.message())
 
         self.assertIsNone(provider.calls[-1][1][4])
 
@@ -105,7 +117,7 @@ class MessagingServiceTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
-        service.send_message(self.child_token(), self.parent, "result", "Review passed")
+        service.send_message(self.child_token(), self.parent, "result", self.message())
 
         send_args = provider.calls[-1][1]
         refreshed = inspect_capability(send_args[4], self.secret)
@@ -148,16 +160,43 @@ class MessagingServiceTest(unittest.TestCase):
         denied = FakeProvider(allowed=False)
         service = MessagingService(denied, self.secret)
         with self.assertRaisesRegex(CapabilityError, "not allowed"):
-            service.send_message(self.child_token(), uuid.uuid4(), "key", "text")
+            service.send_message(self.child_token(), uuid.uuid4(), "key", self.message())
         with self.assertRaisesRegex(CapabilityError, "not allowed"):
-            service.send_message(self.main_token(), self.parent, "key", "text")
+            service.send_message(self.main_token(), self.parent, "key", self.message())
         self.assertFalse(any(call[0] == "send" for call in denied.calls))
 
-    def test_message_key_and_text_are_bounded(self):
+    def test_message_key_and_structured_message_are_bounded_before_provider_calls(self):
         service = MessagingService(FakeProvider(), self.secret)
-        for key, text in (("", "text"), ("x" * 201, "text"), ("key", " "), ("key", "x" * 20001)):
-            with self.subTest(key=len(key), text=len(text)), self.assertRaises(CapabilityError):
-                service.send_message(self.child_token(), self.parent, key, text)
+        invalid = (
+            ("", self.message()),
+            ("x" * 201, self.message()),
+            ("not allowed", self.message()),
+            ("ghp_abcdefgh", self.message()),
+            ("key", "legacy raw text"),
+            ("key", {"humanSummary": " ", "aiEvidence": self.message()["aiEvidence"]}),
+            ("key", {"humanSummary": "x" * 2001, "aiEvidence": self.message()["aiEvidence"]}),
+            ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "ok"}}),
+            ("key", self.message("Bearer credential-value")),
+            ("key", self.message("unsafe <!-- marker")),
+            ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "passed", "evidence": ["x" * 2000] * 11, "findings": [], "nextBoundary": "review"}}),
+        )
+        for key, message in invalid:
+            with self.subTest(key=key, message=message), self.assertRaises(CapabilityError) as error:
+                service.send_message(self.child_token(), self.parent, key, message)
+            self.assertLessEqual(len(str(error.exception).encode()), 200)
+            if key:
+                self.assertNotIn(key, str(error.exception))
+        self.assertEqual(service._provider.calls, [])
+
+    def test_canonical_message_preserves_exact_admissible_evidence(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        message = self.message()
+        message["aiEvidence"]["revision"] = "abc123"
+
+        service.send_message(self.child_token(), self.parent, "result", message)
+
+        self.assertEqual(provider.calls[-1][1][3], message)
 
     def test_readiness_is_provider_only_and_fail_closed(self):
         self.assertTrue(MessagingService(FakeProvider(), self.secret).readiness())

@@ -150,6 +150,7 @@ class OpenHandsProvider:
                 "autotitle": False,
                 "max_iterations": 300,
                 "mcp_config": {},
+                "language": "de-DE",
                 "secrets": {
                     "EVEX_AGENT_ROLE": {"kind": "StaticSecret", "value": "spec"},
                     "EVEX_AGENT_INSTANCE_ID": {
@@ -169,7 +170,8 @@ class OpenHandsProvider:
                     "system_message_suffix_append": (
                         "EVEX role scope: interactive Spec Chat. Use the admitted checkout, "
                         "EVEX Spec skills, native read-only review subagents, and send_message "
-                        "only to the bound Parent Main."
+                        "only to the bound Parent Main. Conduct new human dialogue in German "
+                        "(de-DE) unless that Chat's human changes its language."
                     )
                 },
             }
@@ -247,6 +249,7 @@ class OpenHandsProvider:
             "evexbasehead": checkout["headSha"],
             "evexmodel": _SPEC_MODEL,
             "evexreasoning": _SPEC_REASONING,
+            "evexlocale": "de-DE",
         }
 
     def _validate_existing_spec(
@@ -502,14 +505,24 @@ class OpenHandsProvider:
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         message_key: str,
-        text: str,
+        message: dict[str, Any],
         recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]:
+        if self.api_key and self.api_key in json.dumps(message, ensure_ascii=False):
+            raise ProviderError("message contains a configured credential")
         envelope = json.dumps(
-            {"messageKey": message_key, "senderId": str(sender_id), "text": text},
+            {
+                "aiEvidence": message["aiEvidence"],
+                "humanSummary": message["humanSummary"],
+                "messageKey": message_key,
+                "senderId": str(sender_id),
+            },
+            ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
+            allow_nan=False,
         )
+        projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
         if recipient_capability_ref is not None:
             self._request(
                 "POST",
@@ -522,6 +535,6 @@ class OpenHandsProvider:
         self._request(
             "POST",
             f"/api/conversations/{target_id}/events",
-            {"role": "user", "content": [{"type": "text", "text": envelope}], "run": True},
+            {"role": "user", "content": [{"type": "text", "text": projection}], "run": True},
         )
         return {"accepted": True, "messageKey": message_key}

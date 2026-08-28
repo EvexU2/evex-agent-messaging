@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import json
 from typing import Any, Protocol
 import uuid
 
@@ -18,6 +19,18 @@ from .capability import (
 _REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _HEAD = re.compile(r"^[0-9a-f]{40}$")
 _BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,160}$")
+_MESSAGE_KEY = re.compile(r"^[\x21-\x7e]{1,200}$")
+_CREDENTIAL = re.compile(
+    r"(?:\b(?:sk|gh[pousr])_[A-Za-z0-9_-]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|"
+    r"\bBearer\s+\S+|\b(?:authorization|x-session-api-key)\s*:|"
+    r"\b(?:EVEX_MESSAGING_SECRET|OPENHANDS_API_KEY)\b)",
+    re.IGNORECASE,
+)
+_MACHINE_DELIMITER = re.compile(r"<!--|-->")
+_MAX_MESSAGE_BYTES = 20_000
+_MAX_SUMMARY_BYTES = 2_000
+_MAX_EVIDENCE_ITEMS = 100
+_MAX_EVIDENCE_ITEM_BYTES = 2_000
 
 
 class MessagingProvider(Protocol):
@@ -42,7 +55,7 @@ class MessagingProvider(Protocol):
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         message_key: str,
-        text: str,
+        message: dict[str, Any],
         recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]: ...
 
@@ -124,15 +137,18 @@ class MessagingService:
         token: str,
         target_id: uuid.UUID,
         message_key: str,
-        text: str,
+        message: object,
     ) -> dict[str, Any]:
         capability = inspect_capability(token, self._secret)
         if target_id == capability.sender_id:
             raise CapabilityError("message target is not allowed")
-        if not isinstance(message_key, str) or not 1 <= len(message_key.encode()) <= 200:
+        if (
+            not isinstance(message_key, str)
+            or _MESSAGE_KEY.fullmatch(message_key) is None
+            or _CREDENTIAL.search(message_key)
+        ):
             raise CapabilityError("messageKey must be bounded and non-empty")
-        if not isinstance(text, str) or not text.strip() or len(text.encode()) > 20_000:
-            raise CapabilityError("message text must be bounded and non-empty")
+        bounded_message = self._validated_message(message)
         if not self._provider.target_allowed(
             capability.sender_id,
             target_id,
@@ -164,6 +180,44 @@ class MessagingService:
             capability.sender_id,
             target_id,
             message_key,
-            text,
+            bounded_message,
             recipient_capability_ref,
         )
+
+    @staticmethod
+    def _validated_message(message: object) -> dict[str, Any]:
+        if not isinstance(message, dict) or set(message) != {"humanSummary", "aiEvidence"}:
+            raise CapabilityError("message must be a structured human summary and AI evidence")
+        summary, evidence = message.get("humanSummary"), message.get("aiEvidence")
+        if (
+            not isinstance(summary, str)
+            or not summary.strip()
+            or len(summary.encode()) > _MAX_SUMMARY_BYTES
+            or _MACHINE_DELIMITER.search(summary)
+            or _CREDENTIAL.search(summary)
+        ):
+            raise CapabilityError("message summary is invalid")
+        if not isinstance(evidence, dict) or not {"outcome", "evidence", "findings", "nextBoundary"} <= set(evidence) or set(evidence) - {"outcome", "revision", "evidence", "findings", "nextBoundary"}:
+            raise CapabilityError("message AI evidence is invalid")
+        for key in ("outcome", "nextBoundary"):
+            value = evidence.get(key)
+            if not isinstance(value, str) or not value.strip() or len(value.encode()) > _MAX_EVIDENCE_ITEM_BYTES:
+                raise CapabilityError("message AI evidence is invalid")
+        if "revision" in evidence:
+            revision = evidence["revision"]
+            if not isinstance(revision, str) or not revision.strip() or len(revision.encode()) > _MAX_EVIDENCE_ITEM_BYTES:
+                raise CapabilityError("message AI evidence is invalid")
+        for key in ("evidence", "findings"):
+            values = evidence.get(key)
+            if not isinstance(values, list) or len(values) > _MAX_EVIDENCE_ITEMS or any(
+                not isinstance(value, str) or not value.strip() or len(value.encode()) > _MAX_EVIDENCE_ITEM_BYTES
+                for value in values
+            ):
+                raise CapabilityError("message AI evidence is invalid")
+        try:
+            canonical = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError):
+            raise CapabilityError("message AI evidence is invalid") from None
+        if len(canonical.encode()) > _MAX_MESSAGE_BYTES or _MACHINE_DELIMITER.search(canonical) or _CREDENTIAL.search(canonical):
+            raise CapabilityError("message is unsafe or exceeds its byte budget")
+        return json.loads(canonical)

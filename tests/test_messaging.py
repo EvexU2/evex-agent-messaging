@@ -91,39 +91,30 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual([call[0] for call in provider.calls], ["allowed", "send"])
 
-    def test_parent_wake_refreshes_the_deterministic_spec_capability(self):
+    def test_parent_wake_uses_the_existing_spec_capability(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
         spec_id = deterministic_spec_chat_id(self.parent)
 
         service.send_message(self.main_token(), spec_id, "review", self.message())
 
-        send_args = provider.calls[-1][1]
-        refreshed = inspect_capability(send_args[4], self.secret)
-        self.assertEqual(refreshed.owning_main_id, self.parent)
-        self.assertEqual(refreshed.sender_id, spec_id)
-        self.assertEqual(refreshed.task_key, "spec")
-        self.assertEqual(refreshed.role, "spec")
+        self.assertEqual(len(provider.calls[-1][1]), 4)
 
-    def test_non_spec_wake_does_not_receive_a_replacement_capability(self):
+    def test_non_spec_wake_uses_the_existing_target_capability(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
         service.send_message(self.main_token(), self.child, "status", self.message())
 
-        self.assertIsNone(provider.calls[-1][1][4])
+        self.assertEqual(len(provider.calls[-1][1]), 4)
 
-    def test_child_wake_refreshes_the_owning_parent_capability(self):
+    def test_child_wake_uses_the_existing_parent_capability(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
         service.send_message(self.child_token(), self.parent, "result", self.message())
 
-        send_args = provider.calls[-1][1]
-        refreshed = inspect_capability(send_args[4], self.secret)
-        self.assertEqual(refreshed.owning_main_id, self.parent)
-        self.assertEqual(refreshed.sender_id, self.parent)
-        self.assertEqual(refreshed.role, "main")
+        self.assertEqual(len(provider.calls[-1][1]), 4)
 
     def test_only_parent_main_can_create_one_deterministic_spec_chat(self):
         provider = FakeProvider()

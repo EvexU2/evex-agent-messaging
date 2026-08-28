@@ -12,7 +12,6 @@ from .capability import (
     capability_token,
     deterministic_spec_chat_id,
     inspect_capability,
-    main_capability_token,
 )
 
 
@@ -56,7 +55,6 @@ class MessagingProvider(Protocol):
         target_id: uuid.UUID,
         message_key: str,
         message: dict[str, Any],
-        recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]: ...
 
     def readiness(self) -> bool: ...
@@ -156,32 +154,11 @@ class MessagingService:
             capability.owning_main_id,
         ):
             raise CapabilityError("message target is not allowed")
-        recipient_capability_ref = None
-        if (
-            capability.role == "main"
-            and target_id == deterministic_spec_chat_id(capability.owning_main_id)
-        ):
-            recipient_capability_ref = capability_token(
-                self._secret,
-                owning_main_id=capability.owning_main_id,
-                sender_id=target_id,
-                task_key="spec",
-                role="spec",
-            )
-        elif (
-            capability.role in {"deputy", "spec"}
-            and target_id == capability.owning_main_id
-        ):
-            recipient_capability_ref = main_capability_token(
-                self._secret,
-                capability.owning_main_id,
-            )
         return self._provider.send_message(
             capability.sender_id,
             target_id,
             message_key,
             bounded_message,
-            recipient_capability_ref,
         )
 
     @staticmethod

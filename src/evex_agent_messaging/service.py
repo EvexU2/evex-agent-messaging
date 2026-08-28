@@ -42,6 +42,7 @@ class MessagingProvider(Protocol):
         target_id: uuid.UUID,
         message_key: str,
         text: str,
+        recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]: ...
 
     def readiness(self) -> bool: ...
@@ -138,9 +139,22 @@ class MessagingService:
             capability.owning_main_id,
         ):
             raise CapabilityError("message target is not allowed")
+        recipient_capability_ref = None
+        if (
+            capability.role == "main"
+            and target_id == deterministic_spec_chat_id(capability.owning_main_id)
+        ):
+            recipient_capability_ref = capability_token(
+                self._secret,
+                owning_main_id=capability.owning_main_id,
+                sender_id=target_id,
+                task_key="spec",
+                role="spec",
+            )
         return self._provider.send_message(
             capability.sender_id,
             target_id,
             message_key,
             text,
+            recipient_capability_ref,
         )

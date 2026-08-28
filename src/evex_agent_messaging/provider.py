@@ -503,12 +503,22 @@ class OpenHandsProvider:
         target_id: uuid.UUID,
         message_key: str,
         text: str,
+        recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]:
         envelope = json.dumps(
             {"messageKey": message_key, "senderId": str(sender_id), "text": text},
             sort_keys=True,
             separators=(",", ":"),
         )
+        if recipient_capability_ref is not None:
+            self._request(
+                "POST",
+                f"/api/conversations/{target_id}/secrets",
+                {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                    "kind": "StaticSecret",
+                    "value": recipient_capability_ref,
+                }}},
+            )
         self._request(
             "POST",
             f"/api/conversations/{target_id}/events",

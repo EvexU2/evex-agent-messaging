@@ -434,6 +434,30 @@ class OpenHandsProviderTest(unittest.TestCase):
         envelope = json.loads(body["content"][0]["text"])
         self.assertEqual(envelope, {"messageKey": "key-1", "senderId": str(self.parent), "text": "review passed"})
 
+    def test_send_message_refreshes_a_supplied_recipient_capability_before_wake(self):
+        provider, transport = self.provider([{}, {}])
+
+        result = provider.send_message(
+            self.parent,
+            self.spec,
+            "key-2",
+            "review again",
+            "evx2_refreshed",
+        )
+
+        self.assertEqual(result, {"accepted": True, "messageKey": "key-2"})
+        self.assertEqual(transport.calls[0], (
+            "POST",
+            f"/api/conversations/{self.spec}/secrets",
+            {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                "kind": "StaticSecret", "value": "evx2_refreshed",
+            }}},
+        ))
+        self.assertEqual(
+            transport.calls[1][1],
+            f"/api/conversations/{self.spec}/events",
+        )
+
     def test_invalid_identity_and_readiness_fail_closed(self):
         provider, _ = self.provider([{"id": "bad", "tags": {}}])
         with self.assertRaises(ProviderError):

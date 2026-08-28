@@ -9,7 +9,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider
-from .capability import CapabilityError, REFERENCE_PREFIX
+from .capability import REFERENCE_PREFIX
 from .service import MessagingService
 
 
@@ -19,19 +19,7 @@ TOOLS = [{
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
-        "required": ["checkout"],
-        "properties": {
-            "checkout": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": ["repository", "branch", "headSha"],
-                "properties": {
-                    "repository": {"type": "string", "minLength": 3, "maxLength": 200},
-                    "branch": {"type": "string", "minLength": 1, "maxLength": 160},
-                    "headSha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-                },
-            },
-        },
+        "properties": {},
     },
 }, {
     "name": "send_message",
@@ -98,18 +86,23 @@ class McpServer:
         if method != "tools/call":
             return self._error(request_id, -32601, "method not found")
         params = request.get("params") or {}
-        arguments = params.get("arguments") or {}
+        arguments = params.get("arguments", {})
         try:
+            if not isinstance(arguments, dict):
+                raise TypeError("tool arguments must be an object")
             name = params.get("name")
             if name not in {"create_spec_chat", "send_message"}:
                 return self._error(request_id, -32602, "unknown messaging tool")
             if not isinstance(capability_ref, str) or not capability_ref.startswith(REFERENCE_PREFIX):
                 raise ValueError("transport capability is required")
             if name == "create_spec_chat":
-                value = self._service.create_spec_chat(
-                    capability_ref,
-                    arguments["checkout"],
-                )
+                if arguments:
+                    return self._error(
+                        request_id,
+                        -32602,
+                        "create_spec_chat accepts no arguments",
+                    )
+                value = self._service.create_spec_chat(capability_ref)
             else:
                 if "message" not in arguments and "text" in arguments:
                     return self._error(
@@ -129,8 +122,6 @@ class McpServer:
                     arguments["messageKey"],
                     arguments["message"],
                 )
-        except CapabilityError as exc:
-            return self._error(request_id, -32602, str(exc))
         except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, "invalid messaging request")
         except Exception as exc:

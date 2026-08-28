@@ -119,33 +119,17 @@ class MessagingServiceTest(unittest.TestCase):
     def test_only_parent_main_can_create_one_deterministic_spec_chat(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "spec/issue-42",
-            "headSha": "a" * 40,
-        }
 
-        result = service.create_spec_chat(self.main_token(), checkout)
+        result = service.create_spec_chat(self.main_token())
 
         expected = deterministic_spec_chat_id(self.parent)
         self.assertEqual(result["specChatId"], str(expected))
         self.assertNotIn("capabilityRef", result)
         self.assertEqual(provider.calls[0][0], "create-spec")
-        self.assertEqual(provider.calls[0][1][:3], (self.parent, expected, checkout))
+        self.assertEqual(provider.calls[0][1][:2], (self.parent, expected))
+        self.assertEqual(len(provider.calls[0][1]), 3)
         with self.assertRaisesRegex(CapabilityError, "Parent Main"):
-            service.create_spec_chat(self.child_token(), checkout)
-
-    def test_spec_chat_checkout_is_exact_and_bounded(self):
-        service = MessagingService(FakeProvider(), self.secret)
-        invalid = (
-            {},
-            {"repository": "EvexU2/evex-u-workspace", "branch": "spec/42", "headSha": "bad"},
-            {"repository": "invalid", "branch": "spec/42", "headSha": "a" * 40},
-            {"repository": "EvexU2/evex-u-workspace", "branch": "../escape", "headSha": "a" * 40},
-        )
-        for checkout in invalid:
-            with self.subTest(checkout=checkout), self.assertRaises(CapabilityError):
-                service.create_spec_chat(self.main_token(), checkout)
+            service.create_spec_chat(self.child_token())
 
     def test_wrong_target_and_self_target_fail_closed(self):
         denied = FakeProvider(allowed=False)

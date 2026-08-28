@@ -9,6 +9,7 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from evex_agent_messaging.capability import CapabilityError  # noqa: E402
 from evex_agent_messaging.mcp_server import McpServer, TOOLS, bearer_capability  # noqa: E402
 
 
@@ -21,6 +22,8 @@ class FakeService:
         return {"accepted": True, "messageKey": args[2]}
 
     def create_spec_chat(self, *args):
+        if set(args[1]) != {"repository", "branch", "headSha"}:
+            raise CapabilityError("checkout must contain repository, branch, and headSha")
         self.calls.append(args)
         return {"created": True, "specChatId": "spec-id"}
 
@@ -77,6 +80,29 @@ class McpServerTest(unittest.TestCase):
         }, capability_ref="evx2_capability")
         self.assertEqual(response["result"]["structuredContent"]["specChatId"], "spec-id")
         self.assertEqual(self.service.calls, [("evx2_capability", checkout)])
+
+    def test_create_spec_chat_returns_the_actionable_checkout_contract_error(self):
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_spec_chat",
+                "arguments": {
+                    "checkout": {
+                        "repository": "EvexU2/evex-u-workspace",
+                        "branch": "spec/issue-918",
+                        "baseHead": "a" * 40,
+                    },
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "checkout must contain repository, branch, and headSha",
+        })
+        self.assertEqual(self.service.calls, [])
 
     def test_send_message_uses_transport_bound_capability(self):
         target = uuid.uuid4()

@@ -145,7 +145,9 @@ class OpenHandsProvider:
         except ProviderError as exc:
             if exc.status != 404:
                 raise
-            self._ensure_checkout(spec_chat_id, checkout, parent_checkout)
+            checkout["headSha"] = self._ensure_checkout(
+                spec_chat_id, checkout, parent_checkout
+            )
             profiles = self._request("GET", "/api/agent-profiles")
             profile_id = profiles.get("active_agent_profile_id")
             if not isinstance(profile_id, str) or not profile_id:
@@ -361,13 +363,16 @@ class OpenHandsProvider:
         spec_chat_id: uuid.UUID,
         checkout: dict[str, str],
         parent_checkout: Path,
-    ) -> None:
+    ) -> str:
         path = self._checkout_path(spec_chat_id)
         if path.is_symlink():
             raise ProviderError("Spec Chat checkout is not an isolated directory")
         if not path.exists():
             self._provision_checkout(path, checkout, parent_checkout)
-        self._validate_existing_checkout(path, checkout, exact=True)
+            return self._validate_existing_checkout(path, checkout, exact=True)
+        return self._validate_existing_checkout(
+            path, checkout, exact=False, require_clean=True
+        )
 
     def _provision_checkout(
         self,

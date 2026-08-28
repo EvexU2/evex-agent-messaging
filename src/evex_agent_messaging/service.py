@@ -142,7 +142,11 @@ class MessagingService:
         capability = inspect_capability(token, self._secret)
         if target_id == capability.sender_id:
             raise CapabilityError("message target is not allowed")
-        if not isinstance(message_key, str) or _MESSAGE_KEY.fullmatch(message_key) is None:
+        if (
+            not isinstance(message_key, str)
+            or _MESSAGE_KEY.fullmatch(message_key) is None
+            or _CREDENTIAL.search(message_key)
+        ):
             raise CapabilityError("messageKey must be bounded and non-empty")
         bounded_message = self._validated_message(message)
         if not self._provider.target_allowed(

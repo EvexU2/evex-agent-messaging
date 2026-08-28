@@ -171,6 +171,7 @@ class MessagingServiceTest(unittest.TestCase):
             ("", self.message()),
             ("x" * 201, self.message()),
             ("not allowed", self.message()),
+            ("ghp_abcdefgh", self.message()),
             ("key", "legacy raw text"),
             ("key", {"humanSummary": " ", "aiEvidence": self.message()["aiEvidence"]}),
             ("key", {"humanSummary": "x" * 2001, "aiEvidence": self.message()["aiEvidence"]}),
@@ -180,8 +181,11 @@ class MessagingServiceTest(unittest.TestCase):
             ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "passed", "evidence": ["x" * 2000] * 11, "findings": [], "nextBoundary": "review"}}),
         )
         for key, message in invalid:
-            with self.subTest(key=key, message=message), self.assertRaises(CapabilityError):
+            with self.subTest(key=key, message=message), self.assertRaises(CapabilityError) as error:
                 service.send_message(self.child_token(), self.parent, key, message)
+            self.assertLessEqual(len(str(error.exception).encode()), 200)
+            if key:
+                self.assertNotIn(key, str(error.exception))
         self.assertEqual(service._provider.calls, [])
 
     def test_canonical_message_preserves_exact_admissible_evidence(self):

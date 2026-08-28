@@ -45,11 +45,33 @@ TOOLS = [{
             "messageKey": {"type": "string", "minLength": 1, "maxLength": 200},
             "message": {
                 "type": "object",
+                "description": (
+                    "Pass the structured message as a JSON object, never a JSON-encoded string."
+                ),
                 "additionalProperties": False,
                 "required": ["humanSummary", "aiEvidence"],
                 "properties": {
                     "humanSummary": {"type": "string", "minLength": 1, "maxLength": 2000},
-                    "aiEvidence": {"type": "object"},
+                    "aiEvidence": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["outcome", "evidence", "findings", "nextBoundary"],
+                        "properties": {
+                            "outcome": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            "revision": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            "evidence": {
+                                "type": "array",
+                                "maxItems": 100,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            },
+                            "findings": {
+                                "type": "array",
+                                "maxItems": 100,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            },
+                            "nextBoundary": {"type": "string", "minLength": 1, "maxLength": 2000},
+                        },
+                    },
                 },
             },
         },
@@ -94,6 +116,12 @@ class McpServer:
                         request_id,
                         -32602,
                         "send_message requires the structured 'message' argument; 'text' is not accepted",
+                    )
+                if isinstance(arguments.get("message"), str):
+                    return self._error(
+                        request_id,
+                        -32602,
+                        "send_message 'message' must be an object, not a JSON-encoded string",
                     )
                 value = self._service.send_message(
                     capability_ref,

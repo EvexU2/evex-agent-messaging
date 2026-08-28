@@ -11,6 +11,7 @@ from .capability import (
     capability_token,
     deterministic_spec_chat_id,
     inspect_capability,
+    main_capability_token,
 )
 
 
@@ -150,6 +151,14 @@ class MessagingService:
                 sender_id=target_id,
                 task_key="spec",
                 role="spec",
+            )
+        elif (
+            capability.role in {"deputy", "spec"}
+            and target_id == capability.owning_main_id
+        ):
+            recipient_capability_ref = main_capability_token(
+                self._secret,
+                capability.owning_main_id,
             )
         return self._provider.send_message(
             capability.sender_id,

@@ -101,6 +101,18 @@ class MessagingServiceTest(unittest.TestCase):
 
         self.assertIsNone(provider.calls[-1][1][4])
 
+    def test_child_wake_refreshes_the_owning_parent_capability(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        service.send_message(self.child_token(), self.parent, "result", "Review passed")
+
+        send_args = provider.calls[-1][1]
+        refreshed = inspect_capability(send_args[4], self.secret)
+        self.assertEqual(refreshed.owning_main_id, self.parent)
+        self.assertEqual(refreshed.sender_id, self.parent)
+        self.assertEqual(refreshed.role, "main")
+
     def test_only_parent_main_can_create_one_deterministic_spec_chat(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)

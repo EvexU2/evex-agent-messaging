@@ -89,6 +89,12 @@ class McpServer:
                     arguments["checkout"],
                 )
             else:
+                if "message" not in arguments and "text" in arguments:
+                    return self._error(
+                        request_id,
+                        -32602,
+                        "send_message requires the structured 'message' argument; 'text' is not accepted",
+                    )
                 value = self._service.send_message(
                     capability_ref,
                     uuid.UUID(arguments["targetId"]),

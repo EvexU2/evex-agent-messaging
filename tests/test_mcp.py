@@ -72,6 +72,28 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(response["result"]["structuredContent"], {"accepted": True, "messageKey": "key"})
         self.assertEqual(self.service.calls, [("evx2_capability", target, "key", self.message())])
 
+    def test_send_message_explains_stale_text_argument_without_accepting_it(self):
+        target = uuid.uuid4()
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "targetId": str(target),
+                    "messageKey": "key",
+                    "text": json.dumps(self.message()),
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "send_message requires the structured 'message' argument; 'text' is not accepted",
+        })
+        self.assertEqual(self.service.calls, [])
+
     def test_missing_capability_and_unknown_tool_fail_closed(self):
         target = str(uuid.uuid4())
         missing = self.server.handle({"id": 1, "method": "tools/call", "params": {"name": "send_message", "arguments": {"targetId": target, "messageKey": "key", "message": self.message()}}})

@@ -46,6 +46,23 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["checkout"])
         self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
+        message_schema = TOOLS[1]["inputSchema"]["properties"]["message"]
+        self.assertIn("never a JSON-encoded string", message_schema["description"])
+        self.assertEqual(message_schema["required"], ["humanSummary", "aiEvidence"])
+        self.assertFalse(message_schema["additionalProperties"])
+        evidence_schema = message_schema["properties"]["aiEvidence"]
+        self.assertEqual(
+            evidence_schema["required"],
+            ["outcome", "evidence", "findings", "nextBoundary"],
+        )
+        self.assertFalse(evidence_schema["additionalProperties"])
+        self.assertEqual(
+            set(evidence_schema["properties"]),
+            {"outcome", "revision", "evidence", "findings", "nextBoundary"},
+        )
+        self.assertEqual(evidence_schema["properties"]["evidence"]["items"]["type"], "string")
+        self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
+
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):
         checkout = {
             "repository": "EvexU2/evex-u-workspace",
@@ -91,6 +108,28 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(response["error"], {
             "code": -32602,
             "message": "send_message requires the structured 'message' argument; 'text' is not accepted",
+        })
+        self.assertEqual(self.service.calls, [])
+
+    def test_send_message_explains_json_encoded_message_without_accepting_it(self):
+        target = uuid.uuid4()
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "targetId": str(target),
+                    "messageKey": "key",
+                    "message": json.dumps(self.message()),
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "send_message 'message' must be an object, not a JSON-encoded string",
         })
         self.assertEqual(self.service.calls, [])
 

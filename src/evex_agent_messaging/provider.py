@@ -506,7 +506,6 @@ class OpenHandsProvider:
         target_id: uuid.UUID,
         message_key: str,
         message: dict[str, Any],
-        recipient_capability_ref: str | None = None,
     ) -> dict[str, Any]:
         if self.api_key and self.api_key in json.dumps(message, ensure_ascii=False):
             raise ProviderError("message contains a configured credential")
@@ -523,15 +522,6 @@ class OpenHandsProvider:
             allow_nan=False,
         )
         projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
-        if recipient_capability_ref is not None:
-            self._request(
-                "POST",
-                f"/api/conversations/{target_id}/secrets",
-                {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
-                    "kind": "StaticSecret",
-                    "value": recipient_capability_ref,
-                }}},
-            )
         self._request(
             "POST",
             f"/api/conversations/{target_id}/events",

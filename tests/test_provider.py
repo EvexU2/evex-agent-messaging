@@ -445,30 +445,6 @@ class OpenHandsProviderTest(unittest.TestCase):
         envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
         self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "key-1", "senderId": str(self.parent)})
 
-    def test_send_message_refreshes_a_supplied_recipient_capability_before_wake(self):
-        provider, transport = self.provider([{}, {}])
-
-        result = provider.send_message(
-            self.parent,
-            self.spec,
-            "key-2",
-            {"humanSummary": "Review again", "aiEvidence": {"outcome": "review", "evidence": [], "findings": [], "nextBoundary": "author"}},
-            "evx2_refreshed",
-        )
-
-        self.assertEqual(result, {"accepted": True, "messageKey": "key-2"})
-        self.assertEqual(transport.calls[0], (
-            "POST",
-            f"/api/conversations/{self.spec}/secrets",
-            {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
-                "kind": "StaticSecret", "value": "evx2_refreshed",
-            }}},
-        ))
-        self.assertEqual(
-            transport.calls[1][1],
-            f"/api/conversations/{self.spec}/events",
-        )
-
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])
         provider = OpenHandsProvider(

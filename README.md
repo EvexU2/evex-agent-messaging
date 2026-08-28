@@ -25,7 +25,8 @@ capability. The capability identifies the sender and owning Parent. Before posti
 the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
 relationship from their admission tags. It never searches or inventories Conversations.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
-refresh lifecycle.
+refresh lifecycle. Ordinary messages therefore post only the target event and never rewrite target
+secrets.
 
 The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
 most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.

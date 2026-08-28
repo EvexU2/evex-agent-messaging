@@ -15,9 +15,6 @@ from .capability import (
 )
 
 
-_REPOSITORY = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_HEAD = re.compile(r"^[0-9a-f]{40}$")
-_BRANCH = re.compile(r"^[A-Za-z0-9._/-]{1,160}$")
 _MESSAGE_KEY = re.compile(r"^[\x21-\x7e]{1,200}$")
 _CREDENTIAL = re.compile(
     r"(?:\b(?:sk|gh[pousr])_[A-Za-z0-9_-]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|"
@@ -37,7 +34,6 @@ class MessagingProvider(Protocol):
         self,
         parent_id: uuid.UUID,
         spec_chat_id: uuid.UUID,
-        checkout: dict[str, str],
         capability_ref: str,
     ) -> dict[str, Any]: ...
 
@@ -76,7 +72,6 @@ class MessagingService:
     def create_spec_chat(
         self,
         token: str,
-        checkout: object,
     ) -> dict[str, Any]:
         capability = inspect_capability(token, self._secret)
         if (
@@ -84,7 +79,6 @@ class MessagingService:
             or capability.sender_id != capability.owning_main_id
         ):
             raise CapabilityError("only a Parent Main may create the Spec Chat")
-        bound_checkout = self._validated_checkout(checkout)
         spec_chat_id = deterministic_spec_chat_id(capability.sender_id)
         spec_capability = capability_token(
             self._secret,
@@ -96,39 +90,9 @@ class MessagingService:
         result = self._provider.create_spec_chat(
             capability.sender_id,
             spec_chat_id,
-            bound_checkout,
             spec_capability,
         )
         return {**result, "specChatId": str(spec_chat_id)}
-
-    @staticmethod
-    def _validated_checkout(checkout: object) -> dict[str, str]:
-        if not isinstance(checkout, dict) or set(checkout) != {
-            "repository",
-            "branch",
-            "headSha",
-        }:
-            raise CapabilityError("checkout must contain repository, branch, and headSha")
-        repository, branch, head = (
-            checkout.get("repository"),
-            checkout.get("branch"),
-            checkout.get("headSha"),
-        )
-        if (
-            not isinstance(repository, str)
-            or _REPOSITORY.fullmatch(repository) is None
-            or not isinstance(branch, str)
-            or _BRANCH.fullmatch(branch) is None
-            or branch.startswith(("/", "-"))
-            or branch.endswith(("/", "."))
-            or ".." in branch
-            or "//" in branch
-            or "@{" in branch
-            or not isinstance(head, str)
-            or _HEAD.fullmatch(head) is None
-        ):
-            raise CapabilityError("Spec Chat checkout authority is invalid")
-        return {"repository": repository, "branch": branch, "headSha": head}
 
     def send_message(
         self,

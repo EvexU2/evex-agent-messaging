@@ -21,6 +21,7 @@ _DURABLE_ROLES = {"parent-main", "child-main", "spec"}
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _SPEC_MODEL = "gpt-5.6-sol"
 _SPEC_REASONING = "high"
+_WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
 
 
 class ProviderError(RuntimeError):
@@ -80,7 +81,6 @@ class OpenHandsProvider:
         self,
         parent_id: uuid.UUID,
         spec_chat_id: uuid.UUID,
-        checkout: dict[str, str],
         capability_ref: str,
     ) -> dict[str, Any]:
         parent_value = self._request("GET", f"/api/conversations/{parent_id}")
@@ -94,10 +94,11 @@ class OpenHandsProvider:
         ):
             raise ProviderError("Parent Main identity is invalid")
         issue_repository, issue_number = issue_ref.rsplit("#", 1)
-        if checkout["repository"] != issue_repository or not issue_number.isdigit():
-            raise ProviderError("Spec Chat checkout does not match the owning Issue")
-        parent_checkout = self._validated_parent_checkout(
-            parent_value, parent_tags, issue_number, checkout
+        if issue_repository != _WORKSPACE_REPOSITORY or not issue_number.isdigit():
+            raise ProviderError("Parent Main Issue identity is invalid")
+        branch = f"spec/issue-{issue_number}"
+        parent_checkout, parent_head = self._validated_parent_checkout(
+            parent_value, parent_tags, issue_number
         )
 
         lock = _CHECKOUT_LOCKS[spec_chat_id.int % len(_CHECKOUT_LOCKS)]
@@ -107,8 +108,10 @@ class OpenHandsProvider:
                 spec_chat_id,
                 issue_ref,
                 issue_number,
-                checkout,
+                issue_repository,
+                branch,
                 parent_checkout,
+                parent_head,
                 capability_ref,
             )
 
@@ -118,10 +121,17 @@ class OpenHandsProvider:
         spec_chat_id: uuid.UUID,
         issue_ref: str,
         issue_number: str,
-        checkout: dict[str, str],
+        repository: str,
+        branch: str,
         parent_checkout: Path,
+        parent_head: str,
         capability_ref: str,
     ) -> dict[str, Any]:
+        checkout = {
+            "repository": repository,
+            "branch": branch,
+            "headSha": parent_head,
+        }
         prompt = (
             "EVEX_SPEC_CHAT\n"
             f"Issue: https://github.com/{issue_ref.replace('#', '/issues/')}\n"
@@ -196,10 +206,10 @@ class OpenHandsProvider:
         self._validate_existing_spec(
             verified, parent_id, spec_chat_id, issue_ref, issue_number, checkout
         )
+        observed_head = self._validate_existing_checkout(
+            self._checkout_path(spec_chat_id), checkout, exact=False
+        )
         if not created:
-            self._validate_existing_checkout(
-                self._checkout_path(spec_chat_id), checkout, exact=False
-            )
             self._request(
                 "POST",
                 f"/api/conversations/{spec_chat_id}/secrets",
@@ -228,6 +238,11 @@ class OpenHandsProvider:
             ),
             "provider": "openhands",
             "created": created,
+            "checkout": {
+                "repository": repository,
+                "branch": branch,
+                "headSha": observed_head,
+            },
         }
 
     @staticmethod
@@ -246,7 +261,6 @@ class OpenHandsProvider:
             "evexparent": str(parent_id),
             "evexrepository": checkout["repository"],
             "evexbranch": checkout["branch"],
-            "evexbasehead": checkout["headSha"],
             "evexmodel": _SPEC_MODEL,
             "evexreasoning": _SPEC_REASONING,
             "evexlocale": "de-DE",
@@ -314,12 +328,10 @@ class OpenHandsProvider:
         parent: dict,
         tags: dict[str, Any],
         issue_number: str,
-        checkout: dict[str, str],
-    ) -> Path:
+    ) -> tuple[Path, str]:
         if (
-            tags.get("evexsourcerepository") != checkout["repository"]
+            tags.get("evexsourcerepository") != _WORKSPACE_REPOSITORY
             or tags.get("evexsourcebranch") != "main"
-            or checkout["branch"] != f"spec/issue-{issue_number}"
         ):
             raise ProviderError("Parent Main checkout authority does not match Spec request")
         workspace = parent.get("workspace")
@@ -332,16 +344,17 @@ class OpenHandsProvider:
         path = Path(working_dir) if isinstance(working_dir, str) else None
         if path != expected or path.is_symlink():
             raise ProviderError("Parent Main checkout path does not match authority")
-        self._validate_existing_checkout(
+        head = self._validate_existing_checkout(
             expected,
             {
-                "repository": checkout["repository"],
+                "repository": _WORKSPACE_REPOSITORY,
                 "branch": "main",
-                "headSha": checkout["headSha"],
+                "headSha": "",
             },
-            exact=True,
+            exact=False,
+            require_clean=True,
         )
-        return expected
+        return expected, head
 
     def _ensure_checkout(
         self,
@@ -406,8 +419,13 @@ class OpenHandsProvider:
                 shutil.rmtree(temporary, ignore_errors=True)
 
     def _validate_existing_checkout(
-        self, path: Path, checkout: dict[str, str], *, exact: bool
-    ) -> None:
+        self,
+        path: Path,
+        checkout: dict[str, str],
+        *,
+        exact: bool,
+        require_clean: bool = False,
+    ) -> str:
         try:
             if path.is_symlink() or not path.is_dir() or path.resolve() != path:
                 raise ProviderError("Spec Chat checkout is not an isolated directory")
@@ -426,8 +444,9 @@ class OpenHandsProvider:
             raise ProviderError("Spec Chat checkout branch does not match authority")
         if exact and head != checkout["headSha"]:
             raise ProviderError("Spec Chat checkout head does not match authority")
-        if exact and dirty:
+        if (exact or require_clean) and dirty:
             raise ProviderError("Spec Chat checkout must be clean before creation")
+        return head
 
     @staticmethod
     def _git(path: Path, *arguments: str) -> str:

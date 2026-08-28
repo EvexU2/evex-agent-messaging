@@ -69,7 +69,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexparent=str(self.parent),
             evexrepository="EvexU2/evex-u-workspace",
             evexbranch="spec/issue-40",
-            evexbasehead="a" * 40,
             evexmodel="gpt-5.6-sol",
             evexreasoning="high",
         )
@@ -96,23 +95,27 @@ class OpenHandsProviderTest(unittest.TestCase):
             patch.object(
                 provider,
                 "_validated_parent_checkout",
-                return_value=parent_checkout,
+                return_value=(parent_checkout, "a" * 40),
             ),
             patch.object(provider, "_ensure_checkout") as ensure,
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
         ):
             result = provider.create_spec_chat(
                 self.parent,
                 self.spec,
-                checkout,
                 "evx2_spec",
             )
 
         self.assertTrue(result["created"])
+        self.assertEqual(result["checkout"], checkout)
         self.assertEqual(result["conversationUrl"], f"http://openhands.local/canvas/conversations/{self.spec}")
         ensure.assert_called_once_with(self.spec, checkout, parent_checkout)
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
         self.assertEqual(create[2]["tags"]["evexlocale"], "de-DE")
+        self.assertNotIn("evexbasehead", create[2]["tags"])
         self.assertEqual(create[2]["language"], "de-DE")
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
         self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
@@ -137,8 +140,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexissue="EvexU2/evex-u-workspace#40",
             evexparent=str(self.parent),
             evexrepository="EvexU2/evex-u-workspace",
-            evexbranch="main",
-            evexbasehead="a" * 40,
+            evexbranch="spec/issue-40",
             evexmodel="gpt-5.6-sol",
             evexreasoning="high",
         )
@@ -146,29 +148,32 @@ class OpenHandsProviderTest(unittest.TestCase):
         existing["current_model_id"] = "gpt-5.6-sol"
         provider, transport = self.provider([parent, existing, {}, existing, {}])
         provider.workspace_root = "/tmp"
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "main",
-            "headSha": "a" * 40,
-        }
-
         with (
             patch.object(
                 provider,
                 "_validated_parent_checkout",
-                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"),
+                    "a" * 40,
+                ),
             ),
-            patch.object(provider, "_validate_existing_checkout"),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="b" * 40
+            ),
             patch.object(provider, "_has_initial_prompt", return_value=True),
         ):
             result = provider.create_spec_chat(
                 self.parent,
                 self.spec,
-                checkout,
                 "evx2_current",
             )
 
         self.assertFalse(result["created"])
+        self.assertEqual(result["checkout"], {
+            "repository": "EvexU2/evex-u-workspace",
+            "branch": "spec/issue-40",
+            "headSha": "b" * 40,
+        })
         self.assertIn((
             "POST",
             f"/api/conversations/{self.spec}/secrets",
@@ -197,7 +202,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexparent=str(self.parent),
             evexrepository="EvexU2/evex-u-workspace",
             evexbranch="spec/issue-40",
-            evexbasehead="a" * 40,
             evexmodel="gpt-5.6-sol",
             evexreasoning="high",
         )
@@ -215,24 +219,23 @@ class OpenHandsProviderTest(unittest.TestCase):
             {},
         ])
         provider.workspace_root = "/tmp"
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "spec/issue-40",
-            "headSha": "a" * 40,
-        }
-
         with (
             patch.object(
                 provider,
                 "_validated_parent_checkout",
-                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"),
+                    "a" * 40,
+                ),
             ),
             patch.object(provider, "_ensure_checkout"),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
         ):
             result = provider.create_spec_chat(
                 self.parent,
                 self.spec,
-                checkout,
                 "evx2_spec",
             )
 
@@ -259,7 +262,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             evexparent=str(self.parent),
             evexrepository="EvexU2/evex-u-workspace",
             evexbranch="spec/issue-40",
-            evexbasehead="a" * 40,
             evexmodel="gpt-5.6-sol",
             evexreasoning="high",
         )
@@ -288,24 +290,22 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"items": [prompt_event]},
         ])
         provider.workspace_root = "/tmp"
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "spec/issue-40",
-            "headSha": "a" * 40,
-        }
-
         with (
             patch.object(
                 provider,
                 "_validated_parent_checkout",
-                return_value=Path("/tmp/issue-40-source/evex-u-workspace"),
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"),
+                    "a" * 40,
+                ),
             ),
-            patch.object(provider, "_validate_existing_checkout"),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
         ):
             result = provider.create_spec_chat(
                 self.parent,
                 self.spec,
-                checkout,
                 "evx2_spec",
             )
 
@@ -356,9 +356,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             }
             self.assertEqual(
                 provider._validated_parent_checkout(
-                    parent, parent_tags, "40", checkout
+                    parent, parent_tags, "40"
                 ),
-                source.resolve(),
+                (source.resolve(), head),
             )
 
             provider._ensure_checkout(self.spec, checkout, source)
@@ -373,6 +373,10 @@ class OpenHandsProviderTest(unittest.TestCase):
             )
             self.assertFalse((root / "mirrors").exists())
 
+            (source / "uncommitted.md").write_text("dirty\n")
+            with self.assertRaisesRegex(ProviderError, "must be clean"):
+                provider._validated_parent_checkout(parent, parent_tags, "40")
+
     def test_parent_checkout_identity_mismatch_fails_before_spec_mutation(self):
         parent = discussion(
             self.parent,
@@ -385,14 +389,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
         provider, transport = self.provider([parent])
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "spec/issue-40",
-            "headSha": "a" * 40,
-        }
-
         with self.assertRaisesRegex(ProviderError, "Parent Main checkout authority"):
-            provider.create_spec_chat(self.parent, self.spec, checkout, "evx1_spec")
+            provider.create_spec_chat(self.parent, self.spec, "evx1_spec")
 
         self.assertEqual(len(transport.calls), 1)
 

@@ -9,13 +9,14 @@ and does not control native subagents.
 The MCP exposes exactly:
 
 ```text
-create_spec_chat(checkout)
+create_spec_chat()
 send_message(targetId, messageKey, message)
 ```
 
 Only Parent Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
-Spec Chat, validates the Parent's exact clean `EvexU2/evex-u-workspace` `main` checkout, and derives
-one independent isolated Spec checkout from it locally at the exact admitted head. Messaging needs no
+Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Parent
+Discussion, validates the Parent's clean `main` checkout, and derives one independent isolated Spec
+checkout from its observed head. The caller supplies no repository, branch, or SHA. Messaging needs no
 GitHub credential, public-egress rule, or shared mirror for this operation. It fixes the role to Spec
 on Sol/high and returns its stable ID and Canvas URL. The operation has no generic role, Mission,
 callback, task-control, or Conversation-search surface.
@@ -46,6 +47,10 @@ allowed. The receiver re-reads GitHub, Git, Spec, and runtime facts before actin
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
 resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state.
 Native Plan, Writer, Review, QA, Repair, and Spec Review use their owning Discussion's task handles.
+
+Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
+observations never become caller authority or replay input; an existing deterministic Spec Chat and
+checkout win on replay.
 
 ## Run
 

@@ -43,7 +43,11 @@ class McpServerTest(unittest.TestCase):
             [tool["name"] for tool in response["result"]["tools"]],
             ["create_spec_chat", "send_message"],
         )
-        self.assertEqual(TOOLS[0]["inputSchema"]["required"], ["checkout"])
+        self.assertEqual(TOOLS[0]["inputSchema"], {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {},
+        })
         self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
         message_schema = TOOLS[1]["inputSchema"]["properties"]["message"]
@@ -64,19 +68,45 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
 
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):
-        checkout = {
-            "repository": "EvexU2/evex-u-workspace",
-            "branch": "spec/issue-42",
-            "headSha": "a" * 40,
-        }
         response = self.server.handle({
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": "create_spec_chat", "arguments": {"checkout": checkout}},
+            "params": {"name": "create_spec_chat", "arguments": {}},
         }, capability_ref="evx2_capability")
         self.assertEqual(response["result"]["structuredContent"]["specChatId"], "spec-id")
-        self.assertEqual(self.service.calls, [("evx2_capability", checkout)])
+        self.assertEqual(self.service.calls, [("evx2_capability",)])
+
+    def test_create_spec_chat_rejects_every_legacy_argument(self):
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {
+                "name": "create_spec_chat",
+                "arguments": {"checkout": {"baseHead": "a" * 40}},
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "create_spec_chat accepts no arguments",
+        })
+        self.assertEqual(self.service.calls, [])
+
+    def test_create_spec_chat_rejects_non_object_arguments(self):
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "create_spec_chat", "arguments": []},
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "invalid messaging request",
+        })
+        self.assertEqual(self.service.calls, [])
 
     def test_send_message_uses_transport_bound_capability(self):
         target = uuid.uuid4()

@@ -10,7 +10,7 @@ The MCP exposes exactly:
 
 ```text
 create_spec_chat(checkout)
-send_message(targetId, messageKey, text)
+send_message(targetId, messageKey, message)
 ```
 
 Only Parent Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
@@ -26,6 +26,17 @@ the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact 
 relationship from their admission tags. It never searches or inventories Conversations.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
 refresh lifecycle.
+
+The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
+most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.
+The canonical compact JSON is at most 20,000 UTF-8 bytes. The provider visibly projects only the
+summary and places the canonical envelope in a versioned renderer-hidden machine block, preserving
+the exact evidence for the receiver without a legacy raw-text path. Malformed, oversized,
+credential-bearing, or unrenderable input fails before any provider mutation with a bounded
+content-free error.
+
+Every newly created Spec Chat starts human dialogue in `de-DE`; an explicit language change stays on
+that Chat when it is reused. Durable artifacts remain English.
 
 The provider then posts one bounded user event and returns `accepted: true` only after OpenHands accepts
 that request. `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are

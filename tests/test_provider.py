@@ -28,6 +28,8 @@ class FakeTransport:
 
 
 def discussion(conversation_id, role, **tags):
+    if role == "spec":
+        tags.setdefault("evexlocale", "de-DE")
     return {
         "id": str(conversation_id),
         "tags": {"project": "evex-u", "evexdeliveryrole": role, **tags},
@@ -110,6 +112,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         ensure.assert_called_once_with(self.spec, checkout, parent_checkout)
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
+        self.assertEqual(create[2]["tags"]["evexlocale"], "de-DE")
+        self.assertEqual(create[2]["language"], "de-DE")
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
         self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
@@ -424,15 +428,22 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertFalse(provider.target_allowed(self.parent, self.child, "main", self.parent))
         self.assertFalse(any("search" in path for _, path, _ in transport.calls))
 
-    def test_send_message_posts_one_bounded_event_without_polling(self):
+    def test_send_message_projects_visible_summary_and_hidden_canonical_evidence(self):
         provider, transport = self.provider([{}])
-        result = provider.send_message(self.parent, self.child, "key-1", "review passed")
+        message = {
+            "humanSummary": "Review passed; no action is needed.",
+            "aiEvidence": {"outcome": "passed", "evidence": ["tests: PASS"], "findings": [], "nextBoundary": "merge"},
+        }
+        result = provider.send_message(self.parent, self.child, "key-1", message)
         self.assertEqual(result, {"accepted": True, "messageKey": "key-1"})
         self.assertEqual(len(transport.calls), 1)
         method, path, body = transport.calls[0]
         self.assertEqual((method, path), ("POST", f"/api/conversations/{self.child}/events"))
-        envelope = json.loads(body["content"][0]["text"])
-        self.assertEqual(envelope, {"messageKey": "key-1", "senderId": str(self.parent), "text": "review passed"})
+        projection = body["content"][0]["text"]
+        self.assertTrue(projection.startswith(message["humanSummary"] + "\n<!-- evex-agent-message:v1 "))
+        self.assertTrue(projection.endswith(" -->"))
+        envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
+        self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "key-1", "senderId": str(self.parent)})
 
     def test_send_message_refreshes_a_supplied_recipient_capability_before_wake(self):
         provider, transport = self.provider([{}, {}])
@@ -441,7 +452,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             self.parent,
             self.spec,
             "key-2",
-            "review again",
+            {"humanSummary": "Review again", "aiEvidence": {"outcome": "review", "evidence": [], "findings": [], "nextBoundary": "author"}},
             "evx2_refreshed",
         )
 
@@ -457,6 +468,22 @@ class OpenHandsProviderTest(unittest.TestCase):
             transport.calls[1][1],
             f"/api/conversations/{self.spec}/events",
         )
+
+    def test_configured_credential_is_rejected_before_provider_mutation(self):
+        transport = FakeTransport([])
+        provider = OpenHandsProvider(
+            "http://openhands", "configured-secret", transport=transport,
+        )
+
+        with self.assertRaisesRegex(ProviderError, "configured credential"):
+            provider.send_message(
+                self.parent,
+                self.child,
+                "key",
+                {"humanSummary": "Delivery passed", "aiEvidence": {"outcome": "configured-secret", "evidence": [], "findings": [], "nextBoundary": "review"}},
+            )
+
+        self.assertEqual(transport.calls, [])
 
     def test_invalid_identity_and_readiness_fail_closed(self):
         provider, _ = self.provider([{"id": "bad", "tags": {}}])

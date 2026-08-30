@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import io
 from pathlib import Path
 import subprocess
 import sys
@@ -13,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evex_agent_messaging.provider import OpenHandsProvider, ProviderError  # noqa: E402
+from evex_agent_messaging.capability import capability_token  # noqa: E402
+from evex_agent_messaging.service import MessagingService  # noqa: E402
+from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
 
 
 class FakeTransport:
@@ -518,6 +522,85 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider.target_allowed(self.parent, self.child, "main", self.parent)
         provider, _ = self.provider([{"active_agent_profile_id": "acp"}])
         self.assertTrue(provider.readiness())
+
+
+class ConversationResponseBudgetTest(unittest.TestCase):
+    LIMIT = 1024 * 1024
+
+    def setUp(self):
+        self.parent, self.child = uuid.uuid4(), uuid.uuid4()
+        self.capability = capability_token(
+            b"test-secret", owning_main_id=self.parent, sender_id=self.child,
+            task_key="issue-927", role="deputy",
+        )
+        self.provider = OpenHandsProvider("http://openhands", "test-api-key")
+        self.server = McpServer(MessagingService(self.provider, b"test-secret"))
+        self.request = {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "send_message", "arguments": {
+                "targetId": str(self.parent), "messageKey": "final-review",
+                "message": {"humanSummary": "Review passed", "aiEvidence": {
+                    "outcome": "PASS", "evidence": [], "findings": [], "nextBoundary": "spec review",
+                }},
+            }},
+        }
+
+    def parent_bytes(self, size, **overrides):
+        value = discussion(self.parent, "parent-main")
+        value["stats"] = {"per_turn": "private-statistics" + "x" * 66000}
+        value.update(overrides)
+        raw = json.dumps(value).encode()
+        self.assertLessEqual(len(raw), size)
+        return raw + b" " * (size - len(raw))
+
+    def send(self, raw):
+        class Response(io.BytesIO):
+            def read(inner, size=-1):
+                inner.read_limit = size
+                return super().read(size)
+
+        response = Response(raw)
+        with patch("urllib.request.urlopen", side_effect=[response, io.BytesIO(b"{}")]) as http:
+            result = self.server.handle(self.request, capability_ref=self.capability)
+        return result, http.call_args_list, response.read_limit
+
+    def test_long_running_parent_and_exact_limit_allow_one_authorized_event(self):
+        for size in (69143, self.LIMIT):
+            with self.subTest(size=size):
+                result, calls, read_limit = self.send(self.parent_bytes(size))
+                self.assertEqual(result["result"]["structuredContent"], {
+                    "accepted": True, "messageKey": "final-review",
+                })
+                self.assertEqual([call.args[0].method for call in calls], ["GET", "POST"])
+                self.assertEqual(calls[0].args[0].full_url, f"http://openhands/api/conversations/{self.parent}")
+                self.assertEqual(calls[1].args[0].full_url, f"http://openhands/api/conversations/{self.parent}/events")
+                self.assertTrue(json.loads(calls[1].args[0].data)["run"])
+                self.assertEqual(read_limit, self.LIMIT + 1)
+                self.assertEqual([call.kwargs["timeout"] for call in calls], [5.0, 5.0])
+
+    def test_over_limit_fails_before_parsing_or_event_post(self):
+        with patch("evex_agent_messaging.provider.json.loads", wraps=json.loads) as parse:
+            result, calls, read_limit = self.send(b"x" * (self.LIMIT + 1))
+        self.assertFalse(any(isinstance(call.args[0], bytes) for call in parse.call_args_list))
+        self.assertEqual(result["error"]["code"], -32000)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].args[0].method, "GET")
+        self.assertEqual(read_limit, self.LIMIT + 1)
+        self.assertNotIn("private-statistics", json.dumps(result))
+
+    def test_large_invalid_id_or_target_role_cannot_authorize_a_post(self):
+        for overrides in (
+            {"id": str(uuid.uuid4())},
+            {"id": "invalid"},
+            {"tags": {"project": "foreign", "evexdeliveryrole": "parent-main"}},
+            {"tags": {"project": "evex-u", "evexdeliveryrole": "spec"}},
+        ):
+            with self.subTest(overrides=overrides):
+                result, calls, _ = self.send(self.parent_bytes(69143, **overrides))
+                self.assertIn("error", result)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(calls[0].args[0].method, "GET")
+                self.assertNotIn("private-statistics", json.dumps(result))
 
 
 if __name__ == "__main__":

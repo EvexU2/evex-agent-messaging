@@ -16,7 +16,9 @@ import urllib.request
 import uuid
 
 
-_MAX_RESPONSE_BYTES = 65_536
+# Exact Conversation responses include growing usage statistics, not only identity tags.
+# Keep a finite transport budget independent of the much smaller outgoing message limit.
+_MAX_RESPONSE_BYTES = 1024 * 1024
 _DURABLE_ROLES = {"parent-main", "child-main", "spec"}
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _SPEC_MODEL = "gpt-5.6-sol"

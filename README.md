@@ -25,6 +25,9 @@ Only Parent Main, direct Child Main, and interactive Spec Chat receive a transpo
 capability. The capability identifies the sender and owning Parent. Before posting, the provider reads
 the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
 relationship from their admission tags. It never searches or inventories Conversations.
+Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
+usage statistics. This transport bound does not increase the 20,000-byte outgoing message budget;
+over-limit responses still fail before parsing or dependent event delivery.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
 refresh lifecycle. Ordinary messages therefore post only the target event and never rewrite target
 secrets.

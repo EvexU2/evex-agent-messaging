@@ -197,7 +197,6 @@ class OpenHandsProvider:
                 "autotitle": False,
                 "max_iterations": 300,
                 "mcp_config": {},
-                "language": "de-DE",
                 "secrets": {
                     "EVEX_ENVIRONMENT_ID": {
                         "kind": "StaticSecret", "value": self.environment_id,
@@ -223,8 +222,7 @@ class OpenHandsProvider:
                     "system_message_suffix_append": (
                         "EVEX role scope: interactive Spec Chat. Use the admitted checkout, "
                         "EVEX Spec skills, native read-only review subagents, and send_message "
-                        "only to the bound Parent Main. Conduct new human dialogue in German "
-                        "(de-DE) unless that Chat's human changes its language."
+                        "only to the bound Parent Main."
                     )
                 },
             }
@@ -315,7 +313,6 @@ class OpenHandsProvider:
             "evexbranch": checkout["branch"],
             "evexmodel": _SPEC_MODEL,
             "evexreasoning": _SPEC_REASONING,
-            "evexlocale": "de-DE",
             "evexenvironment": self.environment_id,
             "evexintakelabel": self.intake_label,
         }

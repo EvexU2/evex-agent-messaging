@@ -38,8 +38,6 @@ class FakeTransport:
 
 
 def discussion(conversation_id, role, **tags):
-    if role == "spec":
-        tags.setdefault("evexlocale", "de-DE")
     return {
         "id": str(conversation_id),
         "tags": {
@@ -131,13 +129,19 @@ class OpenHandsProviderTest(unittest.TestCase):
         ensure.assert_called_once_with(self.spec, checkout, parent_checkout)
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
-        self.assertEqual(create[2]["tags"]["evexlocale"], "de-DE")
         self.assertEqual(create[2]["tags"]["evexenvironment"], "dev:lars")
         self.assertEqual(create[2]["tags"]["evexintakelabel"], "agent:dev:ready:lars")
         self.assertEqual(create[2]["secrets"]["EVEX_ENVIRONMENT_ID"]["value"], "dev:lars")
         self.assertEqual(create[2]["secrets"]["EVEX_INTAKE_LABEL"]["value"], "agent:dev:ready:lars")
+        self.assertNotIn("evexlocale", create[2]["tags"])
         self.assertNotIn("evexbasehead", create[2]["tags"])
-        self.assertEqual(create[2]["language"], "de-DE")
+        self.assertNotIn("language", create[2])
+        self.assertEqual(
+            create[2]["agent_launch_additions"]["system_message_suffix_append"],
+            "EVEX role scope: interactive Spec Chat. Use the admitted checkout, "
+            "EVEX Spec skills, native read-only review subagents, and send_message "
+            "only to the bound Parent Main.",
+        )
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
         self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
@@ -167,6 +171,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         existing["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
         existing["current_model_id"] = "gpt-5.6-sol"
+        existing["language"] = "fr-FR"
         provider, transport = self.provider([parent, existing, {}, existing, {}])
         provider.workspace_root = "/tmp"
         with (
@@ -190,6 +195,12 @@ class OpenHandsProviderTest(unittest.TestCase):
             )
 
         self.assertFalse(result["created"])
+        self.assertEqual(existing["language"], "fr-FR")
+        for method, path, body in transport.calls:
+            if method in {"POST", "PATCH"} and isinstance(body, dict):
+                with self.subTest(method=method, path=path):
+                    self.assertNotIn("language", body)
+                    self.assertNotIn("agent_launch_additions", body)
         self.assertEqual(result["checkout"], {
             "repository": "EvexU2/evex-u-workspace",
             "branch": "spec/issue-40",

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+import base64
+import hashlib
+import hmac
+import struct
 import sys
 import unittest
 import uuid
@@ -16,6 +20,7 @@ from evex_agent_messaging.capability import (  # noqa: E402
     deterministic_spec_chat_id,
 )
 from evex_agent_messaging.service import MessagingService  # noqa: E402
+from evex_agent_messaging import capability as capabilities  # noqa: E402
 
 
 class FakeProvider:
@@ -75,6 +80,88 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(capability.role, "deputy")
         with self.assertRaises(CapabilityError):
             inspect_capability(self.child_token()[:-1] + "x", self.secret)
+
+    def test_frozen_v2_capability_bytes_are_unchanged(self):
+        owner = uuid.UUID("11111111-1111-4111-8111-111111111111")
+        sender = uuid.UUID("22222222-2222-4222-8222-222222222222")
+        expected = {
+            "main": "evx2_AhEREREREUERgRERERERERERERERERFBEYERERERERERAQMABHJvb3Rutjf5dleSJ6vwP79dGatYJTDYi2U70A5PWLatyaH9Rg",
+            "deputy": "evx2_AhEREREREUERgREREREREREiIiIiIiJCIoIiIiIiIiIiAgIACGlzc3VlLTQyYX3YyOqYyAG-eSWChzl7mtZ2uGquaUVQglzWuFG_B4c",
+            "spec": "evx2_AhEREREREUERgREREREREREiIiIiIiJCIoIiIiIiIiIiAwIACGlzc3VlLTQyXYd27yB8UqwCn9U_CZABuo9D_g_RN-SUR41KZNucBXU",
+        }
+        for role, frozen in expected.items():
+            with self.subTest(role=role):
+                token = capability_token(
+                    b"frozen-test-secret", owning_main_id=owner,
+                    sender_id=owner if role == "main" else sender,
+                    task_key="root" if role == "main" else "issue-42", role=role,
+                )
+                self.assertEqual(token, frozen)
+                self.assertEqual(inspect_capability(token, b"frozen-test-secret").role, role)
+
+    def test_project_capability_is_distinct_deterministic_and_send_only(self):
+        token = capabilities.project_capability_token(self.secret, self.child, "native-project-id")
+        self.assertEqual(token, capabilities.project_capability_token(self.secret, self.child, "native-project-id"))
+        self.assertTrue(token.startswith("evx3_"))
+        parsed = inspect_capability(token, self.secret)
+        self.assertIsInstance(parsed, capabilities.ProjectCapability)
+        self.assertEqual((parsed.sender_id, parsed.project_id, parsed.role), (self.child, "native-project-id", "project"))
+        self.assertFalse(hasattr(parsed, "owning_main_id"))
+        self.assertFalse(hasattr(parsed, "task_key"))
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        with self.assertRaises(CapabilityError):
+            service.create_spec_chat(token)
+        self.assertEqual(provider.calls, [])
+        service.send_message(token, self.parent, "project-result", self.message())
+        self.assertEqual(provider.calls[0], ("allowed", (self.child, self.parent, "project", None, "native-project-id")))
+        self.assertEqual([call[0] for call in provider.calls], ["allowed", "send"])
+
+    def test_project_and_delivery_capabilities_cannot_leak_in_messages(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        for value in (capabilities.project_capability_token(self.secret, self.child, "native-project-id"), self.main_token()):
+            with self.assertRaises(CapabilityError):
+                service.send_message(self.main_token(), self.child, "key", self.message(value))
+            with self.assertRaises(CapabilityError):
+                service.send_message(self.main_token(), self.child, value, self.message())
+        self.assertEqual(provider.calls, [])
+
+    def test_project_capability_rejects_tampering_and_mixed_signed_formats(self):
+        token = capabilities.project_capability_token(self.secret, self.child, "native-project-id")
+        encoded = token.removeprefix("evx3_")
+        payload = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))[:-32]
+
+        def signed(value, prefix="evx3_"):
+            return prefix + base64.urlsafe_b64encode(value + hmac.new(self.secret, value, hashlib.sha256).digest()).rstrip(b"=").decode()
+
+        malformed = [
+            "evx3_", "evx3_" + "x" * 1024, token + "=", token[:-2], "evx2_" + encoded,
+            "evx3_" + self.main_token()[5:],
+            signed(bytes([2]) + payload[1:]),
+            signed(payload[:17] + bytes([3]) + payload[18:]),
+            signed(payload[:18] + struct.pack(">H", 999) + payload[20:]),
+            signed(payload + b"extra"),
+            signed(payload[:18] + struct.pack(">H", 1) + b"\x00"),
+            signed(payload[:18] + struct.pack(">H", 1) + b"\xff"),
+            signed(payload[:18] + struct.pack(">H", 257) + b"x" * 257),
+        ]
+        raw = bytearray(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+        raw[3] ^= 1
+        malformed.append("evx3_" + base64.urlsafe_b64encode(raw).rstrip(b"=").decode())
+        for value in malformed:
+            with self.subTest(value=value), self.assertRaises(CapabilityError):
+                inspect_capability(value, self.secret)
+        with self.assertRaises(CapabilityError):
+            inspect_capability(token, b"foreign-secret")
+
+    def test_project_capability_ids_are_bounded_opaque_visible_ascii(self):
+        for value in ("", "x" * 257, "with space", "\n", "ä", None, 4):
+            with self.subTest(value=value), self.assertRaises(CapabilityError):
+                capabilities.project_capability_token(self.secret, self.child, value)
+        for value in ("x", "opaque:project-id", "x" * 256):
+            token = capabilities.project_capability_token(self.secret, self.child, value)
+            self.assertEqual(inspect_capability(token, self.secret).project_id, value)
 
     def test_signed_capability_remains_valid_for_the_discussion_lifetime(self):
         provider = FakeProvider()

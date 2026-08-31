@@ -9,15 +9,18 @@ import uuid
 
 from .capability import (
     CapabilityError,
+    ProjectCapability,
     capability_token,
     deterministic_spec_chat_id,
     inspect_capability,
+    project_capability_token,
 )
 
 
 _MESSAGE_KEY = re.compile(r"^[\x21-\x7e]{1,200}$")
 _CREDENTIAL = re.compile(
     r"(?:\b(?:sk|gh[pousr])_[A-Za-z0-9_-]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|"
+    r"\bevx[23]_[A-Za-z0-9_-]+|"
     r"\bBearer\s+\S+|\b(?:authorization|x-session-api-key)\s*:|"
     r"\b(?:EVEX_MESSAGING_SECRET|OPENHANDS_API_KEY)\b)",
     re.IGNORECASE,
@@ -30,6 +33,14 @@ _MAX_EVIDENCE_ITEM_BYTES = 2_000
 
 
 class MessagingProvider(Protocol):
+    def provisioning_allowed(self, credential: str | None) -> bool: ...
+
+    def project_binding(self, conversation_id: uuid.UUID) -> str: ...
+
+    def install_project_capability(
+        self, conversation_id: uuid.UUID, project_id: str, capability_ref: str,
+    ) -> dict[str, Any]: ...
+
     def create_spec_chat(
         self,
         parent_id: uuid.UUID,
@@ -42,7 +53,8 @@ class MessagingProvider(Protocol):
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         role: str,
-        owning_main_id: uuid.UUID,
+        owning_main_id: uuid.UUID | None,
+        project_id: str | None = None,
     ) -> bool: ...
 
     def send_message(
@@ -68,6 +80,28 @@ class MessagingService:
             return bool(self._provider.readiness())
         except Exception:
             return False
+
+    def provisioning_allowed(self, credential: str | None) -> bool:
+        return self._provider.provisioning_allowed(credential)
+
+    def provision_project_capability(self, request: object) -> dict[str, Any]:
+        """Private host trigger only; never called by public MCP operations."""
+        error = CapabilityError("invalid Project capability request")
+        if (
+            not isinstance(request, dict) or set(request) != {"schemaVersion", "conversationId"}
+            or type(request["schemaVersion"]) is not int or request["schemaVersion"] != 1
+            or not isinstance(request["conversationId"], str)
+        ):
+            raise error
+        try:
+            conversation_id = uuid.UUID(request["conversationId"])
+        except ValueError:
+            raise error from None
+        if str(conversation_id) != request["conversationId"]:
+            raise error
+        project_id = self._provider.project_binding(conversation_id)
+        token = project_capability_token(self._secret, conversation_id, project_id)
+        return self._provider.install_project_capability(conversation_id, project_id, token)
 
     def create_spec_chat(
         self,
@@ -111,12 +145,15 @@ class MessagingService:
         ):
             raise CapabilityError("messageKey must be bounded and non-empty")
         bounded_message = self._validated_message(message)
-        if not self._provider.target_allowed(
-            capability.sender_id,
-            target_id,
-            capability.role,
-            capability.owning_main_id,
-        ):
+        if isinstance(capability, ProjectCapability):
+            allowed = self._provider.target_allowed(
+                capability.sender_id, target_id, capability.role, None, capability.project_id,
+            )
+        else:
+            allowed = self._provider.target_allowed(
+                capability.sender_id, target_id, capability.role, capability.owning_main_id,
+            )
+        if not allowed:
             raise CapabilityError("message target is not allowed")
         return self._provider.send_message(
             capability.sender_id,

@@ -12,9 +12,13 @@ import uuid
 
 
 REFERENCE_PREFIX = "evx2_"
+PROJECT_REFERENCE_PREFIX = "evx3_"
+NATIVE_ID_MAX_BYTES = 256
+_NATIVE_ID = re.compile(rf"^[\x21-\x7e]{{1,{NATIVE_ID_MAX_BYTES}}}$")
 SPEC_CHAT_NAMESPACE = uuid.UUID("ab1fbaf1-cc0e-4a2e-9cf2-6e4cb2ee8c89")
 TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEADER = struct.Struct(">B16s16sBBH")
+_PROJECT_HEADER = struct.Struct(">B16sBH")
 _SIGNATURE_BYTES = 32
 _ROLE_IDS = {"main": 1, "deputy": 2, "spec": 3}
 _ROLES = {value: key for key, value in _ROLE_IDS.items()}
@@ -32,6 +36,27 @@ class Capability:
     sender_id: uuid.UUID
     task_key: str
     role: str
+
+
+@dataclass(frozen=True)
+class ProjectCapability:
+    sender_id: uuid.UUID
+    project_id: str
+    role: str = "project"
+
+
+def valid_native_id(value: object) -> bool:
+    """Treat native node IDs as opaque, bounded visible ASCII, not invented prefixes."""
+    return isinstance(value, str) and _NATIVE_ID.fullmatch(value) is not None
+
+
+def project_capability_token(secret: bytes, sender_id: uuid.UUID, project_id: str) -> str:
+    if not secret or not isinstance(sender_id, uuid.UUID) or not valid_native_id(project_id):
+        raise CapabilityError("invalid Project capability inputs")
+    project = project_id.encode("ascii")
+    payload = _PROJECT_HEADER.pack(3, sender_id.bytes, _SEND_MESSAGE_BIT, len(project)) + project
+    signature = hmac.new(secret, payload, hashlib.sha256).digest()
+    return PROJECT_REFERENCE_PREFIX + _b64(payload + signature)
 
 
 def deterministic_spec_chat_id(owning_main_id: uuid.UUID) -> uuid.UUID:
@@ -93,20 +118,38 @@ def main_capability_token(
     )
 
 
-def inspect_capability(token: str, secret: bytes) -> Capability:
+def inspect_capability(token: str, secret: bytes) -> Capability | ProjectCapability:
     error = CapabilityError("unknown or invalid capability reference")
-    if not isinstance(token, str) or not token.startswith(REFERENCE_PREFIX) or not secret:
+    if not isinstance(token, str) or not secret:
+        raise error
+    if token.startswith(PROJECT_REFERENCE_PREFIX):
+        prefix, header = PROJECT_REFERENCE_PREFIX, _PROJECT_HEADER
+    elif token.startswith(REFERENCE_PREFIX):
+        prefix, header = REFERENCE_PREFIX, _HEADER
+    else:
         raise error
     try:
-        encoded = token[len(REFERENCE_PREFIX) :]
+        # Bound input before decoding while preserving every existing v2 token byte.
+        if len(token) > 512:
+            raise error
+        encoded = token[len(prefix) :]
         raw = _unb64(encoded)
         if _b64(raw) != encoded:
             raise error
-        if len(raw) < _HEADER.size + _SIGNATURE_BYTES:
+        if len(raw) < header.size + _SIGNATURE_BYTES:
             raise error
         payload, signature = raw[:-_SIGNATURE_BYTES], raw[-_SIGNATURE_BYTES:]
         if not hmac.compare_digest(hmac.new(secret, payload, hashlib.sha256).digest(), signature):
             raise error
+        if prefix == PROJECT_REFERENCE_PREFIX:
+            version, sender, actions, project_length = header.unpack(payload[:header.size])
+            project = payload[header.size:].decode("ascii")
+            if (
+                version != 3 or actions != _SEND_MESSAGE_BIT
+                or len(project) != project_length or not valid_native_id(project)
+            ):
+                raise error
+            return ProjectCapability(uuid.UUID(bytes=sender), project)
         version, owner, sender, role_id, actions, task_length = _HEADER.unpack(
             payload[: _HEADER.size]
         )

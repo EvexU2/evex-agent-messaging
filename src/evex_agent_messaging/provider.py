@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import http.client
+import hmac
 import json
 from pathlib import Path
 import shutil
@@ -14,6 +15,8 @@ from typing import Any, Callable
 import urllib.error
 import urllib.request
 import uuid
+
+from .capability import valid_native_id
 
 
 # Exact Conversation responses include growing usage statistics, not only identity tags.
@@ -78,6 +81,42 @@ class OpenHandsProvider:
         except ProviderError:
             return False
         return isinstance(value.get("active_agent_profile_id"), str)
+
+    def provisioning_allowed(self, credential: str | None) -> bool:
+        # This existing service credential authenticates the trigger, never the PM.
+        return (
+            isinstance(credential, str) and bool(self.api_key.strip())
+            and hmac.compare_digest(credential.encode(), self.api_key.encode())
+        )
+
+    def project_binding(self, conversation_id: uuid.UUID) -> str:
+        value = self._request("GET", f"/api/conversations/{conversation_id}")
+        admission = self._project_admission(value, conversation_id)
+        if admission["role"] != "project":
+            raise ProviderError("Project capability admission is unavailable or invalid")
+        return admission["project"]["id"]
+
+    def install_project_capability(
+        self, conversation_id: uuid.UUID, project_id: str, capability_ref: str,
+    ) -> dict[str, Any]:
+        # The host must revalidate admission and compare live/durable state under its
+        # existing secrets lock. No client-side comparison, receipt, or retry is safe.
+        response = self._request("POST", f"/api/conversations/{conversation_id}/secrets", {
+            "secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                "kind": "StaticSecret", "value": capability_ref,
+            }},
+        })
+        binding = response.get("evexProjectCapability")
+        if (
+            set(response) != {"success", "evexProjectCapability"} or response["success"] is not True
+            or not isinstance(binding, dict)
+            or set(binding) != {"schemaVersion", "conversationId", "projectId", "bindingVerified"}
+            or type(binding["schemaVersion"]) is not int or binding["schemaVersion"] != 1
+            or binding["conversationId"] != str(conversation_id) or binding["projectId"] != project_id
+            or binding["bindingVerified"] is not True
+        ):
+            raise ProviderError("Project capability binding is unverified")
+        return binding
 
     def create_spec_chat(
         self,
@@ -501,10 +540,29 @@ class OpenHandsProvider:
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         role: str,
-        owning_main_id: uuid.UUID,
+        owning_main_id: uuid.UUID | None,
+        project_id: str | None = None,
     ) -> bool:
+        target = self._request("GET", f"/api/conversations/{target_id}")
+        if role == "project" or (role == "main" and "evexProjectAdmission" in target):
+            # Read BOTH exact objects for every Project send; no cache or tag fallback.
+            sender = self._request("GET", f"/api/conversations/{sender_id}")
+            sender_admission = self._project_admission(sender, sender_id)
+            target_admission = self._project_admission(target, target_id)
+            if role == "project":
+                project, parent = sender_admission, target_admission
+                if project_id != project["project"]["id"]:
+                    return False
+            else:
+                project, parent = target_admission, sender_admission
+                if sender_id != owning_main_id:
+                    return False
+            return (
+                project["role"] == "project" and parent["role"] == "parent-main"
+                and project["project"] == parent["project"]
+            )
         target_identity, target_tags, target_role = self._identity(
-            self._request("GET", f"/api/conversations/{target_id}")
+            target
         )
         if target_identity != target_id:
             return False
@@ -522,6 +580,64 @@ class OpenHandsProvider:
         return (target_role == "child-main" and same_parent_issue) or (
             target_role == "spec" and (same_parent_issue or explicit_parent)
         )
+
+    @staticmethod
+    def _canonical_uuid(value: object) -> bool:
+        if not isinstance(value, str):
+            return False
+        try:
+            return str(uuid.UUID(value)) == value
+        except ValueError:
+            return False
+
+    @classmethod
+    def _project_admission(cls, value: dict, conversation_id: uuid.UUID) -> dict:
+        """Consume only the authenticated host's fresh server-computed projection.
+
+        Its presence attests host-verified role, attributable PM-event provenance and
+        current native GitHub facts. Tags, viewers and generic turn state cannot fill gaps.
+        """
+        error = ProviderError("Project relationship admission is unavailable or invalid")
+        identities = [value[key] for key in ("id", "conversation_id") if key in value]
+        admission = value.get("evexProjectAdmission")
+        if (
+            not identities or any(identity != str(conversation_id) for identity in identities)
+            or not isinstance(admission, dict)
+            or set(admission) != {"schemaVersion", "conversationId", "role", "lifecycle", "project", "root"}
+            or type(admission["schemaVersion"]) is not int or admission["schemaVersion"] != 1
+            or admission["conversationId"] != str(conversation_id)
+            or admission["role"] not in ("project", "parent-main")
+            or admission["lifecycle"] != "eligible"
+        ):
+            raise error
+        project = admission["project"]
+        if (
+            not isinstance(project, dict)
+            or set(project) != {"id", "accountablePmId", "nominatedChatId", "state", "accountability", "subjectAccess"}
+            or not valid_native_id(project["id"]) or not valid_native_id(project["accountablePmId"])
+            or not cls._canonical_uuid(project["nominatedChatId"])
+            or project["state"] != "open" or project["accountability"] != "unique"
+            or project["subjectAccess"] != "allowed"
+        ):
+            raise error
+        root = admission["root"]
+        if admission["role"] == "project":
+            if root is not None or project["nominatedChatId"] != str(conversation_id):
+                raise error
+        elif (
+            not isinstance(root, dict)
+            or set(root) != {"id", "repository", "number", "parentMainId", "accountableProjectId", "accountablePmId", "pmAssigned", "membershipProjectId", "state", "projectChatAccess"}
+            or not valid_native_id(root["id"]) or root["repository"] != _WORKSPACE_REPOSITORY
+            or type(root["number"]) is not int or root["number"] <= 0
+            or root["parentMainId"] != str(conversation_id)
+            or root["accountableProjectId"] != project["id"]
+            or root["membershipProjectId"] != project["id"]
+            or root["accountablePmId"] != project["accountablePmId"]
+            or root["pmAssigned"] is not True or root["state"] != "eligible"
+            or root["projectChatAccess"] != "allowed"
+        ):
+            raise error
+        return admission
 
     def send_message(
         self,

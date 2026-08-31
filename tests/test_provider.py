@@ -19,6 +19,12 @@ from evex_agent_messaging.service import MessagingService  # noqa: E402
 from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
 
 
+def configured_provider(*args, **kwargs):
+    return OpenHandsProvider(
+        *args, environment_id="dev:lars", intake_label="agent:dev:ready:lars", **kwargs,
+    )
+
+
 class FakeTransport:
     def __init__(self, responses):
         self.responses, self.calls = list(responses), []
@@ -36,7 +42,11 @@ def discussion(conversation_id, role, **tags):
         tags.setdefault("evexlocale", "de-DE")
     return {
         "id": str(conversation_id),
-        "tags": {"project": "evex-u", "evexdeliveryrole": role, **tags},
+        "tags": {
+            "project": "evex-u", "evexdeliveryrole": role,
+            "evexenvironment": "dev:lars", "evexintakelabel": "agent:dev:ready:lars",
+            **tags,
+        },
     }
 
 
@@ -46,7 +56,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def provider(self, responses):
         transport = FakeTransport(responses)
-        return OpenHandsProvider(
+        return configured_provider(
             "http://openhands",
             "key",
             transport=transport,
@@ -83,6 +93,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             ProviderError("missing", status=404),
             {"active_agent_profile_id": "acp"},
             {},
+            created,
             {},
             {},
             created,
@@ -121,6 +132,10 @@ class OpenHandsProviderTest(unittest.TestCase):
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
         self.assertEqual(create[2]["tags"]["evexlocale"], "de-DE")
+        self.assertEqual(create[2]["tags"]["evexenvironment"], "dev:lars")
+        self.assertEqual(create[2]["tags"]["evexintakelabel"], "agent:dev:ready:lars")
+        self.assertEqual(create[2]["secrets"]["EVEX_ENVIRONMENT_ID"]["value"], "dev:lars")
+        self.assertEqual(create[2]["secrets"]["EVEX_INTAKE_LABEL"]["value"], "agent:dev:ready:lars")
         self.assertNotIn("evexbasehead", create[2]["tags"])
         self.assertEqual(create[2]["language"], "de-DE")
         self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
@@ -343,7 +358,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            provider = OpenHandsProvider(
+            provider = configured_provider(
                 "http://openhands",
                 "key",
                 public_url="http://openhands.local/canvas",
@@ -403,7 +418,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            provider = OpenHandsProvider(
+            provider = configured_provider(
                 "http://openhands",
                 "key",
                 public_url="http://openhands.local/canvas",
@@ -459,7 +474,11 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_child_and_spec_can_target_only_their_bound_parent(self):
         for role in ("deputy", "spec"):
-            provider, transport = self.provider([discussion(self.parent, "parent-main")])
+            provider, transport = self.provider([
+                discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40"),
+                discussion(self.child, "child-main" if role == "deputy" else "spec",
+                           evexparentissue="EvexU2/evex-u-workspace#40"),
+            ])
             self.assertTrue(provider.target_allowed(self.child, self.parent, role, self.parent))
             self.assertEqual(transport.calls[0][1], f"/api/conversations/{self.parent}")
         provider, _ = self.provider([discussion(self.child, "child-main")])
@@ -502,7 +521,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])
-        provider = OpenHandsProvider(
+        provider = configured_provider(
             "http://openhands", "configured-secret", transport=transport,
         )
 
@@ -533,7 +552,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
             b"test-secret", owning_main_id=self.parent, sender_id=self.child,
             task_key="issue-927", role="deputy",
         )
-        self.provider = OpenHandsProvider("http://openhands", "test-api-key")
+        self.provider = configured_provider("http://openhands", "test-api-key")
         self.server = McpServer(MessagingService(self.provider, b"test-secret"))
         self.request = {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -546,7 +565,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
         }
 
     def parent_bytes(self, size, **overrides):
-        value = discussion(self.parent, "parent-main")
+        value = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40")
         value["stats"] = {"per_turn": "private-statistics" + "x" * 66000}
         value.update(overrides)
         raw = json.dumps(value).encode()
@@ -560,7 +579,10 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 return super().read(size)
 
         response = Response(raw)
-        with patch("urllib.request.urlopen", side_effect=[response, io.BytesIO(b"{}")]) as http:
+        sender = json.dumps(discussion(
+            self.child, "child-main", evexparentissue="EvexU2/evex-u-workspace#40",
+        )).encode()
+        with patch("urllib.request.urlopen", side_effect=[response, io.BytesIO(sender), io.BytesIO(b"{}")]) as http:
             result = self.server.handle(self.request, capability_ref=self.capability)
         return result, http.call_args_list, response.read_limit
 
@@ -571,12 +593,12 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 self.assertEqual(result["result"]["structuredContent"], {
                     "accepted": True, "messageKey": "final-review",
                 })
-                self.assertEqual([call.args[0].method for call in calls], ["GET", "POST"])
+                self.assertEqual([call.args[0].method for call in calls], ["GET", "GET", "POST"])
                 self.assertEqual(calls[0].args[0].full_url, f"http://openhands/api/conversations/{self.parent}")
-                self.assertEqual(calls[1].args[0].full_url, f"http://openhands/api/conversations/{self.parent}/events")
-                self.assertTrue(json.loads(calls[1].args[0].data)["run"])
+                self.assertEqual(calls[2].args[0].full_url, f"http://openhands/api/conversations/{self.parent}/events")
+                self.assertTrue(json.loads(calls[2].args[0].data)["run"])
                 self.assertEqual(read_limit, self.LIMIT + 1)
-                self.assertEqual([call.kwargs["timeout"] for call in calls], [5.0, 5.0])
+                self.assertEqual([call.kwargs["timeout"] for call in calls], [5.0, 5.0, 5.0])
 
     def test_over_limit_fails_before_parsing_or_event_post(self):
         with patch("evex_agent_messaging.provider.json.loads", wraps=json.loads) as parse:

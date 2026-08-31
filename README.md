@@ -23,8 +23,8 @@ callback, task-control, or Conversation-search surface.
 
 Only Parent Main, direct Child Main, and interactive Spec Chat receive a transport-bound HMAC Bearer
 capability. The capability identifies the sender and owning Parent. Before posting, the provider reads
-the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
-relationship from their admission tags. It never searches or inventories Conversations.
+both the exact target and sender Discussions and verifies their relationship and operator-matching
+environment context from admission tags. It never searches or inventories Conversations.
 Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
 usage statistics. This transport bound does not increase the 20,000-byte outgoing message budget;
 over-limit responses still fail before parsing or dependent event delivery.
@@ -58,6 +58,8 @@ checkout win on replay.
 ## Run
 
 ```sh
+export EVEX_ENVIRONMENT_ID='dev:lars'
+export EVEX_INTAKE_LABEL='agent:dev:ready:lars'
 export EVEX_MESSAGING_SECRET='long-random-secret'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
@@ -65,6 +67,21 @@ export OPENHANDS_API_KEY='server-only-key'
 export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```
+
+Both environment inputs are required without defaults or whitespace normalization. Production must
+explicitly configure `production` with `agent:ready`; development uses `dev:<developer>` with
+`agent:dev:ready:<developer>`. The developer suffix matches `[a-z0-9][a-z0-9-]{0,33}`.
+A development environment cannot use the production label.
+
+The Parent's `evexenvironment` and `evexintakelabel` tags must match this deployment before
+Spec lifecycle mutations. New Spec Chats receive the same pair in tags and runtime secrets;
+reuse validates context and checkout before model, capability, or event mutation. Every message
+requires current sender and target facts with the same configured pair. Missing, malformed, duplicate,
+or foreign context is rejected; untagged existing Discussions require fresh valid admission, not an
+automatic context backfill. The per-environment HMAC format and public MCP shapes are unchanged.
+Internal messaging does not read GitHub labels or acquire GitHub credentials, and removing an Issue
+intake label does not stop these already-admitted internal Conversations. There is no environment
+handover, new service, state store, or background loop.
 
 The trusted host supplies the per-Discussion capability as the MCP Bearer credential. Agents never
 read or pass it as a tool argument. The OpenHands session credential stays server-side.

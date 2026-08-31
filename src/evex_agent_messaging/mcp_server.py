@@ -222,8 +222,16 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
+    try:
+        provider = OpenHandsProvider(
+            base_url, api_key, public_url=public_url,
+            environment_id=os.environ.get("EVEX_ENVIRONMENT_ID", ""),
+            intake_label=os.environ.get("EVEX_INTAKE_LABEL", ""),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
     server = McpServer(MessagingService(
-        OpenHandsProvider(base_url, api_key, public_url=public_url),
+        provider,
         secret.encode(),
     ))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":

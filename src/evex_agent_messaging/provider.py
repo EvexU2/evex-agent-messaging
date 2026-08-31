@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import http.client
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,10 +37,40 @@ class ProviderError(RuntimeError):
 class OpenHandsProvider:
     base_url: str
     api_key: str
+    environment_id: str
+    intake_label: str
     timeout: float = 5.0
     transport: Callable[[str, str, dict | None], dict] | None = None
     public_url: str = ""
     workspace_root: str = "/home/openhands/workspace/delivery"
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.environment_id, str) or not isinstance(self.intake_label, str):
+            raise ValueError("EVEX_ENVIRONMENT_ID and EVEX_INTAKE_LABEL are required")
+        if self.environment_id == "production":
+            expected = "agent:ready"
+        elif re.fullmatch(r"dev:[a-z0-9][a-z0-9-]{0,33}", self.environment_id):
+            expected = f"agent:dev:ready:{self.environment_id.removeprefix('dev:')}"
+        else:
+            raise ValueError("EVEX_ENVIRONMENT_ID is invalid")
+        if self.intake_label != expected:
+            raise ValueError("EVEX_INTAKE_LABEL does not match EVEX_ENVIRONMENT_ID")
+
+    @staticmethod
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ProviderError("OpenHands returned duplicate response fields")
+            value[key] = item
+        return value
+
+    def _validate_environment(self, tags: dict[str, Any]) -> None:
+        if (
+            tags.get("evexenvironment") != self.environment_id
+            or tags.get("evexintakelabel") != self.intake_label
+        ):
+            raise ProviderError("OpenHands Discussion environment does not match deployment")
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         if self.transport is not None:
@@ -63,7 +94,7 @@ class OpenHandsProvider:
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ProviderError("OpenHands response exceeds bounded byte budget")
         try:
-            value = json.loads(raw) if raw else {}
+            value = json.loads(raw, object_pairs_hook=self._unique_object) if raw else {}
         except json.JSONDecodeError as exc:
             raise ProviderError("OpenHands returned an invalid response") from exc
         if not isinstance(value, dict):
@@ -87,6 +118,7 @@ class OpenHandsProvider:
     ) -> dict[str, Any]:
         parent_value = self._request("GET", f"/api/conversations/{parent_id}")
         parent_identity, parent_tags, parent_role = self._identity(parent_value)
+        self._validate_environment(parent_tags)
         issue_ref = parent_tags.get("evexissue")
         if (
             parent_identity != parent_id
@@ -142,6 +174,7 @@ class OpenHandsProvider:
             "EVEX Spec skills. Start by reading the current Issue and living Specification."
         )
         created = False
+        existing = None
         try:
             existing = self._request("GET", f"/api/conversations/{spec_chat_id}")
         except ProviderError as exc:
@@ -166,6 +199,12 @@ class OpenHandsProvider:
                 "mcp_config": {},
                 "language": "de-DE",
                 "secrets": {
+                    "EVEX_ENVIRONMENT_ID": {
+                        "kind": "StaticSecret", "value": self.environment_id,
+                    },
+                    "EVEX_INTAKE_LABEL": {
+                        "kind": "StaticSecret", "value": self.intake_label,
+                    },
                     "EVEX_AGENT_ROLE": {"kind": "StaticSecret", "value": "spec"},
                     "EVEX_AGENT_INSTANCE_ID": {
                         "kind": "StaticSecret",
@@ -194,17 +233,26 @@ class OpenHandsProvider:
                 created = True
             except ProviderError as create_error:
                 try:
-                    self._request("GET", f"/api/conversations/{spec_chat_id}")
+                    existing = self._request("GET", f"/api/conversations/{spec_chat_id}")
                 except ProviderError:
                     raise create_error
                 created = create_error.status != 409
+            if existing is None:
+                existing = self._request("GET", f"/api/conversations/{spec_chat_id}")
+
+        self._validate_existing_spec(
+            existing, parent_id, spec_chat_id, issue_ref, issue_number, checkout,
+            require_model=False,
+        )
+        self._validate_existing_checkout(
+            self._checkout_path(spec_chat_id), checkout, exact=False
+        )
+        if created:
             self._request(
                 "PATCH",
                 f"/api/conversations/{spec_chat_id}",
                 {"title": f"#{issue_number} · Spec"},
             )
-            existing = None
-
         self._switch_and_verify_spec_model(spec_chat_id)
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")
         self._validate_existing_spec(
@@ -249,8 +297,8 @@ class OpenHandsProvider:
             },
         }
 
-    @staticmethod
     def _spec_tags(
+        self,
         parent_id: uuid.UUID,
         issue_ref: str,
         issue_number: str,
@@ -268,6 +316,8 @@ class OpenHandsProvider:
             "evexmodel": _SPEC_MODEL,
             "evexreasoning": _SPEC_REASONING,
             "evexlocale": "de-DE",
+            "evexenvironment": self.environment_id,
+            "evexintakelabel": self.intake_label,
         }
 
     def _validate_existing_spec(
@@ -278,8 +328,11 @@ class OpenHandsProvider:
         issue_ref: str,
         issue_number: str,
         checkout: dict[str, str],
+        *,
+        require_model: bool = True,
     ) -> None:
         identity, tags, role = self._identity(value)
+        self._validate_environment(tags)
         workspace = value.get("workspace")
         working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
         try:
@@ -295,7 +348,7 @@ class OpenHandsProvider:
             or role != "spec"
             or any(tags.get(key) != expected for key, expected in expected_tags.items())
             or not workspace_matches
-            or value.get("current_model_id") != _SPEC_MODEL
+            or (require_model and value.get("current_model_id") != _SPEC_MODEL)
         ):
             raise ProviderError("Existing Spec Chat does not match authority")
 
@@ -509,18 +562,36 @@ class OpenHandsProvider:
         target_identity, target_tags, target_role = self._identity(
             self._request("GET", f"/api/conversations/{target_id}")
         )
+        self._validate_environment(target_tags)
         if target_identity != target_id:
             return False
         if role in {"deputy", "spec"}:
-            return target_id == owning_main_id and target_role in {"parent-main", "child-main"}
-        if role != "main":
+            if target_id != owning_main_id or target_role != "parent-main":
+                return False
+        elif role != "main" or owning_main_id != sender_id:
             return False
         sender_identity, sender_tags, sender_role = self._identity(
             self._request("GET", f"/api/conversations/{sender_id}")
         )
-        if sender_identity != sender_id or sender_role != "parent-main":
+        self._validate_environment(sender_tags)
+        if sender_identity != sender_id:
             return False
-        same_parent_issue = target_tags.get("evexparentissue") == sender_tags.get("evexissue")
+        if role in {"deputy", "spec"}:
+            expected_role = "child-main" if role == "deputy" else "spec"
+            same_parent_issue = (
+                isinstance(target_tags.get("evexissue"), str)
+                and sender_tags.get("evexparentissue") == target_tags["evexissue"]
+            )
+            explicit_parent = sender_tags.get("evexparent") == str(target_id)
+            return sender_role == expected_role and (
+                same_parent_issue or (role == "spec" and explicit_parent)
+            )
+        if sender_role != "parent-main":
+            return False
+        same_parent_issue = (
+            isinstance(sender_tags.get("evexissue"), str)
+            and target_tags.get("evexparentissue") == sender_tags["evexissue"]
+        )
         explicit_parent = target_tags.get("evexparent") == str(sender_id)
         return (target_role == "child-main" and same_parent_issue) or (
             target_role == "spec" and (same_parent_issue or explicit_parent)

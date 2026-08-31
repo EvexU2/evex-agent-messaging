@@ -249,8 +249,8 @@ def validate_openhands_url(value: str, *, public: bool, production: bool) -> Non
             and parsed.password is None
             and (parsed.port is None or 1 <= parsed.port <= 65535)
             and parsed.path.rstrip("/") == ("/canvas" if public else "")
-            and not parsed.query
-            and not parsed.fragment
+            and "?" not in value
+            and "#" not in value
             and (not production or (
                 not is_local_or_ambiguous_host(parsed.hostname)
                 and (not public or parsed.scheme == "https")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from urllib.parse import urlsplit
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -213,6 +214,29 @@ def bearer_capability(value: str | None) -> str | None:
     return token if " " not in token else None
 
 
+def validate_openhands_url(value: str, *, public: bool) -> None:
+    name = "OPENHANDS_PUBLIC_URL" if public else "OPENHANDS_URL"
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            bool(value)
+            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+            and parsed.scheme in {"http", "https"}
+            and bool(parsed.hostname)
+            and not parsed.netloc.endswith(":")
+            and parsed.username is None
+            and parsed.password is None
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+            and parsed.path.rstrip("/") == ("/canvas" if public else "")
+            and not parsed.query
+            and not parsed.fragment
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise SystemExit(f"{name} is invalid")
+
+
 def main() -> int:
     secret = os.environ.get("EVEX_MESSAGING_SECRET", "")
     base_url = os.environ.get("OPENHANDS_URL", "")
@@ -222,6 +246,17 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
+    validate_openhands_url(base_url, public=False)
+    validate_openhands_url(public_url, public=True)
+    transport = os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio")
+    if transport not in {"http", "stdio"}:
+        raise SystemExit("EVEX_MESSAGING_TRANSPORT must be http or stdio")
+    host = os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0")
+    if not host or any(char.isspace() or char in "/?#@" or ord(char) < 32 or ord(char) == 127 for char in host):
+        raise SystemExit("EVEX_MESSAGING_HOST is invalid")
+    port = os.environ.get("EVEX_MESSAGING_PORT", "3101")
+    if not port.isascii() or not port.isdigit() or len(port) > 5 or not 1 <= int(port) <= 65535:
+        raise SystemExit("EVEX_MESSAGING_PORT must be an integer from 1 to 65535")
     try:
         provider = OpenHandsProvider(
             base_url, api_key, public_url=public_url,
@@ -234,8 +269,8 @@ def main() -> int:
         provider,
         secret.encode(),
     ))
-    if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
-        serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
+    if transport == "http":
+        serve_http(server, host, int(port))
     else:
         serve(server)
     return 0

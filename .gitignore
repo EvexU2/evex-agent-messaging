@@ -2,3 +2,7 @@ __pycache__/
 .venv/
 .pytest_cache/
 *.py[cod]
+
+# Private operator configuration is never source.
+.env
+.env.*

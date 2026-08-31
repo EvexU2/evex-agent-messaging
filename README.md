@@ -57,14 +57,34 @@ checkout win on replay.
 
 ## Run
 
+Use the single operator configuration in `evex-u-k8s/.env`, prepared from that repository's
+`.env.example`. Its preflight maps approved values into `evex-agent-platform`; do not create a
+second Messaging `.env` template. This Python service reads its process environment only: it does
+not parse or source an `.env` file.
+
+| Service input | Kubernetes / canonical configuration source | Standalone behavior |
+| --- | --- | --- |
+| `EVEX_ENVIRONMENT_ID` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
+| `EVEX_INTAKE_LABEL` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
+| `OPENHANDS_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) internal origin; no path except `/` |
+| `OPENHANDS_PUBLIC_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) public URL ending in `/canvas` (optional trailing slash) |
+| `EVEX_MESSAGING_SECRET` | Runtime-managed `openhands-auth` Secret, same key | Trusted host supplies the existing per-environment HMAC secret |
+| `OPENHANDS_API_KEY` | Runtime-managed `openhands-auth` Secret, key `LOCAL_BACKEND_API_KEY` | Trusted host supplies the existing OpenHands session key |
+| `EVEX_MESSAGING_TRANSPORT` | Fixed deployment value `http` | Optional `http` or `stdio`; default `stdio` |
+| `EVEX_MESSAGING_HOST` | Default bind address `0.0.0.0` | Optional nonempty bind host/IP |
+| `EVEX_MESSAGING_PORT` | Fixed deployment value `3101` | Optional integer `1`–`65535`; default `3101` |
+
+Transport, host, and port are standalone controls, not extra canonical `.env` inputs. Kubernetes
+Service/probe ports remain coordinated deployment constants. Both URLs reject credentials, query,
+fragment, whitespace, and malformed ports. Invalid configuration fails before serving with a sanitized
+error; a transport typo never silently selects stdio.
+
+The OpenHands session key and Messaging signing secret remain stable runtime-managed credentials.
+Do not copy them into the canonical `.env`, export them blindly from Kubernetes, regenerate them
+on startup, or replace them with a personal GitHub token. The trusted standalone launcher supplies
+these credentials securely as part of the six required inputs, then runs:
+
 ```sh
-export EVEX_ENVIRONMENT_ID='dev:lars'
-export EVEX_INTAKE_LABEL='agent:dev:ready:lars'
-export EVEX_MESSAGING_SECRET='long-random-secret'
-export OPENHANDS_URL='http://openhands:8000'
-export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
-export OPENHANDS_API_KEY='server-only-key'
-export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```
 

@@ -54,6 +54,53 @@ class EnvironmentConfigurationTest(unittest.TestCase):
             serve.assert_not_called()
 
 
+class StandaloneConfigurationTest(unittest.TestCase):
+    def config(self):
+        return {
+            "EVEX_ENVIRONMENT_ID": "dev:lars", "EVEX_INTAKE_LABEL": "agent:dev:ready:lars",
+            "EVEX_MESSAGING_SECRET": "secret", "OPENHANDS_URL": "http://openhands:8000",
+            "OPENHANDS_API_KEY": "key", "OPENHANDS_PUBLIC_URL": "https://example.test/canvas",
+        }
+
+    def test_invalid_configuration_never_serves_or_exposes_value(self):
+        cases = [
+            ("EVEX_MESSAGING_TRANSPORT", value) for value in ("", "HTTP", "htpt", " http")
+        ] + [
+            ("EVEX_MESSAGING_PORT", value) for value in ("", "0", "65536", "-1", " 3101", "3.1", "private-value", "３１０１")
+        ] + [
+            ("EVEX_MESSAGING_HOST", value) for value in ("", " ", "localhost/path", "localhost?secret", "localhost#secret", "http://localhost")
+        ] + [
+            (name, value) for name in ("OPENHANDS_URL", "OPENHANDS_PUBLIC_URL")
+            for value in (" https://example.test/canvas", "https://example.test:private-value/canvas", "https://example.test:/canvas", "https://example.test:65536/canvas", "https://example.test:0/canvas", "https://user:private-value@example.test/canvas", "https://example.test/canvas?private-value", "https://exam\nple.test/canvas", "https://[broken/canvas")
+        ] + [("OPENHANDS_URL", "https://example.test/api"), ("OPENHANDS_PUBLIC_URL", "https://example.test")]
+        for name, value in cases:
+            with self.subTest(name=name, value=value):
+                config = self.config()
+                config[name] = value
+                with patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.serve") as stdio, patch("evex_agent_messaging.mcp_server.serve_http") as http:
+                    with self.assertRaises(SystemExit) as error:
+                        main()
+                    self.assertNotIn("private-value", str(error.exception))
+                    stdio.assert_not_called()
+                    http.assert_not_called()
+
+    def test_stdio_default_and_explicit_http_pass_validated_configuration(self):
+        for transport in (None, "stdio", "http"):
+            with self.subTest(transport=transport):
+                config = self.config()
+                if transport:
+                    config["EVEX_MESSAGING_TRANSPORT"] = transport
+                config.update({"EVEX_MESSAGING_HOST": "127.0.0.1", "EVEX_MESSAGING_PORT": "65535"})
+                with patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.serve") as stdio, patch("evex_agent_messaging.mcp_server.serve_http") as http:
+                    self.assertEqual(main(), 0)
+                    if transport == "http":
+                        self.assertEqual(http.call_args.args[1:], ("127.0.0.1", 65535))
+                        stdio.assert_not_called()
+                    else:
+                        stdio.assert_called_once()
+                        http.assert_not_called()
+
+
 class DiscussionEnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.parent, self.spec, self.child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()

@@ -40,8 +40,12 @@ the exact evidence for the receiver without a legacy raw-text path. Malformed, o
 credential-bearing, or unrenderable input fails before any provider mutation with a bounded
 content-free error.
 
-Every newly created Spec Chat starts human dialogue in `de-DE`; an explicit language change stays on
-that Chat when it is reused. Durable artifacts remain English.
+The canonical EVEX dialogue skills own Eva's language, terminology, and explanation depth. Messaging
+does not impose a conversation language or locale authority tag, and replay does not rewrite the
+conversation's language or launch instructions. The skills follow the user's own prose from the
+first response, retain explicit Chat-local preferences, and use German only when no initial language
+signal exists. Durable artifacts remain English. Existing conversations keep their original launch
+instructions; this change does not migrate or replace them.
 
 The provider then posts one bounded user event and returns `accepted: true` only after OpenHands accepts
 that request. `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are

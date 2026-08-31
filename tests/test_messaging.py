@@ -127,6 +127,27 @@ class MessagingServiceTest(unittest.TestCase):
                 service.send_message(self.main_token(), self.child, value, self.message())
         self.assertEqual(provider.calls, [])
 
+    def test_embedded_capability_review_regression(self):
+        tokens = (capabilities.project_capability_token(self.secret, self.child, "native-project-id"), self.main_token())
+        for token in tokens:
+            for location in ("humanSummary", "aiEvidence", "messageKey"):
+                with self.subTest(version=token[:4], location=location):
+                    provider = FakeProvider()
+                    service = MessagingService(provider, self.secret)
+                    value = "reference_" + token
+                    message, key = self.message(), "key"
+                    if location == "humanSummary":
+                        message["humanSummary"] = value
+                    elif location == "aiEvidence":
+                        message["aiEvidence"]["evidence"] = [value]
+                    else:
+                        key = value
+                    with self.assertRaises(CapabilityError) as error:
+                        service.send_message(self.main_token(), self.child, key, message)
+                    self.assertEqual(provider.calls, [])
+                    self.assertLess(len(str(error.exception)), 200)
+                    self.assertNotIn(token, str(error.exception))
+
     def test_project_capability_rejects_tampering_and_mixed_signed_formats(self):
         token = capabilities.project_capability_token(self.secret, self.child, "native-project-id")
         encoded = token.removeprefix("evx3_")

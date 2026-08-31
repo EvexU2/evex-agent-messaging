@@ -503,8 +503,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             "humanSummary": "Review passed; no action is needed.",
             "aiEvidence": {"outcome": "passed", "evidence": ["tests: PASS"], "findings": [], "nextBoundary": "merge"},
         }
-        result = provider.send_message(self.parent, self.child, "key-1", message)
-        self.assertEqual(result, {"accepted": True, "messageKey": "key-1"})
+        result = provider.send_message(self.parent, self.child, "result-1", message)
+        self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual(len(transport.calls), 1)
         method, path, body = transport.calls[0]
         self.assertEqual((method, path), ("POST", f"/api/conversations/{self.child}/events"))
@@ -512,7 +512,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(projection.startswith(message["humanSummary"] + "\n<!-- evex-agent-message:v1 "))
         self.assertTrue(projection.endswith(" -->"))
         envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
-        self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "key-1", "senderId": str(self.parent)})
+        self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "result-1", "senderId": str(self.parent)})
 
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])
@@ -602,6 +602,21 @@ class ProjectAdmissionTest(unittest.TestCase):
             projected = body["content"][0]["text"]
             envelope = json.loads(projected.split("<!-- evex-agent-message:v1 ", 1)[1].removesuffix(" -->"))
             self.assertEqual(envelope, {**self.message, "messageKey": "later-fact", "senderId": str(sender)})
+
+    def test_project_message_key_credential_review_regression(self):
+        for direction in ("project", "parent-main"):
+            for key in ("private-service-key", "reference_private-service-key"):
+                with self.subTest(direction=direction, key=key):
+                    opposite = "parent-main" if direction == "project" else "project"
+                    service, transport = self.service([
+                        self.conversation(opposite), self.conversation(direction), {},
+                    ])
+                    target = self.parent if direction == "project" else self.chat
+                    with self.assertRaises(ProviderError) as error:
+                        service.send_message(self.token(direction), target, key, self.message)
+                    self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+                    self.assertLess(len(str(error.exception)), 200)
+                    self.assertNotIn("private-service-key", str(error.exception))
 
     def test_project_denial_matrix_in_both_directions_has_zero_mutations(self):
         mutations = [

@@ -646,7 +646,10 @@ class OpenHandsProvider:
         message_key: str,
         message: dict[str, Any],
     ) -> dict[str, Any]:
-        if self.api_key and self.api_key in json.dumps(message, ensure_ascii=False):
+        if self.api_key and (
+            self.api_key in message_key
+            or self.api_key in json.dumps(message, ensure_ascii=False)
+        ):
             raise ProviderError("message contains a configured credential")
         envelope = json.dumps(
             {

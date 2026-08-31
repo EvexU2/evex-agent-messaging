@@ -20,7 +20,7 @@ from .capability import (
 _MESSAGE_KEY = re.compile(r"^[\x21-\x7e]{1,200}$")
 _CREDENTIAL = re.compile(
     r"(?:\b(?:sk|gh[pousr])_[A-Za-z0-9_-]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|"
-    r"\bevx[23]_[A-Za-z0-9_-]+|"
+    r"evx[23]_[A-Za-z0-9_-]+|"
     r"\bBearer\s+\S+|\b(?:authorization|x-session-api-key)\s*:|"
     r"\b(?:EVEX_MESSAGING_SECRET|OPENHANDS_API_KEY)\b)",
     re.IGNORECASE,

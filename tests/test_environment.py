@@ -71,7 +71,7 @@ class StandaloneConfigurationTest(unittest.TestCase):
             ("EVEX_MESSAGING_HOST", value) for value in ("", " ", "localhost/path", "localhost?secret", "localhost#secret", "http://localhost")
         ] + [
             (name, value) for name in ("OPENHANDS_URL", "OPENHANDS_PUBLIC_URL")
-            for value in (" https://example.test/canvas", "https://example.test:private-value/canvas", "https://example.test:/canvas", "https://example.test:65536/canvas", "https://example.test:0/canvas", "https://user:private-value@example.test/canvas", "https://example.test/canvas?private-value", "https://exam\nple.test/canvas", "https://[broken/canvas")
+            for value in (" https://example.test/canvas", "https://example.test:private-value/canvas", "https://example.test:/canvas", "https://example.test:65536/canvas", "https://example.test:0/canvas", "https://user:private-value@example.test/canvas", "https://example.test/canvas?private-value", "https://exam\nple.test/canvas", "https://[broken/canvas", "https://%6cocalhost/canvas", "https://localhost\\evil.org/canvas")
         ] + [("OPENHANDS_URL", "https://example.test/api"), ("OPENHANDS_PUBLIC_URL", "https://example.test")]
         for name, value in cases:
             with self.subTest(name=name, value=value):
@@ -83,6 +83,43 @@ class StandaloneConfigurationTest(unittest.TestCase):
                     self.assertNotIn("private-value", str(error.exception))
                     stdio.assert_not_called()
                     http.assert_not_called()
+
+    def test_production_rejects_local_origins_and_insecure_public_url(self):
+        cases = [("OPENHANDS_PUBLIC_URL", "http://agents.example.org/canvas")]
+        for host in ("localhost", "LOCALHOST.", "openhands.localhost", "127.0.0.1", "127.0.9.3", "[::1]", "0.0.0.0", "[::]", "[::ffff:127.0.0.1]", "[::ffff:0.0.0.0]", "127.1", "2130706433", "0", "0x7f000001", "0177.0.0.1", "ｌｏｃａｌｈｏｓｔ", "１２７.１"):
+            cases.extend((
+                ("OPENHANDS_URL", f"http://{host}:8000"),
+                ("OPENHANDS_PUBLIC_URL", f"https://{host}/canvas"),
+            ))
+        for name, value in cases:
+            with self.subTest(name=name, value=value):
+                config = self.config()
+                config.update({"EVEX_ENVIRONMENT_ID": "production", "EVEX_INTAKE_LABEL": "agent:ready", name: value})
+                with patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.serve") as stdio, patch("evex_agent_messaging.mcp_server.serve_http") as http:
+                    with self.assertRaises(SystemExit):
+                        main()
+                    stdio.assert_not_called()
+                    http.assert_not_called()
+
+    def test_production_accepts_https_public_and_http_service_origin(self):
+        config = self.config()
+        config.update({
+            "EVEX_ENVIRONMENT_ID": "production", "EVEX_INTAKE_LABEL": "agent:ready",
+            "OPENHANDS_URL": "http://openhands.evex-agents.svc.cluster.local:8000",
+            "OPENHANDS_PUBLIC_URL": "https://agents.example.org/canvas",
+        })
+        for public_url in ("https://agents.example.org/canvas", "https://agents.example.org/canvas/"):
+            config["OPENHANDS_PUBLIC_URL"] = public_url
+            with self.subTest(public_url=public_url), patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.serve") as stdio:
+                self.assertEqual(main(), 0)
+                stdio.assert_called_once()
+
+    def test_development_accepts_http_local_urls(self):
+        config = self.config()
+        config.update({"OPENHANDS_URL": "http://localhost:8000", "OPENHANDS_PUBLIC_URL": "http://openhands.evex.localhost/canvas"})
+        with patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.serve") as stdio:
+            self.assertEqual(main(), 0)
+            stdio.assert_called_once()
 
     def test_stdio_default_and_explicit_http_pass_validated_configuration(self):
         for transport in (None, "stdio", "http"):

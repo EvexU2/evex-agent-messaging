@@ -77,7 +77,15 @@ not parse or source an `.env` file.
 Transport, host, and port are standalone controls, not extra canonical `.env` inputs. Kubernetes
 Service/probe ports remain coordinated deployment constants. Both URLs reject credentials, query,
 fragment, whitespace, and malformed ports. Invalid configuration fails before serving with a sanitized
-error; a transport typo never silently selects stdio.
+error; a transport typo never silently selects stdio. Production additionally requires HTTPS for
+the public URL and rejects known local hosts in both URLs: `localhost`, `.localhost` names,
+loopback IPs, and unspecified IPs (including IPv4-mapped IPv6). Ambiguous numeric IPv4 forms
+(such as `127.1` or hexadecimal addresses) are rejected in production. Encoded hostnames and
+backslashes are rejected in every environment. Production host classification includes IDNA
+normalization and performs no DNS lookup.
+Internal HTTP service origins such as `openhands.evex-agents.svc.cluster.local` remain supported;
+development may use HTTP and local hosts. This configuration check does not prove deployment,
+reachability, authentication, or production readiness.
 
 The OpenHands session key and Messaging signing secret remain stable runtime-managed credentials.
 Do not copy them into the canonical `.env`, export them blindly from Kubernetes, regenerate them

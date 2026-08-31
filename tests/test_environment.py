@@ -84,6 +84,19 @@ class StandaloneConfigurationTest(unittest.TestCase):
                     stdio.assert_not_called()
                     http.assert_not_called()
 
+    def test_uppercase_url_schemes_fail_before_provider_construction(self):
+        for name, path in (("OPENHANDS_URL", ""), ("OPENHANDS_PUBLIC_URL", "/canvas")):
+            for scheme in ("HTTP", "HTTPS"):
+                with self.subTest(name=name, scheme=scheme):
+                    config = self.config()
+                    config[name] = f"{scheme}://agents.example.org{path}"
+                    with patch.dict(os.environ, config, clear=True), patch("evex_agent_messaging.mcp_server.OpenHandsProvider") as provider, patch("evex_agent_messaging.mcp_server.serve") as stdio, patch("evex_agent_messaging.mcp_server.serve_http") as http:
+                        with self.assertRaises(SystemExit):
+                            main()
+                        provider.assert_not_called()
+                        stdio.assert_not_called()
+                        http.assert_not_called()
+
     def test_empty_query_and_fragment_markers_fail_before_serving(self):
         for name, origin in (("OPENHANDS_URL", "http://service"), ("OPENHANDS_PUBLIC_URL", "https://agents.example.org/canvas")):
             for suffix in ("?", "#", "?query", "#fragment"):

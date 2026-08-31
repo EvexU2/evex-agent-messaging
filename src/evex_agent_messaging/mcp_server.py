@@ -238,7 +238,7 @@ def validate_openhands_url(value: str, *, public: bool, production: bool) -> Non
     try:
         parsed = urlsplit(value)
         valid = (
-            bool(value)
+            value.startswith(("http://", "https://"))
             and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
             and parsed.scheme in {"http", "https"}
             and bool(parsed.hostname)

@@ -547,15 +547,13 @@ class ProjectAdmissionTest(unittest.TestCase):
         self.secret = b"messaging-test-secret"
         self.project_id = "native-project-node-id"
         self.project = {
-            "id": self.project_id, "accountablePmId": "native-pm-node-id",
-            "nominatedChatId": str(self.chat), "state": "open",
-            "accountability": "unique", "subjectAccess": "allowed",
+            "id": self.project_id, "chatId": str(self.chat), "state": "open",
+            "subjectAccess": "allowed",
         }
         self.root = {
             "id": "native-workspace-issue-node-id", "repository": "EvexU2/evex-u-workspace",
             "number": 42, "parentMainId": str(self.parent),
-            "accountableProjectId": self.project_id, "accountablePmId": "native-pm-node-id",
-            "pmAssigned": True, "membershipProjectId": self.project_id,
+            "membershipProjectId": self.project_id,
             "state": "eligible", "projectChatAccess": "allowed",
         }
         self.message = {"humanSummary": "New project context is available.", "aiEvidence": {
@@ -570,6 +568,14 @@ class ProjectAdmissionTest(unittest.TestCase):
             "lifecycle": "eligible", "project": copy.deepcopy(self.project),
             "root": None if role == "project" else copy.deepcopy(self.root),
         }}
+
+    def parent_conversation(self, parent_id, root_id, number):
+        value = self.conversation("parent-main")
+        value["id"] = str(parent_id)
+        admission = value["evexProjectAdmission"]
+        admission["conversationId"] = str(parent_id)
+        admission["root"].update({"id": root_id, "number": number, "parentMainId": str(parent_id)})
+        return value
 
     def service(self, responses):
         transport = FakeTransport(responses)
@@ -603,6 +609,31 @@ class ProjectAdmissionTest(unittest.TestCase):
             envelope = json.loads(projected.split("<!-- evex-agent-message:v1 ", 1)[1].removesuffix(" -->"))
             self.assertEqual(envelope, {**self.message, "messageKey": "later-fact", "senderId": str(sender)})
 
+    def test_project_same_bound_chat_admits_two_root_parents_in_both_directions(self):
+        parents = (
+            (self.parent, "native-workspace-issue-node-id", 42),
+            (uuid.UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), "second-workspace-issue-node-id", 84),
+        )
+        for parent_id, root_id, number in parents:
+            parent = self.parent_conversation(parent_id, root_id, number)
+            for direction in ("project", "parent-main"):
+                sender = self.chat if direction == "project" else parent_id
+                target = parent_id if direction == "project" else self.chat
+                responses = ([parent, self.conversation("project"), {}]
+                             if direction == "project"
+                             else [self.conversation("project"), parent, {}])
+                service, transport = self.service(responses)
+                token = (self.token("project") if direction == "project"
+                         else main_capability_token(self.secret, parent_id))
+                with self.subTest(parent=parent_id, direction=direction):
+                    self.assertEqual(service.send_message(token, target, "wave-context", self.message),
+                                     {"accepted": True, "messageKey": "wave-context"})
+                    self.assertEqual([(method, path) for method, path, _ in transport.calls], [
+                        ("GET", f"/api/conversations/{target}"),
+                        ("GET", f"/api/conversations/{sender}"),
+                        ("POST", f"/api/conversations/{target}/events"),
+                    ])
+
     def test_project_message_key_credential_review_regression(self):
         for direction in ("project", "parent-main"):
             for key in ("private-service-key", "reference_private-service-key"):
@@ -626,21 +657,19 @@ class ProjectAdmissionTest(unittest.TestCase):
             (("lifecycle",), "terminal"), (("lifecycle",), []),
             (("role",), "child-main"), (("role",), "spec"), (("role",), []),
             (("project",), None), (("project", "extra"), True),
+            (("project", "userLogin"), "pm-login"),
             (("project", "id"), "foreign-project"), (("project", "id"), ""),
             (("project", "id"), "x" * 257), (("project", "id"), "with space"),
-            (("project", "id"), "ä"), (("project", "accountablePmId"), "different-pm"),
-            (("project", "nominatedChatId"), str(uuid.uuid4())),
-            (("project", "state"), "closed"), (("project", "accountability"), "ambiguous"),
+            (("project", "id"), "ä"), (("project", "chatId"), str(uuid.uuid4())),
+            (("project", "chatId"), "project-chat"), (("project", "state"), "closed"),
             (("project", "subjectAccess"), "denied"),
         ]
         root_mutations = [
             (("root",), None), (("root", "extra"), True), (("root", "id"), ""),
+            (("root", "assigneeLogin"), "pm-login"),
             (("root", "repository"), "EvexU2/another-repo"), (("root", "number"), True),
             (("root", "number"), 0), (("root", "number"), 42.0),
             (("root", "parentMainId"), str(uuid.uuid4())),
-            (("root", "accountableProjectId"), "foreign-project"),
-            (("root", "accountablePmId"), "different-pm"),
-            (("root", "pmAssigned"), False), (("root", "pmAssigned"), 1),
             (("root", "membershipProjectId"), "foreign-project"),
             (("root", "state"), "terminal"), (("root", "projectChatAccess"), "denied"),
         ]
@@ -748,7 +777,7 @@ class ProjectAdmissionTest(unittest.TestCase):
             self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
 
     def test_project_tags_cannot_supply_missing_projection(self):
-        fake_chat = discussion(self.chat, "project", evexproject=self.project_id, evexpm="native-pm-node-id")
+        fake_chat = discussion(self.chat, "project", evexproject=self.project_id, evexuser="pm-login")
         service, transport = self.service([self.conversation("parent-main"), fake_chat])
         with self.assertRaises((CapabilityError, ProviderError)):
             service.send_message(self.token("project"), self.parent, "denied", self.message)
@@ -788,10 +817,10 @@ class ProjectAdmissionTest(unittest.TestCase):
                 service.provision_project_capability(invalid)
             self.assertEqual(transport.calls, [])
 
-    def test_project_private_provision_requires_nominated_eligible_host_project(self):
+    def test_project_private_provision_requires_bound_eligible_host_project(self):
         values = [discussion(self.chat, "project"), self.conversation("parent-main")]
-        for path, replacement in (("nominatedChatId", str(uuid.uuid4())), ("subjectAccess", "denied"),
-                                  ("state", "closed"), ("accountability", "ambiguous")):
+        for path, replacement in (("chatId", str(uuid.uuid4())), ("subjectAccess", "denied"),
+                                  ("state", "closed")):
             value = self.conversation("project")
             value["evexProjectAdmission"]["project"][path] = replacement
             values.append(value)

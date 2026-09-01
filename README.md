@@ -34,7 +34,7 @@ secrets.
 
 ### Project admission (consumer implementation; host producer required)
 
-The nominated Project Chat uses a distinct send-only `evx3_` capability. Messaging remains the sole
+The bound Project Chat uses a distinct send-only `evx3_` capability. Messaging remains the sole
 signer. Its payload is `version 3 | sender UUID (16 bytes) | send-only action (2) | Project ID byte
 length (uint16, big-endian) | Project ID | HMAC-SHA256`. The Project capability has no owning Main or
 task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 bytes; no node-ID prefix
@@ -51,27 +51,25 @@ evexProjectAdmission = {
   schemaVersion: 1, conversationId: canonicalUuid,
   role: "project" | "parent-main", lifecycle: "eligible" | "terminal",
   project: {
-    id: nativeProjectId, accountablePmId: nativeUserId, nominatedChatId: canonicalUuid,
-    state: "open" | "closed", accountability: "unique" | "ambiguous",
+    id: nativeProjectId, chatId: canonicalUuid, state: "open" | "closed",
     subjectAccess: "allowed" | "denied"
   },
   root: null | {
     id: nativeWorkspaceIssueId, repository: "EvexU2/evex-u-workspace", number: positiveInteger,
-    parentMainId: canonicalUuid, accountableProjectId: nativeProjectId,
-    accountablePmId: nativeUserId, pmAssigned: boolean, membershipProjectId: nativeProjectId,
+    parentMainId: canonicalUuid, membershipProjectId: nativeProjectId,
     state: "eligible" | "terminal", projectChatAccess: "allowed" | "denied"
   }
 }
 ```
 
 `root` is null only for Project; Parent requires the root object. The host's projection attests its
-verified role, original attributable PM-event provenance and fresh native GitHub facts. Messaging
-cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Parent UUID, root
-accountability, native membership and PM assignment. Both endpoints must be eligible, open, uniquely
-accountable and accessible. Missing/malformed/stale, closed, terminal, denied, ambiguous, foreign,
-Child/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
-is absent. A successful event is still only a wake: recipients must revalidate current facts and
-original decision authority before acting.
+verified role, immutable Project/Chat binding, exact Workspace root, single native EVEX Project
+membership, and fresh access/lifecycle facts. Messaging cross-checks sender/endpoint identities, the
+bound Chat, Project, exact Parent UUID and native membership. Both endpoints must be eligible, open
+and accessible. Missing, malformed, stale, conflicting, multi-Project, closed, terminal, denied,
+foreign, Child/Spec or peer bindings produce zero event writes. There is no fallback while the host
+producer is absent. A successful event is still only a wake: recipients must revalidate current facts
+and exact bound-Chat decision evidence before acting.
 
 ### Private Project capability provisioning
 
@@ -85,13 +83,14 @@ Content-Type: application/json
 {"schemaVersion":1,"conversationId":"<canonical UUID>"}
 ```
 
-The existing OpenHands service credential authenticates this trigger only, not the PM. The body is
+The existing OpenHands service credential authenticates this trigger only; it supplies no human or
+Project authority. The body is
 limited to 1,024 bytes with exact keys; duplicate keys, noncanonical UUIDs, extra fields and unsupported
 versions fail closed. The provider alone checks the host credential and uses the existing authenticated
 host API. No public MCP initialize/list/send operation provisions a capability, and no public mint,
 inventory, lifecycle or control tool is added.
 
-Messaging reads that exact currently nominated eligible Project Chat, derives its deterministic
+Messaging reads that exact currently bound eligible Project Chat, derives its deterministic
 capability with the existing Messaging secret, and sends exactly one existing
 `POST /api/conversations/{id}/secrets` request containing only:
 
@@ -114,18 +113,18 @@ Timeout or unknown outcome causes no automatic retry. A later normal exact-objec
 current admission again and relies on the host's compare-before-write behavior.
 
 Source delivery order is Messaging → host producer, with no circular runtime dependency. The host
-producer is currently unavailable, including the admitted per-PM GitHub entitlement/access path;
-consumer fixture passes are not installed support or general-PM access proof. Host authentication,
-PM provenance, persistence/no-refresh behavior, combined two-root Canary and exact-revision runtime
-proof remain required before rollout acceptance. No deployment, activation or live evaluation is
-part of this source change.
+producer is currently unavailable; consumer fixture passes are not installed Project Messaging
+support. Host authentication, durable binding persistence/no-refresh behavior, combined two-root
+Canary and exact-revision runtime proof remain required before rollout acceptance. No deployment,
+activation or live evaluation is part of this source change.
 
 Architecture impact: public MCP operations remain two; Messaging creates no new durable actor,
 checkout, service, workflow store, recovery transport or background loop. It admits one additional
-relationship class for the already-existing PM-nominated Chat. PM interaction creates/nominates that
-Chat in the host; the Project/PM owns its authority, it has no source Writer/checkout, and admitted
-messages wake only a bounded processing turn. Closed Projects and terminal Delivery actors remain
-ineligible. The private provisioning request is internal wiring in the existing process.
+relationship class for the already-existing Project-bound Chat. Its immutable native Project/Chat
+binding supplies the technical relationship; no human login, PM identifier, assignee or bare Project
+name does. The Chat has no source Writer/checkout, and admitted messages wake only a bounded processing
+turn. Closed Projects and terminal Delivery actors remain ineligible. The private provisioning request
+is internal wiring in the existing process.
 
 The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
 most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.

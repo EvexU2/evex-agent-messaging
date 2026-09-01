@@ -260,9 +260,8 @@ class ProjectPrivateHttpTest(unittest.TestCase):
         request = {"schemaVersion": 1, "conversationId": self.conversation_id}
         admitted = {"id": self.conversation_id, "evexProjectAdmission": {**request,
             "role": "project", "lifecycle": "eligible", "root": None,
-            "project": {"id": "native-project-id", "accountablePmId": "native-user-id",
-                        "nominatedChatId": self.conversation_id, "state": "open",
-                        "accountability": "unique", "subjectAccess": "allowed"},
+            "project": {"id": "native-project-id", "chatId": self.conversation_id,
+                        "state": "open", "subjectAccess": "allowed"},
         }}
         binding = {**request, "projectId": "native-project-id", "bindingVerified": True}
         responses = [io.BytesIO(json.dumps(value).encode()) for value in

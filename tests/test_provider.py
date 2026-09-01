@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import hmac
 import io
 import copy
 import hashlib
@@ -37,10 +39,19 @@ def canonical_profile_id(value):
 
 
 class FakeTransport:
-    def __init__(self, responses):
+    def __init__(self, responses, *, server_capabilities=None):
         self.responses, self.calls = list(responses), []
+        self.server_info_requests = 0
+        self.server_capabilities = (
+            ["evex_delivery_admission_v1"]
+            if server_capabilities is None
+            else list(server_capabilities)
+        )
 
     def __call__(self, method, path, body):
+        if method == "GET" and path == "/server_info":
+            self.server_info_requests += 1
+            return {"capabilities": self.server_capabilities}
         self.calls.append((method, path, body))
         response = self.responses.pop(0)
         if isinstance(response, Exception):
@@ -78,7 +89,6 @@ def spec_discussion(conversation_id, parent_id, *, legacy=False, profile="acp"):
         **({} if legacy else {
             "evexskills": "evex-delivery-spec",
             "evexagentprofile": profile,
-            "evexadmission": "v1:messaging:" + "a" * 64,
         }),
     )
     value["workspace"] = {"working_dir": f"/tmp/spec-{conversation_id}"}
@@ -86,6 +96,25 @@ def spec_discussion(conversation_id, parent_id, *, legacy=False, profile="acp"):
     if legacy:
         value["tags"]["evexmodel"] = "gpt-5.6-sol"
         value["current_model_id"] = "gpt-5.6-sol"
+    else:
+        descriptor = {
+            "conversation_id": str(conversation_id),
+            "parent_conversation_id": "",
+            "profile_id": profile,
+            "working_dir": value["workspace"]["working_dir"],
+            "worktree": False,
+            "tags": value["tags"],
+        }
+        canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+        signature = hmac.new(
+            b"admission-key" * 4,
+            f"evex-delivery-admission:v1\0messaging\0{canonical}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        token = f"v1:messaging:{signature}"
+        value["tags"]["evexadmission"] = (
+            "v1:messaging:" + hashlib.sha256(token.encode()).hexdigest()
+        )
     return value
 
 
@@ -101,8 +130,10 @@ class OpenHandsProviderTest(unittest.TestCase):
     def setUp(self):
         self.parent, self.child, self.spec = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
 
-    def provider(self, responses):
-        transport = FakeTransport(responses)
+    def provider(self, responses, *, server_capabilities=None):
+        transport = FakeTransport(
+            responses, server_capabilities=server_capabilities
+        )
         return OpenHandsProvider(
             "http://openhands",
             "key",
@@ -574,7 +605,12 @@ class OpenHandsProviderTest(unittest.TestCase):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_current")
 
     def test_new_spec_requires_server_owned_messaging_admission_before_mutation(self):
-        for marker in (None, "", "v1:gateway:" + "a" * 64, "v1:messaging:bad"):
+        for marker in (
+            "",
+            "v1:gateway:" + "a" * 64,
+            "v1:messaging:bad",
+            "v1:messaging:" + "a" * 64,
+        ):
             with self.subTest(marker=marker):
                 parent = discussion(
                     self.parent,
@@ -587,10 +623,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                     "working_dir": "/tmp/issue-40-source/evex-u-workspace"
                 }
                 damaged = spec_discussion(self.spec, self.parent)
-                if marker is None:
-                    del damaged["tags"]["evexadmission"]
-                else:
-                    damaged["tags"]["evexadmission"] = marker
+                damaged["tags"]["evexadmission"] = marker
                 provider, transport = self.provider([parent, damaged, damaged])
                 provider.workspace_root = "/tmp"
                 with patch.object(
@@ -609,6 +642,65 @@ class OpenHandsProviderTest(unittest.TestCase):
                 self.assertFalse(any(
                     method == "POST" for method, _, _ in transport.calls
                 ))
+
+    def test_current_spec_identity_is_migrated_with_descriptor_bound_hmac(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        current = spec_discussion(self.spec, self.parent)
+        current["tags"].pop("evexadmission")
+        migrated = spec_discussion(self.spec, self.parent)
+        provider, transport = self.provider([
+            parent,
+            current,
+            current,
+            {},
+            migrated,
+            {},
+        ])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
+            patch.object(provider, "_has_initial_prompt", return_value=True),
+            patch.object(provider, "_ensure_spec_goal"),
+        ):
+            result = provider.create_spec_chat(
+                self.parent, self.spec, "evx2_current"
+            )
+
+        self.assertFalse(result["created"])
+        migration = next(
+            body["tags"]["evexadmissionrequest"]
+            for method, _path, body in transport.calls
+            if method == "PATCH" and body and "tags" in body
+        )
+        self.assertRegex(migration, r"^v1:messaging:[0-9a-f]{64}$")
+        self.assertEqual(transport.server_info_requests, 1)
+
+    def test_spec_creation_requires_runtime_admission_capability(self):
+        provider, transport = self.provider([], server_capabilities=[])
+
+        with self.assertRaisesRegex(ProviderError, "capability is unavailable"):
+            provider._require_admission_capability()
+
+        self.assertEqual(transport.server_info_requests, 1)
+        self.assertEqual(transport.calls, [])
 
     def test_legacy_spec_without_exact_old_model_markers_is_rejected(self):
         for marker in ("tag-missing", "tag-mismatch", "current-missing", "current-mismatch"):

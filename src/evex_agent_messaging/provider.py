@@ -32,6 +32,8 @@ _SPEC_SKILL = "evex-delivery-spec"
 _SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
 _MESSAGING_ADMISSION = re.compile(r"v1:messaging:[0-9a-f]{64}")
+_ADMISSION_CAPABILITY = "evex_delivery_admission_v1"
+_ADMISSION_MIGRATION_TAG = "evexadmissionrequest"
 
 
 class ProviderError(RuntimeError):
@@ -204,6 +206,7 @@ class OpenHandsProvider:
             checkout["headSha"] = self._ensure_checkout(
                 spec_chat_id, checkout, parent_checkout
             )
+            self._require_admission_capability()
             profile_id = self._selected_profile(
                 self._request("GET", "/api/agent-profiles")
             )
@@ -211,14 +214,9 @@ class OpenHandsProvider:
             tags = self._spec_tags(
                 parent_id, issue_ref, issue_number, checkout, profile_id
             )
-            descriptor = {
-                "conversation_id": str(spec_chat_id),
-                "parent_conversation_id": "",
-                "profile_id": profile_id,
-                "working_dir": workspace["working_dir"],
-                "worktree": False,
-                "tags": tags,
-            }
+            descriptor = self._admission_descriptor(
+                spec_chat_id, profile_id, workspace["working_dir"], tags
+            )
             payload = {
                 "conversation_id": str(spec_chat_id),
                 "agent_profile_id": profile_id,
@@ -259,6 +257,14 @@ class OpenHandsProvider:
             existing = None
 
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")
+        verified = self._migrate_spec_if_needed(
+            verified,
+            parent_id,
+            spec_chat_id,
+            issue_ref,
+            issue_number,
+            checkout,
+        )
         self._validate_existing_spec(
             verified,
             parent_id,
@@ -324,6 +330,95 @@ class OpenHandsProvider:
         return f"v1:messaging:{signature}"
 
     @staticmethod
+    def _admission_descriptor(
+        spec_chat_id: uuid.UUID,
+        profile_id: str,
+        working_dir: str,
+        tags: dict[str, str],
+    ) -> dict[str, Any]:
+        return {
+            "conversation_id": str(spec_chat_id),
+            "parent_conversation_id": "",
+            "profile_id": profile_id,
+            "working_dir": working_dir,
+            "worktree": False,
+            "tags": tags,
+        }
+
+    def _expected_admission_marker(
+        self,
+        spec_chat_id: uuid.UUID,
+        profile_id: str,
+        working_dir: str,
+        tags: dict[str, str],
+    ) -> str:
+        token = self._admission_token(
+            self._admission_descriptor(
+                spec_chat_id, profile_id, working_dir, tags
+            )
+        )
+        return f"v1:messaging:{hashlib.sha256(token.encode()).hexdigest()}"
+
+    def _require_admission_capability(self) -> None:
+        info = self._request("GET", "/server_info")
+        capabilities = info.get("capabilities")
+        if (
+            not isinstance(capabilities, list)
+            or _ADMISSION_CAPABILITY not in capabilities
+        ):
+            raise ProviderError(
+                "OpenHands delivery admission capability is unavailable"
+            )
+
+    def _migrate_spec_if_needed(
+        self,
+        value: dict,
+        parent_id: uuid.UUID,
+        spec_chat_id: uuid.UUID,
+        issue_ref: str,
+        issue_number: str,
+        checkout: dict[str, str],
+    ) -> dict:
+        tags = value.get("tags")
+        if (
+            not isinstance(tags, dict)
+            or "evexagentprofile" not in tags
+            or "evexadmission" in tags
+        ):
+            return value
+        profile_id = tags.get("evexagentprofile")
+        workspace = value.get("workspace")
+        working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
+        if not isinstance(profile_id, str) or not isinstance(working_dir, str):
+            return value
+        self._validate_existing_spec(
+            value,
+            parent_id,
+            spec_chat_id,
+            issue_ref,
+            issue_number,
+            checkout,
+            profile_id,
+            allow_missing_admission=True,
+        )
+        self._require_admission_capability()
+        unsigned_tags = {str(key): str(item) for key, item in tags.items()}
+        canonical_tags = self._spec_tags(
+            parent_id, issue_ref, issue_number, checkout, profile_id
+        )
+        token = self._admission_token(
+            self._admission_descriptor(
+                spec_chat_id, profile_id, working_dir, canonical_tags
+            )
+        )
+        self._request(
+            "PATCH",
+            f"/api/conversations/{spec_chat_id}",
+            {"tags": {**unsigned_tags, _ADMISSION_MIGRATION_TAG: token}},
+        )
+        return self._request("GET", f"/api/conversations/{spec_chat_id}")
+
+    @staticmethod
     def _spec_tags(
         parent_id: uuid.UUID,
         issue_ref: str,
@@ -354,6 +449,8 @@ class OpenHandsProvider:
         issue_number: str,
         checkout: dict[str, str],
         expected_profile_id: str | None,
+        *,
+        allow_missing_admission: bool = False,
     ) -> None:
         identity, tags, role = self._identity(value)
         workspace = value.get("workspace")
@@ -393,11 +490,23 @@ class OpenHandsProvider:
                 checkout,
                 bound_profile_id if isinstance(bound_profile_id, str) else "",
             )
+        unexpected_reserved = (
+            {
+                str(key)
+                for key in tags
+                if str(key).startswith("evex")
+                and key not in expected_tags
+                and key != "evexadmission"
+            }
+            if not legacy
+            else set()
+        )
         if (
             identity != spec_chat_id
             or role != "spec"
             or (not legacy and present_new_metadata != new_metadata)
             or any(tags.get(key) != expected for key, expected in expected_tags.items())
+            or unexpected_reserved
             or not workspace_matches
             or not isinstance(launched_profile_id, str)
             or not launched_profile_id
@@ -411,9 +520,6 @@ class OpenHandsProvider:
             or (
                 not legacy
                 and (
-                    _MESSAGING_ADMISSION.fullmatch(tags.get("evexadmission", ""))
-                    is None
-                    or
                     launched_profile_id != tags.get("evexagentprofile")
                     or (
                         expected_profile_id is not None
@@ -423,6 +529,26 @@ class OpenHandsProvider:
             )
         ):
             raise ProviderError("Existing Spec Chat does not match authority")
+        if not legacy:
+            marker = tags.get("evexadmission", "")
+            if allow_missing_admission and not marker:
+                return
+            unsigned_tags = {
+                str(key): str(item)
+                for key, item in tags.items()
+                if key != "evexadmission"
+            }
+            expected_marker = self._expected_admission_marker(
+                spec_chat_id,
+                str(launched_profile_id),
+                str(working_dir),
+                unsigned_tags,
+            )
+            if (
+                _MESSAGING_ADMISSION.fullmatch(marker) is None
+                or not hmac.compare_digest(marker, expected_marker)
+            ):
+                raise ProviderError("Existing Spec Chat admission does not match authority")
 
     @staticmethod
     def _selected_profile(profiles: dict) -> str:

@@ -13,6 +13,7 @@ import tempfile
 import threading
 from typing import Any, Callable
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -24,8 +25,9 @@ from .capability import valid_native_id
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _DURABLE_ROLES = {"parent-main", "child-main", "spec"}
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
-_SPEC_MODEL = "gpt-5.6-sol"
 _SPEC_REASONING = "high"
+_SPEC_SKILL = "evex-delivery-spec"
+_SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
 
 
@@ -80,7 +82,11 @@ class OpenHandsProvider:
             value = self._request("GET", "/api/agent-profiles")
         except ProviderError:
             return False
-        return isinstance(value.get("active_agent_profile_id"), str)
+        try:
+            self._selected_profile(value)
+        except ProviderError:
+            return False
+        return True
 
     def provisioning_allowed(self, credential: str | None) -> bool:
         # This existing service credential authenticates the trigger, never the PM.
@@ -189,22 +195,19 @@ class OpenHandsProvider:
             checkout["headSha"] = self._ensure_checkout(
                 spec_chat_id, checkout, parent_checkout
             )
-            profiles = self._request("GET", "/api/agent-profiles")
-            profile_id = profiles.get("active_agent_profile_id")
-            if not isinstance(profile_id, str) or not profile_id:
-                raise ProviderError("OpenHands has no active Agent Profile")
+            profile_id = self._selected_profile(
+                self._request("GET", "/api/agent-profiles")
+            )
             payload = {
                 "conversation_id": str(spec_chat_id),
                 "agent_profile_id": profile_id,
                 "workspace": {"working_dir": str(self._checkout_path(spec_chat_id))},
                 "tags": self._spec_tags(
-                    parent_id, issue_ref, issue_number, checkout
+                    parent_id, issue_ref, issue_number, checkout, profile_id
                 ),
                 "autotitle": False,
                 "max_iterations": 300,
-                "mcp_config": {},
                 "secrets": {
-                    "EVEX_AGENT_ROLE": {"kind": "StaticSecret", "value": "spec"},
                     "EVEX_AGENT_INSTANCE_ID": {
                         "kind": "StaticSecret",
                         "value": str(spec_chat_id),
@@ -213,17 +216,6 @@ class OpenHandsProvider:
                         "kind": "StaticSecret",
                         "value": capability_ref,
                     },
-                    "EVEX_REASONING_EFFORT": {
-                        "kind": "StaticSecret",
-                        "value": _SPEC_REASONING,
-                    },
-                },
-                "agent_launch_additions": {
-                    "system_message_suffix_append": (
-                        "EVEX role scope: interactive Spec Chat. Use the admitted checkout, "
-                        "EVEX Spec skills, native read-only review subagents, and send_message "
-                        "only to the bound Parent Main."
-                    )
                 },
             }
             try:
@@ -242,10 +234,15 @@ class OpenHandsProvider:
             )
             existing = None
 
-        self._switch_and_verify_spec_model(spec_chat_id)
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")
         self._validate_existing_spec(
-            verified, parent_id, spec_chat_id, issue_ref, issue_number, checkout
+            verified,
+            parent_id,
+            spec_chat_id,
+            issue_ref,
+            issue_number,
+            checkout,
+            profile_id if created else None,
         )
         observed_head = self._validate_existing_checkout(
             self._checkout_path(spec_chat_id), checkout, exact=False
@@ -267,12 +264,19 @@ class OpenHandsProvider:
                     {
                         "role": "user",
                         "content": [{"type": "text", "text": prompt}],
-                        "run": True,
+                        "run": False,
                     },
                 )
             except ProviderError as prompt_error:
                 if not self._has_initial_prompt(spec_chat_id, prompt):
                     raise prompt_error
+        verified_tags = verified.get("tags")
+        if (
+            isinstance(verified_tags, dict)
+            and verified_tags.get("evexdeliveryrole") == "spec"
+            and verified_tags.get("evexskills") == _SPEC_SKILL
+        ):
+            self._ensure_spec_goal(spec_chat_id, self._spec_goal(issue_ref))
         return {
             "conversationUrl": (
                 f"{self.public_url.rstrip('/')}/conversations/{spec_chat_id}"
@@ -292,17 +296,19 @@ class OpenHandsProvider:
         issue_ref: str,
         issue_number: str,
         checkout: dict[str, str],
+        profile_id: str,
     ) -> dict[str, str]:
         return {
             "project": "evex-u",
             "evexrole": "role-child",
             "evexdeliveryrole": "spec",
+            "evexskills": _SPEC_SKILL,
+            "evexagentprofile": profile_id,
             "evextask": f"issue-{issue_number}-spec",
             "evexissue": issue_ref,
             "evexparent": str(parent_id),
             "evexrepository": checkout["repository"],
             "evexbranch": checkout["branch"],
-            "evexmodel": _SPEC_MODEL,
             "evexreasoning": _SPEC_REASONING,
         }
 
@@ -314,6 +320,7 @@ class OpenHandsProvider:
         issue_ref: str,
         issue_number: str,
         checkout: dict[str, str],
+        expected_profile_id: str | None,
     ) -> None:
         identity, tags, role = self._identity(value)
         workspace = value.get("workspace")
@@ -325,22 +332,151 @@ class OpenHandsProvider:
             )
         except OSError:
             workspace_matches = False
-        expected_tags = self._spec_tags(parent_id, issue_ref, issue_number, checkout)
+        new_metadata = {"evexskills", "evexagentprofile"}
+        present_new_metadata = new_metadata.intersection(tags)
+        legacy = role == "spec" and not present_new_metadata
+        profile = value.get("launched_agent_profile")
+        launched_profile_id = (
+            profile.get("agent_profile_id") if isinstance(profile, dict) else None
+        )
+        if legacy:
+            expected_tags = {
+                key: expected
+                for key, expected in self._spec_tags(
+                    parent_id,
+                    issue_ref,
+                    issue_number,
+                    checkout,
+                    launched_profile_id if isinstance(launched_profile_id, str) else "",
+                ).items()
+                if key not in {"evexdeliveryrole", "evexskills", "evexagentprofile"}
+            }
+        else:
+            bound_profile_id = tags.get("evexagentprofile")
+            expected_tags = self._spec_tags(
+                parent_id,
+                issue_ref,
+                issue_number,
+                checkout,
+                bound_profile_id if isinstance(bound_profile_id, str) else "",
+            )
         if (
             identity != spec_chat_id
             or role != "spec"
+            or (not legacy and present_new_metadata != new_metadata)
             or any(tags.get(key) != expected for key, expected in expected_tags.items())
             or not workspace_matches
-            or value.get("current_model_id") != _SPEC_MODEL
+            or not isinstance(launched_profile_id, str)
+            or not launched_profile_id
+            or (
+                legacy
+                and (
+                    tags.get("evexmodel") != "gpt-5.6-sol"
+                    or value.get("current_model_id") != "gpt-5.6-sol"
+                )
+            )
+            or (
+                not legacy
+                and (
+                    launched_profile_id != tags.get("evexagentprofile")
+                    or (
+                        expected_profile_id is not None
+                        and launched_profile_id != expected_profile_id
+                    )
+                )
+            )
         ):
             raise ProviderError("Existing Spec Chat does not match authority")
 
-    def _switch_and_verify_spec_model(self, spec_chat_id: uuid.UUID) -> None:
-        self._request(
-            "POST",
-            f"/api/conversations/{spec_chat_id}/switch_acp_model",
-            {"model": _SPEC_MODEL},
+    @staticmethod
+    def _selected_profile(profiles: dict) -> str:
+        profile_id = profiles.get("active_agent_profile_id")
+        available = {
+            item.get("id"): item
+            for item in profiles.get("profiles", [])
+            if isinstance(item, dict)
+        }
+        if (
+            not isinstance(profile_id, str)
+            or not profile_id
+            or available.get(profile_id, {}).get("agent_kind")
+            not in _SUPPORTED_AGENT_KINDS
+        ):
+            raise ProviderError("OpenHands has no supported active Agent Profile")
+        return profile_id
+
+    @staticmethod
+    def _spec_goal(issue_ref: str) -> str:
+        return (
+            f"Deliver reviewed Specification authority for {issue_ref} through the "
+            "interactive question, review, repair, and human-approval loop. Complete "
+            "the OpenHands goal only after the exact Spec result is terminally projected "
+            "to the bound Parent Main."
         )
+
+    def _ensure_spec_goal(self, spec_chat_id: uuid.UUID, objective: str) -> None:
+        status = self._goal_status(spec_chat_id, objective)
+        if status in {"running", "complete", "interrupted"}:
+            return
+        if status is not None:
+            raise ProviderError("OpenHands Spec goal is terminal or invalid")
+        try:
+            self._request(
+                "POST",
+                f"/api/conversations/{spec_chat_id}/goal",
+                {"objective": objective, "max_iterations": 100},
+            )
+        except ProviderError as goal_error:
+            if self._goal_status(spec_chat_id, objective) not in {
+                "running",
+                "complete",
+            }:
+                raise goal_error
+            return
+        if self._goal_status(spec_chat_id, objective) not in {"running", "complete"}:
+            raise ProviderError("OpenHands Spec goal was not durably established")
+
+    def _goal_status(self, spec_chat_id: uuid.UUID, expected: str) -> str | None:
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        while True:
+            query = {
+                "limit": 100,
+                "kind": "ConversationStateUpdateEvent",
+                "sort_order": "TIMESTAMP_DESC",
+            }
+            if cursor is not None:
+                query["page_id"] = cursor
+            events = self._request(
+                "GET",
+                f"/api/conversations/{spec_chat_id}/events/search?"
+                + urllib.parse.urlencode(query),
+            )
+            items = events.get("items")
+            if not isinstance(items, list):
+                raise ProviderError("OpenHands goal state is unavailable")
+            for event in items:
+                value = event.get("value") if isinstance(event, dict) else None
+                if not (
+                    event.get("kind") == "ConversationStateUpdateEvent"
+                    and event.get("key") == "goal"
+                    and isinstance(value, dict)
+                ):
+                    continue
+                if str(value.get("objective") or "").strip() != expected:
+                    raise ProviderError("OpenHands Spec goal authority does not match")
+                status = value.get("status")
+                return status if isinstance(status, str) else ""
+            next_cursor = events.get("next_page_id")
+            if next_cursor is None:
+                break
+            if not isinstance(next_cursor, str) or not next_cursor:
+                raise ProviderError("OpenHands goal cursor is invalid")
+            if next_cursor in seen_cursors:
+                raise ProviderError("OpenHands goal pagination repeated")
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        return None
 
     def _has_initial_prompt(self, spec_chat_id: uuid.UUID, expected: str) -> bool:
         events = self._request(

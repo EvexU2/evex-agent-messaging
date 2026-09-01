@@ -270,13 +270,24 @@ def main() -> int:
     secret = os.environ.get("EVEX_MESSAGING_SECRET", "")
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
-    if not all(value.strip() for value in (secret, base_url, api_key)):
-        raise SystemExit("EVEX_MESSAGING_SECRET, OPENHANDS_URL, and OPENHANDS_API_KEY are required")
+    admission_key = os.environ.get("EVEX_DELIVERY_ADMISSION_KEY", "").strip()
+    if not all(value.strip() for value in (secret, base_url, api_key, admission_key)):
+        raise SystemExit(
+            "EVEX_MESSAGING_SECRET, EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, "
+            "and OPENHANDS_API_KEY are required"
+        )
+    if len(admission_key) < 32:
+        raise SystemExit("EVEX_DELIVERY_ADMISSION_KEY must be at least 32 characters")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
     server = McpServer(MessagingService(
-        OpenHandsProvider(base_url, api_key, public_url=public_url),
+        OpenHandsProvider(
+            base_url,
+            api_key,
+            public_url=public_url,
+            admission_key=admission_key.encode(),
+        ),
         secret.encode(),
     ))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":

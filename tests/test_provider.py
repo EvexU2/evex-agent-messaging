@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import io
 import copy
+import hashlib
+import hmac
 from pathlib import Path
 import subprocess
 import sys
@@ -20,6 +22,18 @@ from evex_agent_messaging.capability import (  # noqa: E402
 )
 from evex_agent_messaging.service import MessagingService  # noqa: E402
 from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
+
+ACP_PROFILE_ID = "44444444-4444-4444-8444-444444444444"
+OPENAI_PROFILE_ID = "55555555-5555-4555-8555-555555555555"
+FOREIGN_PROFILE_ID = "66666666-6666-4666-8666-666666666666"
+
+
+def canonical_profile_id(value):
+    return {
+        "acp": ACP_PROFILE_ID,
+        "openai-production": OPENAI_PROFILE_ID,
+        "foreign": FOREIGN_PROFILE_ID,
+    }.get(value, value)
 
 
 class FakeTransport:
@@ -42,6 +56,7 @@ def discussion(conversation_id, role, **tags):
 
 
 def profiles(active="acp", kind="acp"):
+    active = canonical_profile_id(active)
     return {
         "active_agent_profile_id": active,
         "profiles": [{"id": active, "agent_kind": kind}],
@@ -49,6 +64,7 @@ def profiles(active="acp", kind="acp"):
 
 
 def spec_discussion(conversation_id, parent_id, *, legacy=False, profile="acp"):
+    profile = canonical_profile_id(profile)
     value = discussion(
         conversation_id,
         "spec",
@@ -62,6 +78,7 @@ def spec_discussion(conversation_id, parent_id, *, legacy=False, profile="acp"):
         **({} if legacy else {
             "evexskills": "evex-delivery-spec",
             "evexagentprofile": profile,
+            "evexadmission": "v1:messaging:" + "a" * 64,
         }),
     )
     value["workspace"] = {"working_dir": f"/tmp/spec-{conversation_id}"}
@@ -91,6 +108,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "key",
             transport=transport,
             public_url="http://openhands.local/canvas",
+            admission_key=b"admission-key" * 4,
         ), transport
 
     def test_create_spec_chat_reuses_exact_parent_issue_and_fixed_role(self):
@@ -119,6 +137,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             {"items": [goal_event(objective)]},
         ])
         provider.workspace_root = "/tmp"
+        provider.admission_key += b"\n"
         checkout = {
             "repository": "EvexU2/evex-u-workspace",
             "branch": "spec/issue-40",
@@ -151,7 +170,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
         self.assertEqual(create[2]["tags"]["evexskills"], "evex-delivery-spec")
-        self.assertEqual(create[2]["tags"]["evexagentprofile"], "acp")
+        self.assertEqual(create[2]["tags"]["evexagentprofile"], ACP_PROFILE_ID)
         self.assertNotIn("evexlocale", create[2]["tags"])
         self.assertNotIn("evexbasehead", create[2]["tags"])
         self.assertNotIn("language", create[2])
@@ -160,6 +179,25 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn("EVEX_REASONING_EFFORT", create[2]["secrets"])
         self.assertNotIn("mcp_config", create[2])
         self.assertNotIn("evexmodel", create[2]["tags"])
+        descriptor = {
+            "conversation_id": str(self.spec),
+            "parent_conversation_id": "",
+            "profile_id": ACP_PROFILE_ID,
+            "working_dir": create[2]["workspace"]["working_dir"],
+            "worktree": False,
+            "tags": create[2]["tags"],
+        }
+        canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+        signature = hmac.new(
+            b"admission-key" * 4,
+            f"evex-delivery-admission:v1\0messaging\0{canonical}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        self.assertEqual(
+            create[2]["secrets"]["EVEX_DELIVERY_ADMISSION"],
+            {"kind": "StaticSecret", "value": f"v1:messaging:{signature}"},
+        )
+        self.assertFalse(create[2]["worktree"])
         self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
         self.assertIn((
             "POST", f"/api/conversations/{self.spec}/goal",
@@ -394,9 +432,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             for call in transport.calls
             if call[:2] == ("POST", "/api/conversations")
         )
-        self.assertEqual(payload["agent_profile_id"], "openai-production")
+        self.assertEqual(payload["agent_profile_id"], OPENAI_PROFILE_ID)
         self.assertEqual(
-            payload["tags"]["evexagentprofile"], "openai-production"
+            payload["tags"]["evexagentprofile"], OPENAI_PROFILE_ID
         )
         self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
 
@@ -433,6 +471,43 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertFalse(
             any(call[:2] == ("POST", "/api/conversations") for call in transport.calls)
         )
+
+    def test_non_uuid_profile_fails_readiness_and_creation_before_mutation(self):
+        invalid_profiles = profiles("not-a-uuid", "acp")
+        provider, _ = self.provider([invalid_profiles])
+        self.assertFalse(provider.readiness())
+
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            invalid_profiles,
+        ])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(provider, "_ensure_checkout", return_value="a" * 40),
+        ):
+            with self.assertRaisesRegex(ProviderError, "supported active Agent Profile"):
+                provider.create_spec_chat(self.parent, self.spec, "evx2_spec")
+        self.assertFalse(any(
+            call[:2] == ("POST", "/api/conversations") for call in transport.calls
+        ))
 
     def test_legacy_spec_chat_is_reused_without_metadata_migration_or_model_switch(self):
         parent = discussion(
@@ -482,7 +557,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         }
         mismatched = spec_discussion(self.spec, self.parent)
         mismatched["launched_agent_profile"] = {
-            "agent_profile_id": "openai-production"
+            "agent_profile_id": OPENAI_PROFILE_ID
         }
         provider, _ = self.provider([parent, mismatched, mismatched])
         provider.workspace_root = "/tmp"
@@ -497,6 +572,43 @@ class OpenHandsProviderTest(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ProviderError, "does not match authority"):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_current")
+
+    def test_new_spec_requires_server_owned_messaging_admission_before_mutation(self):
+        for marker in (None, "", "v1:gateway:" + "a" * 64, "v1:messaging:bad"):
+            with self.subTest(marker=marker):
+                parent = discussion(
+                    self.parent,
+                    "parent-main",
+                    evexissue="EvexU2/evex-u-workspace#40",
+                    evexsourcerepository="EvexU2/evex-u-workspace",
+                    evexsourcebranch="main",
+                )
+                parent["workspace"] = {
+                    "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+                }
+                damaged = spec_discussion(self.spec, self.parent)
+                if marker is None:
+                    del damaged["tags"]["evexadmission"]
+                else:
+                    damaged["tags"]["evexadmission"] = marker
+                provider, transport = self.provider([parent, damaged, damaged])
+                provider.workspace_root = "/tmp"
+                with patch.object(
+                    provider,
+                    "_validated_parent_checkout",
+                    return_value=(
+                        Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderError, "does not match authority"
+                    ):
+                        provider.create_spec_chat(
+                            self.parent, self.spec, "evx2_current"
+                        )
+                self.assertFalse(any(
+                    method == "POST" for method, _, _ in transport.calls
+                ))
 
     def test_legacy_spec_without_exact_old_model_markers_is_rejected(self):
         for marker in ("tag-missing", "tag-mismatch", "current-missing", "current-mismatch"):
@@ -761,7 +873,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         source = (ROOT / "src/evex_agent_messaging/provider.py").read_text()
 
         self.assertNotIn(' / "mirrors" / ', source)
-        self.assertNotIn('"worktree"', source)
+        self.assertNotIn('"worktree", "add"', source)
 
     def test_child_and_spec_can_target_only_their_bound_parent(self):
         for role in ("deputy", "spec"):

@@ -41,6 +41,45 @@ def discussion(conversation_id, role, **tags):
     }
 
 
+def profiles(active="acp", kind="acp"):
+    return {
+        "active_agent_profile_id": active,
+        "profiles": [{"id": active, "agent_kind": kind}],
+    }
+
+
+def spec_discussion(conversation_id, parent_id, *, legacy=False, profile="acp"):
+    value = discussion(
+        conversation_id,
+        "spec",
+        evexrole="role-child",
+        evextask="issue-40-spec",
+        evexissue="EvexU2/evex-u-workspace#40",
+        evexparent=str(parent_id),
+        evexrepository="EvexU2/evex-u-workspace",
+        evexbranch="spec/issue-40",
+        evexreasoning="high",
+        **({} if legacy else {
+            "evexskills": "evex-delivery-spec",
+            "evexagentprofile": profile,
+        }),
+    )
+    value["workspace"] = {"working_dir": f"/tmp/spec-{conversation_id}"}
+    value["launched_agent_profile"] = {"agent_profile_id": profile}
+    if legacy:
+        value["tags"]["evexmodel"] = "gpt-5.6-sol"
+        value["current_model_id"] = "gpt-5.6-sol"
+    return value
+
+
+def goal_event(objective):
+    return {
+        "kind": "ConversationStateUpdateEvent",
+        "key": "goal",
+        "value": {"objective": objective, "status": "running"},
+    }
+
+
 class OpenHandsProviderTest(unittest.TestCase):
     def setUp(self):
         self.parent, self.child, self.spec = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
@@ -65,29 +104,19 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
-        created = discussion(
-            self.spec,
-            "spec",
-            evexrole="role-child",
-            evextask="issue-40-spec",
-            evexissue="EvexU2/evex-u-workspace#40",
-            evexparent=str(self.parent),
-            evexrepository="EvexU2/evex-u-workspace",
-            evexbranch="spec/issue-40",
-            evexmodel="gpt-5.6-sol",
-            evexreasoning="high",
-        )
-        created["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
-        created["current_model_id"] = "gpt-5.6-sol"
+        created = spec_discussion(self.spec, self.parent)
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
         provider, transport = self.provider([
             parent,
             ProviderError("missing", status=404),
-            {"active_agent_profile_id": "acp"},
-            {},
+            profiles(),
             {},
             {},
             created,
             {},
+            {"items": []},
+            {},
+            {"items": [goal_event(objective)]},
         ])
         provider.workspace_root = "/tmp"
         checkout = {
@@ -121,17 +150,26 @@ class OpenHandsProviderTest(unittest.TestCase):
         ensure.assert_called_once_with(self.spec, checkout, parent_checkout)
         create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
         self.assertEqual(create[2]["tags"]["evexdeliveryrole"], "spec")
+        self.assertEqual(create[2]["tags"]["evexskills"], "evex-delivery-spec")
+        self.assertEqual(create[2]["tags"]["evexagentprofile"], "acp")
         self.assertNotIn("evexlocale", create[2]["tags"])
         self.assertNotIn("evexbasehead", create[2]["tags"])
         self.assertNotIn("language", create[2])
-        self.assertEqual(
-            create[2]["agent_launch_additions"]["system_message_suffix_append"],
-            "EVEX role scope: interactive Spec Chat. Use the admitted checkout, "
-            "EVEX Spec skills, native read-only review subagents, and send_message "
-            "only to the bound Parent Main.",
+        self.assertNotIn("agent_launch_additions", create[2])
+        self.assertNotIn("EVEX_AGENT_ROLE", create[2]["secrets"])
+        self.assertNotIn("EVEX_REASONING_EFFORT", create[2]["secrets"])
+        self.assertNotIn("mcp_config", create[2])
+        self.assertNotIn("evexmodel", create[2]["tags"])
+        self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
+        self.assertIn((
+            "POST", f"/api/conversations/{self.spec}/goal",
+            {"objective": objective, "max_iterations": 100}
+        ), transport.calls)
+        prompt_call = next(
+            call for call in transport.calls
+            if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
         )
-        self.assertEqual(create[2]["secrets"]["EVEX_AGENT_ROLE"]["value"], "spec")
-        self.assertEqual(create[2]["current_model_id"] if "current_model_id" in create[2] else "gpt-5.6-sol", "gpt-5.6-sol")
+        self.assertIs(prompt_call[2]["run"], False)
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
 
     def test_reused_spec_chat_receives_the_current_durable_capability(self):
@@ -145,22 +183,12 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
-        existing = discussion(
-            self.spec,
-            "spec",
-            evexrole="role-child",
-            evextask="issue-40-spec",
-            evexissue="EvexU2/evex-u-workspace#40",
-            evexparent=str(self.parent),
-            evexrepository="EvexU2/evex-u-workspace",
-            evexbranch="spec/issue-40",
-            evexmodel="gpt-5.6-sol",
-            evexreasoning="high",
-        )
-        existing["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
-        existing["current_model_id"] = "gpt-5.6-sol"
+        existing = spec_discussion(self.spec, self.parent)
         existing["language"] = "fr-FR"
-        provider, transport = self.provider([parent, existing, {}, existing, {}])
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            parent, existing, existing, {}, {"items": [goal_event(objective)]}
+        ])
         provider.workspace_root = "/tmp"
         with (
             patch.object(
@@ -213,30 +241,20 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
-        created = discussion(
-            self.spec,
-            "spec",
-            evexrole="role-child",
-            evextask="issue-40-spec",
-            evexissue="EvexU2/evex-u-workspace#40",
-            evexparent=str(self.parent),
-            evexrepository="EvexU2/evex-u-workspace",
-            evexbranch="spec/issue-40",
-            evexmodel="gpt-5.6-sol",
-            evexreasoning="high",
-        )
-        created["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
-        created["current_model_id"] = "gpt-5.6-sol"
+        created = spec_discussion(self.spec, self.parent)
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
         provider, transport = self.provider([
             parent,
             ProviderError("missing", status=404),
-            {"active_agent_profile_id": "acp"},
+            profiles(),
             ProviderError("connection closed"),
             created,
             {},
-            {},
             created,
             {},
+            {"items": []},
+            {},
+            {"items": [goal_event(objective)]},
         ])
         provider.workspace_root = "/tmp"
         with (
@@ -275,20 +293,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent["workspace"] = {
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
-        existing = discussion(
-            self.spec,
-            "spec",
-            evexrole="role-child",
-            evextask="issue-40-spec",
-            evexissue="EvexU2/evex-u-workspace#40",
-            evexparent=str(self.parent),
-            evexrepository="EvexU2/evex-u-workspace",
-            evexbranch="spec/issue-40",
-            evexmodel="gpt-5.6-sol",
-            evexreasoning="high",
-        )
-        existing["workspace"] = {"working_dir": f"/tmp/spec-{self.spec}"}
-        existing["current_model_id"] = "gpt-5.6-sol"
+        existing = spec_discussion(self.spec, self.parent)
         expected_prompt = (
             "EVEX_SPEC_CHAT\n"
             "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
@@ -304,12 +309,14 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider, transport = self.provider([
             parent,
             existing,
-            {},
             existing,
             {},
             {"items": []},
             ProviderError("connection closed"),
             {"items": [prompt_event]},
+            {"items": [goal_event(OpenHandsProvider._spec_goal(
+                "EvexU2/evex-u-workspace#40"
+            ))]},
         ])
         provider.workspace_root = "/tmp"
         with (
@@ -338,6 +345,291 @@ class OpenHandsProviderTest(unittest.TestCase):
             "?limit=1&source=user&sort_order=TIMESTAMP",
             None,
         ), transport.calls)
+
+    def test_native_openhands_profile_uses_the_same_spec_contract(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        created = spec_discussion(
+            self.spec, self.parent, profile="openai-production"
+        )
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            profiles("openai-production", "openhands"),
+            {},
+            {},
+            created,
+            {},
+            {"items": []},
+            {},
+            {"items": [goal_event(objective)]},
+        ])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(provider, "_ensure_checkout", return_value="a" * 40),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
+        ):
+            provider.create_spec_chat(self.parent, self.spec, "evx2_spec")
+
+        payload = next(
+            call[2]
+            for call in transport.calls
+            if call[:2] == ("POST", "/api/conversations")
+        )
+        self.assertEqual(payload["agent_profile_id"], "openai-production")
+        self.assertEqual(
+            payload["tags"]["evexagentprofile"], "openai-production"
+        )
+        self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
+
+    def test_unsupported_profile_fails_before_conversation_creation(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            profiles("foreign", "other"),
+        ])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(provider, "_ensure_checkout", return_value="a" * 40),
+        ):
+            with self.assertRaisesRegex(ProviderError, "supported active Agent Profile"):
+                provider.create_spec_chat(self.parent, self.spec, "evx2_spec")
+
+        self.assertFalse(
+            any(call[:2] == ("POST", "/api/conversations") for call in transport.calls)
+        )
+
+    def test_legacy_spec_chat_is_reused_without_metadata_migration_or_model_switch(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        legacy = spec_discussion(self.spec, self.parent, legacy=True)
+        provider, transport = self.provider([parent, legacy, legacy, {}])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="b" * 40
+            ),
+            patch.object(provider, "_has_initial_prompt", return_value=True),
+        ):
+            result = provider.create_spec_chat(
+                self.parent, self.spec, "evx2_current"
+            )
+
+        self.assertFalse(result["created"])
+        self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
+        self.assertFalse(any(path.endswith("/goal") for _, path, _ in transport.calls))
+
+    def test_new_spec_profile_binding_is_verified_on_reuse(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        mismatched = spec_discussion(self.spec, self.parent)
+        mismatched["launched_agent_profile"] = {
+            "agent_profile_id": "openai-production"
+        }
+        provider, _ = self.provider([parent, mismatched, mismatched])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+        ):
+            with self.assertRaisesRegex(ProviderError, "does not match authority"):
+                provider.create_spec_chat(self.parent, self.spec, "evx2_current")
+
+    def test_legacy_spec_without_exact_old_model_markers_is_rejected(self):
+        for marker in ("tag-missing", "tag-mismatch", "current-missing", "current-mismatch"):
+            with self.subTest(marker=marker):
+                parent = discussion(
+                    self.parent,
+                    "parent-main",
+                    evexissue="EvexU2/evex-u-workspace#40",
+                    evexsourcerepository="EvexU2/evex-u-workspace",
+                    evexsourcebranch="main",
+                )
+                parent["workspace"] = {
+                    "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+                }
+                legacy = spec_discussion(self.spec, self.parent, legacy=True)
+                if marker == "tag-missing":
+                    del legacy["tags"]["evexmodel"]
+                elif marker == "tag-mismatch":
+                    legacy["tags"]["evexmodel"] = "other"
+                elif marker == "current-missing":
+                    del legacy["current_model_id"]
+                else:
+                    legacy["current_model_id"] = "other"
+                provider, transport = self.provider([parent, legacy, legacy])
+                provider.workspace_root = "/tmp"
+                with patch.object(
+                    provider,
+                    "_validated_parent_checkout",
+                    return_value=(
+                        Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ProviderError, "does not match authority"
+                    ):
+                        provider.create_spec_chat(
+                            self.parent, self.spec, "evx2_current"
+                        )
+                self.assertFalse(any(
+                    method == "POST" for method, _, _ in transport.calls
+                ))
+
+    def test_partial_new_spec_metadata_cannot_downgrade_to_legacy(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        partial = spec_discussion(self.spec, self.parent)
+        del partial["tags"]["evexagentprofile"]
+        provider, _ = self.provider([parent, partial, partial])
+        provider.workspace_root = "/tmp"
+        with patch.object(
+            provider,
+            "_validated_parent_checkout",
+            return_value=(
+                Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+            ),
+        ):
+            with self.assertRaisesRegex(ProviderError, "does not match authority"):
+                provider.create_spec_chat(self.parent, self.spec, "evx2_current")
+
+    def test_ambiguous_goal_start_is_reconciled_from_durable_goal_event(self):
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            {"items": []},
+            ProviderError("connection closed"),
+            {"items": [goal_event(objective)]},
+        ])
+
+        provider._ensure_spec_goal(self.spec, objective)
+
+        self.assertEqual(
+            [call[:2] for call in transport.calls],
+            [
+                ("GET", f"/api/conversations/{self.spec}/events/search?limit=100&kind=ConversationStateUpdateEvent&sort_order=TIMESTAMP_DESC"),
+                ("POST", f"/api/conversations/{self.spec}/goal"),
+                ("GET", f"/api/conversations/{self.spec}/events/search?limit=100&kind=ConversationStateUpdateEvent&sort_order=TIMESTAMP_DESC"),
+            ],
+        )
+
+    def test_interrupted_spec_goal_remains_paused_on_idempotent_reuse(self):
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        interrupted = goal_event(objective)
+        interrupted["value"]["status"] = "interrupted"
+        provider, transport = self.provider([{"items": [interrupted]}])
+
+        provider._ensure_spec_goal(self.spec, objective)
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertFalse(any(method == "POST" for method, _, _ in transport.calls))
+
+    def test_goal_lookup_paginates_before_starting_a_duplicate_round(self):
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            {"items": [], "next_page_id": "older-goals"},
+            {"items": [goal_event(objective)]},
+        ])
+
+        provider._ensure_spec_goal(self.spec, objective)
+
+        self.assertEqual(len(transport.calls), 2)
+        self.assertIn("page_id=older-goals", transport.calls[1][1])
+        self.assertFalse(any(method == "POST" for method, _, _ in transport.calls))
+
+    def test_newer_different_goal_boundary_fails_closed(self):
+        expected = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            {"items": [goal_event("different authority"), goal_event(expected)]},
+        ])
+
+        with self.assertRaisesRegex(ProviderError, "goal authority does not match"):
+            provider._ensure_spec_goal(self.spec, expected)
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertFalse(any(method == "POST" for method, _, _ in transport.calls))
+
+    def test_capped_goal_does_not_start_a_second_round(self):
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        capped = goal_event(objective)
+        capped["value"]["status"] = "capped"
+        provider, transport = self.provider([{"items": [capped]}])
+
+        with self.assertRaisesRegex(ProviderError, "terminal or invalid"):
+            provider._ensure_spec_goal(self.spec, objective)
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertFalse(any(method == "POST" for method, _, _ in transport.calls))
 
     def test_spec_chat_checkout_is_derived_from_exact_parent_checkout(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -534,7 +826,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         provider, _ = self.provider([{"id": "bad", "tags": {}}])
         with self.assertRaises(ProviderError):
             provider.target_allowed(self.parent, self.child, "main", self.parent)
-        provider, _ = self.provider([{"active_agent_profile_id": "acp"}])
+        provider, _ = self.provider([profiles()])
         self.assertTrue(provider.readiness())
 
 

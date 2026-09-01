@@ -17,9 +17,15 @@ Only Parent Main may call `create_spec_chat`. It deterministically creates or re
 Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Parent
 Discussion, validates the Parent's clean `main` checkout, and derives one independent isolated Spec
 checkout from its observed head. The caller supplies no repository, branch, or SHA. Messaging needs no
-GitHub credential, public-egress rule, or shared mirror for this operation. It fixes the role to Spec
-on Sol/high and returns its stable ID and Canvas URL. The operation has no generic role, Mission,
-callback, task-control, or Conversation-search surface.
+GitHub credential, public-egress rule, or shared mirror for this operation. New chats bind the
+OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently selected supported
+Agent Profile (`acp` or native `openhands`); the profile, rather than Messaging, owns the model.
+Messaging never calls the ACP model-switch endpoint. It stages the canonical bootstrap without
+starting an ordinary turn, then idempotently establishes one durable OpenHands Goal for the Spec
+question/review/repair/human-approval loop. Existing legacy `spec` chats remain pinned to their
+original launched profile and are reused without metadata migration or model switching. The
+operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
+task-control, or Conversation-search surface.
 
 Parent Main, direct Child Main, and interactive Spec Chat retain their byte-identical `evx2_`
 transport-bound HMAC Bearer capabilities. They identify the sender and owning Parent. Before posting, the provider reads

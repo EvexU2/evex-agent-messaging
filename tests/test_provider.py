@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import copy
 from pathlib import Path
 import subprocess
 import sys
@@ -14,7 +15,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evex_agent_messaging.provider import OpenHandsProvider, ProviderError  # noqa: E402
-from evex_agent_messaging.capability import capability_token  # noqa: E402
+from evex_agent_messaging.capability import (  # noqa: E402
+    CapabilityError, capability_token, main_capability_token, project_capability_token,
+)
 from evex_agent_messaging.service import MessagingService  # noqa: E402
 from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
 
@@ -500,8 +503,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             "humanSummary": "Review passed; no action is needed.",
             "aiEvidence": {"outcome": "passed", "evidence": ["tests: PASS"], "findings": [], "nextBoundary": "merge"},
         }
-        result = provider.send_message(self.parent, self.child, "key-1", message)
-        self.assertEqual(result, {"accepted": True, "messageKey": "key-1"})
+        result = provider.send_message(self.parent, self.child, "result-1", message)
+        self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual(len(transport.calls), 1)
         method, path, body = transport.calls[0]
         self.assertEqual((method, path), ("POST", f"/api/conversations/{self.child}/events"))
@@ -509,7 +512,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(projection.startswith(message["humanSummary"] + "\n<!-- evex-agent-message:v1 "))
         self.assertTrue(projection.endswith(" -->"))
         envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
-        self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "key-1", "senderId": str(self.parent)})
+        self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "result-1", "senderId": str(self.parent)})
 
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])
@@ -533,6 +536,306 @@ class OpenHandsProviderTest(unittest.TestCase):
             provider.target_allowed(self.parent, self.child, "main", self.parent)
         provider, _ = self.provider([{"active_agent_profile_id": "acp"}])
         self.assertTrue(provider.readiness())
+
+
+class ProjectAdmissionTest(unittest.TestCase):
+    """Consumer fixtures only: the host does not yet produce this admission."""
+
+    def setUp(self):
+        self.chat = uuid.UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+        self.parent = uuid.UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")
+        self.secret = b"messaging-test-secret"
+        self.project_id = "native-project-node-id"
+        self.project = {
+            "id": self.project_id, "accountablePmId": "native-pm-node-id",
+            "nominatedChatId": str(self.chat), "state": "open",
+            "accountability": "unique", "subjectAccess": "allowed",
+        }
+        self.root = {
+            "id": "native-workspace-issue-node-id", "repository": "EvexU2/evex-u-workspace",
+            "number": 42, "parentMainId": str(self.parent),
+            "accountableProjectId": self.project_id, "accountablePmId": "native-pm-node-id",
+            "pmAssigned": True, "membershipProjectId": self.project_id,
+            "state": "eligible", "projectChatAccess": "allowed",
+        }
+        self.message = {"humanSummary": "New project context is available.", "aiEvidence": {
+            "outcome": "context", "evidence": ["original-decision-reference"], "findings": [],
+            "nextBoundary": "Parent verifies original authority before action",
+        }}
+
+    def conversation(self, role):
+        identity = self.chat if role == "project" else self.parent
+        return {"id": str(identity), "evexProjectAdmission": {
+            "schemaVersion": 1, "conversationId": str(identity), "role": role,
+            "lifecycle": "eligible", "project": copy.deepcopy(self.project),
+            "root": None if role == "project" else copy.deepcopy(self.root),
+        }}
+
+    def service(self, responses):
+        transport = FakeTransport(responses)
+        provider = OpenHandsProvider("http://openhands", "private-service-key", transport=transport)
+        return MessagingService(provider, self.secret), transport
+
+    def token(self, direction):
+        return (project_capability_token(self.secret, self.chat, self.project_id)
+                if direction == "project" else main_capability_token(self.secret, self.parent))
+
+    def test_project_both_directions_read_exact_endpoints_and_preserve_envelope(self):
+        for direction in ("project", "parent-main"):
+            sender = self.chat if direction == "project" else self.parent
+            target = self.parent if direction == "project" else self.chat
+            sender_value = self.conversation(direction)
+            target_value = self.conversation("parent-main" if direction == "project" else "project")
+            # No tags, user-selected role, generic finished-turn state, or cached facts are used.
+            sender_value["status"] = target_value["status"] = "finished"
+            service, transport = self.service([target_value, sender_value, {}] * 2)
+            for key in ("first-fact", "later-fact"):
+                with self.subTest(direction=direction, key=key):
+                    self.assertEqual(service.send_message(self.token(direction), target, key, self.message),
+                                     {"accepted": True, "messageKey": key})
+            self.assertEqual([(method, path) for method, path, _ in transport.calls], [
+                ("GET", f"/api/conversations/{target}"), ("GET", f"/api/conversations/{sender}"),
+                ("POST", f"/api/conversations/{target}/events"),
+            ] * 2)
+            body = transport.calls[-1][2]
+            self.assertTrue(body["run"])
+            projected = body["content"][0]["text"]
+            envelope = json.loads(projected.split("<!-- evex-agent-message:v1 ", 1)[1].removesuffix(" -->"))
+            self.assertEqual(envelope, {**self.message, "messageKey": "later-fact", "senderId": str(sender)})
+
+    def test_project_message_key_credential_review_regression(self):
+        for direction in ("project", "parent-main"):
+            for key in ("private-service-key", "reference_private-service-key"):
+                with self.subTest(direction=direction, key=key):
+                    opposite = "parent-main" if direction == "project" else "project"
+                    service, transport = self.service([
+                        self.conversation(opposite), self.conversation(direction), {},
+                    ])
+                    target = self.parent if direction == "project" else self.chat
+                    with self.assertRaises(ProviderError) as error:
+                        service.send_message(self.token(direction), target, key, self.message)
+                    self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+                    self.assertLess(len(str(error.exception)), 200)
+                    self.assertNotIn("private-service-key", str(error.exception))
+
+    def test_project_denial_matrix_in_both_directions_has_zero_mutations(self):
+        mutations = [
+            ((), None), (("schemaVersion",), 2), (("schemaVersion",), True),
+            (("unexpected",), "extra"), (("conversationId",), str(uuid.uuid4())),
+            (("conversationId",), "not-a-uuid"), (("conversationId",), str(self.chat).upper()),
+            (("lifecycle",), "terminal"), (("lifecycle",), []),
+            (("role",), "child-main"), (("role",), "spec"), (("role",), []),
+            (("project",), None), (("project", "extra"), True),
+            (("project", "id"), "foreign-project"), (("project", "id"), ""),
+            (("project", "id"), "x" * 257), (("project", "id"), "with space"),
+            (("project", "id"), "ä"), (("project", "accountablePmId"), "different-pm"),
+            (("project", "nominatedChatId"), str(uuid.uuid4())),
+            (("project", "state"), "closed"), (("project", "accountability"), "ambiguous"),
+            (("project", "subjectAccess"), "denied"),
+        ]
+        root_mutations = [
+            (("root",), None), (("root", "extra"), True), (("root", "id"), ""),
+            (("root", "repository"), "EvexU2/another-repo"), (("root", "number"), True),
+            (("root", "number"), 0), (("root", "number"), 42.0),
+            (("root", "parentMainId"), str(uuid.uuid4())),
+            (("root", "accountableProjectId"), "foreign-project"),
+            (("root", "accountablePmId"), "different-pm"),
+            (("root", "pmAssigned"), False), (("root", "pmAssigned"), 1),
+            (("root", "membershipProjectId"), "foreign-project"),
+            (("root", "state"), "terminal"), (("root", "projectChatAccess"), "denied"),
+        ]
+        for direction in ("project", "parent-main"):
+            for damaged_role in ("project", "parent-main"):
+                cases = mutations + (root_mutations if damaged_role == "parent-main" else [(("root",), self.root)])
+                for path, value in cases:
+                    with self.subTest(direction=direction, damaged=damaged_role, path=path, value=value):
+                        values = {role: self.conversation(role) for role in ("project", "parent-main")}
+                        damaged = values[damaged_role]
+                        if not path:
+                            del damaged["evexProjectAdmission"]
+                        else:
+                            obj = damaged["evexProjectAdmission"]
+                            for part in path[:-1]:
+                                obj = obj[part]
+                            obj[path[-1]] = value
+                        opposite = "parent-main" if direction == "project" else "project"
+                        service, transport = self.service([values[opposite], values[direction]])
+                        with self.assertRaises((CapabilityError, ProviderError)):
+                            service.send_message(self.token(direction), self.parent if direction == "project" else self.chat, "denied", self.message)
+                        self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
+
+    def test_project_projection_missing_fields_are_not_defaulted(self):
+        for role in ("project", "parent-main"):
+            original = self.conversation(role)
+            for section in (None, "project", "root"):
+                obj = original["evexProjectAdmission"] if section is None else original["evexProjectAdmission"][section]
+                if obj is None:
+                    continue
+                for key in obj:
+                    value = copy.deepcopy(original)
+                    target = value["evexProjectAdmission"] if section is None else value["evexProjectAdmission"][section]
+                    del target[key]
+                    service, transport = self.service([value])
+                    with self.subTest(role=role, section=section, key=key), self.assertRaises(ProviderError):
+                        service._provider._project_admission(value, self.chat if role == "project" else self.parent)
+                    self.assertEqual(transport.calls, [])
+
+    def test_project_facts_are_fresh_on_each_send_and_unknown_send_is_not_retried(self):
+        revoked = self.conversation("project")
+        revoked["evexProjectAdmission"]["project"]["subjectAccess"] = "denied"
+        service, transport = self.service([
+            self.conversation("parent-main"), self.conversation("project"), {},
+            self.conversation("parent-main"), revoked,
+        ])
+        service.send_message(self.token("project"), self.parent, "same-key", self.message)
+        with self.assertRaises((CapabilityError, ProviderError)):
+            service.send_message(self.token("project"), self.parent, "same-key", self.message)
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST", "GET", "GET"])
+        service, transport = self.service([
+            self.conversation("parent-main"), self.conversation("project"), ProviderError("unknown outcome"),
+        ])
+        with self.assertRaises(ProviderError):
+            service.send_message(self.token("project"), self.parent, "uncertain", self.message)
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
+
+    def test_project_token_binding_outer_identity_and_peer_routes_are_denied(self):
+        for direction in ("project", "parent-main"):
+            opposite = "parent-main" if direction == "project" else "project"
+            for variant in ("sender-id", "target-id", "outer-alias", "peer"):
+                sender, target = self.conversation(direction), self.conversation(opposite)
+                if variant == "sender-id":
+                    sender["id"] = str(uuid.uuid4())
+                elif variant == "target-id":
+                    target["id"] = str(uuid.uuid4())
+                elif variant == "outer-alias":
+                    target["conversation_id"] = str(uuid.uuid4())
+                else:
+                    target["evexProjectAdmission"]["role"] = direction
+                service, transport = self.service([target, sender])
+                with self.subTest(direction=direction, variant=variant), self.assertRaises((CapabilityError, ProviderError)):
+                    service.send_message(self.token(direction), self.parent if direction == "project" else self.chat, "denied", self.message)
+                self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
+        service, transport = self.service([self.conversation("parent-main"), self.conversation("project")])
+        with self.assertRaises((CapabilityError, ProviderError)):
+            service.send_message(project_capability_token(self.secret, self.chat, "other-project"), self.parent, "denied", self.message)
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+
+    def test_project_projection_cannot_fall_back_to_delivery_tags(self):
+        target = self.conversation("project")
+        target["tags"] = discussion(self.chat, "child-main", evexparentissue="EvexU2/evex-u-workspace#42")["tags"]
+        parent = self.conversation("parent-main")
+        parent["tags"] = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#42")["tags"]
+        target["evexProjectAdmission"]["project"]["state"] = "closed"
+        service, transport = self.service([target, parent])
+        with self.assertRaises(ProviderError):
+            service.send_message(self.token("parent-main"), self.chat, "denied", self.message)
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+
+    def test_project_admitted_parent_keeps_ordinary_child_and_spec_routes(self):
+        parent = self.conversation("parent-main")
+        parent["tags"] = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#42")["tags"]
+        for role in ("child-main", "spec"):
+            target_id = uuid.uuid4()
+            target = discussion(target_id, role, evexparentissue="EvexU2/evex-u-workspace#42")
+            service, transport = self.service([target, parent, {}])
+            result = service.send_message(self.token("parent-main"), target_id, "ordinary", self.message)
+            self.assertTrue(result["accepted"])
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
+            service, transport = self.service([parent, {}])
+            token = capability_token(self.secret, owning_main_id=self.parent, sender_id=target_id,
+                                     role="spec" if role == "spec" else "deputy", task_key="issue-42")
+            self.assertTrue(service.send_message(token, self.parent, "ordinary", self.message)["accepted"])
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
+
+    def test_project_tags_cannot_supply_missing_projection(self):
+        fake_chat = discussion(self.chat, "project", evexproject=self.project_id, evexpm="native-pm-node-id")
+        service, transport = self.service([self.conversation("parent-main"), fake_chat])
+        with self.assertRaises((CapabilityError, ProviderError)):
+            service.send_message(self.token("project"), self.parent, "denied", self.message)
+        self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
+
+    def verified_binding(self):
+        return {"success": True, "evexProjectCapability": {
+            "schemaVersion": 1, "conversationId": str(self.chat), "projectId": self.project_id,
+            "bindingVerified": True,
+        }}
+
+    def test_project_private_provision_is_deterministic_exact_and_content_free(self):
+        service, transport = self.service([self.conversation("project"), self.verified_binding()] * 2)
+        request = {"schemaVersion": 1, "conversationId": str(self.chat)}
+        results = [service.provision_project_capability(request) for _ in range(2)]
+        self.assertEqual(results, [self.verified_binding()["evexProjectCapability"]] * 2)
+        self.assertEqual([(method, path) for method, path, _ in transport.calls], [
+            ("GET", f"/api/conversations/{self.chat}"),
+            ("POST", f"/api/conversations/{self.chat}/secrets"),
+        ] * 2)
+        expected = {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+            "kind": "StaticSecret", "value": project_capability_token(self.secret, self.chat, self.project_id),
+        }}}
+        self.assertEqual(transport.calls[1][2], expected)
+        self.assertEqual(transport.calls[3][2], expected)
+        self.assertNotIn("evx3_", json.dumps(results))
+        self.assertNotIn("mcp", json.dumps(results).lower())
+
+    def test_project_private_provision_schema_denial_before_provider_calls(self):
+        request = {"schemaVersion": 1, "conversationId": str(self.chat)}
+        for invalid in (None, [], {}, {**request, "extra": True}, {**request, "schemaVersion": True},
+                        {**request, "schemaVersion": "1"}, {**request, "conversationId": self.chat.hex},
+                        {**request, "conversationId": str(self.chat).upper()},
+                        {**request, "conversationId": 4}):
+            service, transport = self.service([])
+            with self.subTest(invalid=invalid), self.assertRaises(CapabilityError):
+                service.provision_project_capability(invalid)
+            self.assertEqual(transport.calls, [])
+
+    def test_project_private_provision_requires_nominated_eligible_host_project(self):
+        values = [discussion(self.chat, "project"), self.conversation("parent-main")]
+        for path, replacement in (("nominatedChatId", str(uuid.uuid4())), ("subjectAccess", "denied"),
+                                  ("state", "closed"), ("accountability", "ambiguous")):
+            value = self.conversation("project")
+            value["evexProjectAdmission"]["project"][path] = replacement
+            values.append(value)
+        for value in values:
+            service, transport = self.service([value])
+            with self.subTest(value=value), self.assertRaises(ProviderError):
+                service.provision_project_capability({"schemaVersion": 1, "conversationId": str(self.chat)})
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET"])
+
+    def test_project_private_provision_rejects_legacy_and_malformed_postconditions(self):
+        invalid = [{}, {"success": True}, {"success": False}, {**self.verified_binding(), "extra": True}]
+        for key, replacement in (("schemaVersion", True), ("schemaVersion", 2),
+                                 ("conversationId", str(uuid.uuid4())), ("projectId", "foreign-project"),
+                                 ("bindingVerified", False), ("bindingVerified", 1), ("extra", True)):
+            response = self.verified_binding()
+            response["evexProjectCapability"][key] = replacement
+            invalid.append(response)
+        for response in invalid:
+            service, transport = self.service([self.conversation("project"), response])
+            with self.subTest(response=response), self.assertRaises(ProviderError) as raised:
+                service.provision_project_capability({"schemaVersion": 1, "conversationId": str(self.chat)})
+            self.assertLess(len(str(raised.exception)), 200)
+            self.assertNotIn("evx3_", str(raised.exception))
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
+
+    def test_project_private_timeout_does_not_retry_later_exact_trigger_revalidates(self):
+        service, transport = self.service([
+            self.conversation("project"), ProviderError("unknown outcome"),
+            self.conversation("project"), self.verified_binding(),
+        ])
+        request = {"schemaVersion": 1, "conversationId": str(self.chat)}
+        with self.assertRaises(ProviderError):
+            service.provision_project_capability(request)
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(service.provision_project_capability(request), self.verified_binding()["evexProjectCapability"])
+        self.assertEqual(transport.calls[1], transport.calls[3])
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST", "GET", "POST"])
+
+    def test_project_private_auth_uses_existing_service_credential_only_as_trigger(self):
+        service, transport = self.service([])
+        self.assertTrue(service.provisioning_allowed("private-service-key"))
+        for credential in (None, "", "foreign", self.token("project"), "unicode-ä"):
+            self.assertFalse(service.provisioning_allowed(credential))
+        self.assertEqual(transport.calls, [])
 
 
 class ConversationResponseBudgetTest(unittest.TestCase):

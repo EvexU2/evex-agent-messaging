@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import http.client
 import hmac
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import tempfile
@@ -29,6 +31,7 @@ _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
 _SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
+_MESSAGING_ADMISSION = re.compile(r"v1:messaging:[0-9a-f]{64}")
 
 
 class ProviderError(RuntimeError):
@@ -45,6 +48,7 @@ class OpenHandsProvider:
     transport: Callable[[str, str, dict | None], dict] | None = None
     public_url: str = ""
     workspace_root: str = "/home/openhands/workspace/delivery"
+    admission_key: bytes = b""
 
     def _request(self, method: str, path: str, body: dict | None = None) -> dict:
         if self.transport is not None:
@@ -76,7 +80,12 @@ class OpenHandsProvider:
         return value
 
     def readiness(self) -> bool:
-        if not self.base_url.strip() or not self.api_key.strip() or not self.public_url.strip():
+        if (
+            not self.base_url.strip()
+            or not self.api_key.strip()
+            or not self.public_url.strip()
+            or len(self.admission_key.strip()) < 32
+        ):
             return False
         try:
             value = self._request("GET", "/api/agent-profiles")
@@ -198,13 +207,24 @@ class OpenHandsProvider:
             profile_id = self._selected_profile(
                 self._request("GET", "/api/agent-profiles")
             )
+            workspace = {"working_dir": str(self._checkout_path(spec_chat_id))}
+            tags = self._spec_tags(
+                parent_id, issue_ref, issue_number, checkout, profile_id
+            )
+            descriptor = {
+                "conversation_id": str(spec_chat_id),
+                "parent_conversation_id": "",
+                "profile_id": profile_id,
+                "working_dir": workspace["working_dir"],
+                "worktree": False,
+                "tags": tags,
+            }
             payload = {
                 "conversation_id": str(spec_chat_id),
                 "agent_profile_id": profile_id,
-                "workspace": {"working_dir": str(self._checkout_path(spec_chat_id))},
-                "tags": self._spec_tags(
-                    parent_id, issue_ref, issue_number, checkout, profile_id
-                ),
+                "workspace": workspace,
+                "worktree": False,
+                "tags": tags,
                 "autotitle": False,
                 "max_iterations": 300,
                 "secrets": {
@@ -215,6 +235,10 @@ class OpenHandsProvider:
                     "EVEX_AGENT_MESSAGING_CAPABILITY": {
                         "kind": "StaticSecret",
                         "value": capability_ref,
+                    },
+                    "EVEX_DELIVERY_ADMISSION": {
+                        "kind": "StaticSecret",
+                        "value": self._admission_token(descriptor),
                     },
                 },
             }
@@ -289,6 +313,15 @@ class OpenHandsProvider:
                 "headSha": observed_head,
             },
         }
+
+    def _admission_token(self, descriptor: dict[str, Any]) -> str:
+        admission_key = self.admission_key.strip()
+        if len(admission_key) < 32:
+            raise ProviderError("OpenHands delivery admission signer is unavailable")
+        canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+        message = f"evex-delivery-admission:v1\0messaging\0{canonical}".encode()
+        signature = hmac.new(admission_key, message, hashlib.sha256).hexdigest()
+        return f"v1:messaging:{signature}"
 
     @staticmethod
     def _spec_tags(
@@ -378,6 +411,9 @@ class OpenHandsProvider:
             or (
                 not legacy
                 and (
+                    _MESSAGING_ADMISSION.fullmatch(tags.get("evexadmission", ""))
+                    is None
+                    or
                     launched_profile_id != tags.get("evexagentprofile")
                     or (
                         expected_profile_id is not None
@@ -403,6 +439,11 @@ class OpenHandsProvider:
             not in _SUPPORTED_AGENT_KINDS
         ):
             raise ProviderError("OpenHands has no supported active Agent Profile")
+        try:
+            if str(uuid.UUID(profile_id)) != profile_id:
+                raise ValueError("non-canonical UUID")
+        except ValueError as exc:
+            raise ProviderError("OpenHands has no supported active Agent Profile") from exc
         return profile_id
 
     @staticmethod

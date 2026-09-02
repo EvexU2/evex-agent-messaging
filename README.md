@@ -164,23 +164,45 @@ checkout win on replay.
 
 ## Run
 
-```sh
-export EVEX_ENVIRONMENT_ID='dev:lars'
-export EVEX_INTAKE_LABEL='agent:dev:ready:lars'
-export EVEX_MESSAGING_SECRET='long-random-secret'
-export EVEX_DELIVERY_ADMISSION_KEY='long-random-admission-signing-secret'
-export OPENHANDS_URL='http://openhands:8000'
-export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
-export OPENHANDS_API_KEY='server-only-key'
-export EVEX_MESSAGING_TRANSPORT=http
-PYTHONPATH=src python3 -m evex_agent_messaging
-```
+Use the single operator configuration in `evex-u-k8s/.env`, prepared from that repository's
+`.env.example`. Its preflight maps approved non-secret values into `evex-agent-platform`; do not
+create a second Messaging `.env` or export block. This Python service reads its process environment
+only: it does not parse or source an `.env` file.
+
+| Service input | Kubernetes / canonical configuration source | Standalone behavior |
+| --- | --- | --- |
+| `EVEX_ENVIRONMENT_ID` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
+| `EVEX_INTAKE_LABEL` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
+| `OPENHANDS_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) internal origin; no path except `/` |
+| `OPENHANDS_PUBLIC_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) public URL ending in `/canvas` (optional trailing slash) |
+| `EVEX_MESSAGING_SECRET` | Runtime-managed `openhands-auth` Secret, same key | Required existing per-environment HMAC secret |
+| `OPENHANDS_API_KEY` | Runtime-managed `openhands-auth` Secret, key `LOCAL_BACKEND_API_KEY` | Required existing OpenHands session key |
+| `EVEX_DELIVERY_ADMISSION_KEY` | Runtime-managed `openhands-auth` Secret, same key | Required admission-signing secret of at least 32 characters |
+| `EVEX_MESSAGING_TRANSPORT` | Fixed deployment value `http` | Optional `http` or `stdio`; default `stdio` |
+| `EVEX_MESSAGING_HOST` | Default bind address `0.0.0.0` | Optional nonempty bind host/IP |
+| `EVEX_MESSAGING_PORT` | Fixed deployment value `3101` | Optional integer `1`–`65535`; default `3101` |
+
+The table preserves the original nine-input deployment inventory and adds the current admission
+signer as a runtime-managed secret. Transport, host, and port are standalone controls, not extra
+canonical `.env` inputs. Kubernetes Service/probe ports remain coordinated deployment constants.
+Both URLs reject credentials, query, fragment, whitespace, encoded hostnames, backslashes, and
+malformed ports. A transport typo never silently selects stdio. Production additionally requires
+HTTPS for the public URL and rejects local, loopback, unspecified, and ambiguous numeric hosts in
+both URLs after IDNA normalization, without a DNS lookup. Internal HTTP service origins remain
+supported; development may use HTTP and local hosts. These checks do not prove deployment,
+reachability, authentication, or production readiness.
+
+The three signing/session values remain stable runtime-managed credentials. Do not copy them into
+the canonical `.env`, export them from Kubernetes, regenerate them on startup, or replace them with
+a personal GitHub token. A trusted standalone launcher must supply all required values securely and
+may then run `PYTHONPATH=src python3 -m evex_agent_messaging`.
 
 Both environment inputs are required exactly. Production uses `production` with `agent:ready`;
 development uses `dev:<developer>` with `agent:dev:ready:<developer>`, where the suffix matches
 `[a-z0-9][a-z0-9-]{0,33}`. The Parent must already carry the pair before Spec lifecycle work. New
-Spec Chats bind it in the signed admission tags and as `StaticSecret` values. Reused, untagged, or
-foreign Discussions fail closed without environment migration.
+Spec Chats bind it in signed admission tags and as `StaticSecret` values. Reused, untagged, or foreign
+Discussions fail closed without environment migration. Internal Messaging does not read GitHub labels
+or acquire GitHub credentials, and removing an intake label does not stop an admitted Conversation.
 
 The trusted host supplies the per-Discussion capability as the MCP Bearer credential. Agents never
 read or pass it as a tool argument. The OpenHands session credential stays server-side.

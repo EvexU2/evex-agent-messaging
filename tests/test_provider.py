@@ -239,6 +239,14 @@ class OpenHandsProviderTest(unittest.TestCase):
             if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
         )
         self.assertIs(prompt_call[2]["run"], False)
+        prompt_text = prompt_call[2]["content"][0]["text"]
+        self.assertIn(
+            "load the admitted `evex-delivery-spec` package from its registered runtime skill location",
+            prompt_text,
+        )
+        self.assertIn("Do not call `invoke_skill`", prompt_text)
+        self.assertNotIn('invoke_skill(name="evex-delivery-spec")', prompt_text)
+        self.assertIn("Never load skills from the source checkout", prompt_text)
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
 
     def test_reused_spec_chat_receives_the_current_durable_capability(self):
@@ -392,8 +400,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             created,
             {},
             created,
-            {},
             {"items": []},
+            profiles(),
             {},
             {"items": [goal_event(objective)]},
         ])
@@ -422,6 +430,87 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         self.assertTrue(result["created"])
         self.assertIn(("GET", f"/api/conversations/{self.spec}", None), transport.calls)
+        event_posts = [
+            call for call in transport.calls
+            if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
+        ]
+        self.assertEqual(len(event_posts), 1)
+
+    def test_reconciled_create_posts_only_when_initial_prompt_is_absent(self):
+        for label, create_error, prompt_present, expected_created in (
+            ("ambiguous-present", ProviderError("connection closed"), True, True),
+            ("ambiguous-missing", ProviderError("connection closed"), False, True),
+            ("conflict-present", ProviderError("exists", status=409), True, False),
+            ("conflict-missing", ProviderError("exists", status=409), False, False),
+        ):
+            with self.subTest(label=label):
+                parent = discussion(
+                    self.parent,
+                    "parent-main",
+                    evexissue="EvexU2/evex-u-workspace#40",
+                    evexsourcerepository="EvexU2/evex-u-workspace",
+                    evexsourcebranch="main",
+                )
+                parent["workspace"] = {
+                    "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+                }
+                reconciled = spec_discussion(self.spec, self.parent)
+                objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+                identity = (
+                    "EVEX_SPEC_CHAT\n"
+                    "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
+                    f"Parent Main: {self.parent}\n"
+                )
+                prompt_event = {
+                    "kind": "MessageEvent",
+                    "source": "user",
+                    "llm_message": {"content": [{
+                        "type": "text", "text": identity + "Existing kickoff."
+                    }]},
+                }
+                responses = [
+                    parent,
+                    ProviderError("missing", status=404),
+                    profiles(),
+                    create_error,
+                    reconciled,
+                    {},
+                    reconciled,
+                ]
+                if not expected_created:
+                    responses.append({})
+                responses.append({"items": [prompt_event] if prompt_present else []})
+                if not prompt_present:
+                    responses.extend((profiles(), {}))
+                responses.append({"items": [goal_event(objective)]})
+                provider, transport = self.provider(responses)
+                provider.workspace_root = "/tmp"
+                with (
+                    patch.object(
+                        provider,
+                        "_validated_parent_checkout",
+                        return_value=(
+                            Path("/tmp/issue-40-source/evex-u-workspace"),
+                            "a" * 40,
+                        ),
+                    ),
+                    patch.object(provider, "_ensure_checkout", return_value="a" * 40),
+                    patch.object(
+                        provider, "_validate_existing_checkout", return_value="a" * 40
+                    ),
+                ):
+                    result = provider.create_spec_chat(
+                        self.parent, self.spec, "evx2_spec"
+                    )
+
+                self.assertEqual(result["created"], expected_created)
+                event_posts = [
+                    call for call in transport.calls
+                    if call[:2] == (
+                        "POST", f"/api/conversations/{self.spec}/events"
+                    )
+                ]
+                self.assertEqual(len(event_posts), 0 if prompt_present else 1)
 
     def test_create_spec_chat_reconciles_an_ambiguous_initial_prompt(self):
         parent = discussion(
@@ -439,11 +528,12 @@ class OpenHandsProviderTest(unittest.TestCase):
             "EVEX_SPEC_CHAT\n"
             "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
             f"Parent Main: {self.parent}\n"
-            "Your task now: run the interactive Spec Chat for this Issue. First call "
-            "invoke_skill(name=\"evex-delivery-spec\") and follow its runtime-installed EVEX "
-            "references and skills. Never search the source checkout for skills/ or skill-support "
-            "documents. After skill activation, read the current Issue and only the repository "
-            "files required by the invoked EVEX skills."
+            "Your task now: run the interactive Spec Chat for this Issue. First load the admitted "
+            "`evex-delivery-spec` package from its registered runtime skill location and follow "
+            "its EVEX references and skills. Do not call `invoke_skill`; that entry point is not "
+            "exposed by this ACP runtime. Never load skills from the source checkout or search it "
+            "for skill-support documents. After loading the skill, read the current Issue and only "
+            "the repository files required by the EVEX skills."
         )
         prompt_event = {
             "kind": "MessageEvent",
@@ -456,6 +546,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             existing,
             {},
             {"items": []},
+            profiles(),
             ProviderError("connection closed"),
             {"items": [prompt_event]},
             {"items": [goal_event(OpenHandsProvider._spec_goal(
@@ -542,6 +633,14 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(
             payload["tags"]["evexagentprofile"], OPENAI_PROFILE_ID
         )
+        prompt_call = next(
+            call for call in transport.calls
+            if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
+        )
+        prompt_text = prompt_call[2]["content"][0]["text"]
+        self.assertIn('invoke_skill(name="evex-delivery-spec")', prompt_text)
+        self.assertNotIn("Do not call `invoke_skill`", prompt_text)
+        self.assertIn("Never load skills from the source checkout", prompt_text)
         self.assertFalse(any("switch_acp_model" in path for _, path, _ in transport.calls))
 
     def test_unsupported_profile_fails_before_conversation_creation(self):

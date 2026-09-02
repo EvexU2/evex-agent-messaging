@@ -190,17 +190,14 @@ class OpenHandsProvider:
             "branch": branch,
             "headSha": parent_head,
         }
-        prompt = (
+        prompt_identity = (
             "EVEX_SPEC_CHAT\n"
             f"Issue: https://github.com/{issue_ref.replace('#', '/issues/')}\n"
             f"Parent Main: {parent_id}\n"
-            "Your task now: run the interactive Spec Chat for this Issue. First call "
-            "invoke_skill(name=\"evex-delivery-spec\") and follow its runtime-installed EVEX "
-            "references and skills. Never search the source checkout for skills/ or skill-support "
-            "documents. After skill activation, read the current Issue and only the repository "
-            "files required by the invoked EVEX skills."
         )
+        prompt: str | None = None
         created = False
+        create_confirmed = False
         try:
             existing = self._request("GET", f"/api/conversations/{spec_chat_id}")
         except ProviderError as exc:
@@ -210,8 +207,10 @@ class OpenHandsProvider:
                 spec_chat_id, checkout, parent_checkout
             )
             self._require_admission_capability()
-            profile_id = self._selected_profile(
-                self._request("GET", "/api/agent-profiles")
+            profiles = self._request("GET", "/api/agent-profiles")
+            profile_id = self._selected_profile(profiles)
+            prompt = self._spec_prompt(
+                prompt_identity, self._agent_kind(profiles, profile_id)
             )
             workspace = {"working_dir": str(self._checkout_path(spec_chat_id))}
             tags = self._spec_tags(
@@ -246,12 +245,14 @@ class OpenHandsProvider:
             try:
                 self._request("POST", "/api/conversations", payload)
                 created = True
+                create_confirmed = True
             except ProviderError as create_error:
                 try:
                     self._request("GET", f"/api/conversations/{spec_chat_id}")
                 except ProviderError:
                     raise create_error
                 created = create_error.status != 409
+                prompt = None
             self._request(
                 "PATCH",
                 f"/api/conversations/{spec_chat_id}",
@@ -289,7 +290,19 @@ class OpenHandsProvider:
                     "value": capability_ref,
                 }}},
             )
-        if created or not self._has_initial_prompt(spec_chat_id, prompt):
+        if not create_confirmed and not self._has_initial_prompt(
+            spec_chat_id, prompt_identity
+        ):
+            launched = verified.get("launched_agent_profile")
+            launched_profile_id = (
+                launched.get("agent_profile_id") if isinstance(launched, dict) else None
+            )
+            profiles = self._request("GET", "/api/agent-profiles")
+            prompt = self._spec_prompt(
+                prompt_identity,
+                self._agent_kind(profiles, launched_profile_id),
+            )
+        if prompt is not None:
             try:
                 self._request(
                     "POST",
@@ -301,7 +314,7 @@ class OpenHandsProvider:
                     },
                 )
             except ProviderError as prompt_error:
-                if not self._has_initial_prompt(spec_chat_id, prompt):
+                if not self._has_initial_prompt(spec_chat_id, prompt_identity):
                     raise prompt_error
         verified_tags = verified.get("tags")
         if (
@@ -574,6 +587,46 @@ class OpenHandsProvider:
         except ValueError as exc:
             raise ProviderError("OpenHands has no supported active Agent Profile") from exc
         return profile_id
+
+    @staticmethod
+    def _agent_kind(profiles: dict, profile_id: object) -> str:
+        available = {
+            item.get("id"): item
+            for item in profiles.get("profiles", [])
+            if isinstance(item, dict)
+        }
+        kind = (
+            available.get(profile_id, {}).get("agent_kind")
+            if isinstance(profile_id, str)
+            else None
+        )
+        if kind not in _SUPPORTED_AGENT_KINDS:
+            raise ProviderError("OpenHands has no supported Agent Profile kind")
+        return kind
+
+    @staticmethod
+    def _spec_prompt(identity: str, agent_kind: str) -> str:
+        if agent_kind == "acp":
+            activation = (
+                "First load the admitted `evex-delivery-spec` package from its registered runtime "
+                "skill location and follow its EVEX references and skills. Do not call "
+                "`invoke_skill`; that entry point is not exposed by this ACP runtime."
+            )
+        elif agent_kind == "openhands":
+            activation = (
+                'First call invoke_skill(name="evex-delivery-spec") and follow its '
+                "runtime-installed EVEX references and skills."
+            )
+        else:
+            raise ProviderError("OpenHands has no supported Agent Profile kind")
+        return (
+            identity
+            + "Your task now: run the interactive Spec Chat for this Issue. "
+            + activation
+            + " Never load skills from the source checkout or search it for skill-support "
+            "documents. After loading the skill, read the current Issue and only the repository "
+            "files required by the EVEX skills."
+        )
 
     @staticmethod
     def _spec_goal(issue_ref: str) -> str:

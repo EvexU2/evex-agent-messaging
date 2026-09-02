@@ -1179,13 +1179,14 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn(' / "mirrors" / ', source)
         self.assertNotIn('"worktree", "add"', source)
 
-    def test_child_and_spec_can_target_only_their_bound_parent(self):
+    def test_child_and_spec_use_only_their_signed_parent_identity(self):
         for role in ("deputy", "spec"):
-            provider, transport = self.provider([discussion(self.parent, "parent-main")])
+            provider, transport = self.provider([{"id": str(self.parent), "tags": {}}])
             self.assertTrue(provider.target_allowed(self.child, self.parent, role, self.parent))
             self.assertEqual(transport.calls[0][1], f"/api/conversations/{self.parent}")
-        provider, _ = self.provider([discussion(self.child, "child-main")])
+        provider, transport = self.provider([{"id": str(self.child)}])
         self.assertFalse(provider.target_allowed(self.child, self.child, "deputy", self.parent))
+        self.assertEqual(len(transport.calls), 1)
 
     def test_parent_can_target_only_direct_child_or_linked_spec(self):
         parent = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40")
@@ -1610,12 +1611,10 @@ class ConversationResponseBudgetTest(unittest.TestCase):
         self.assertEqual(read_limit, self.LIMIT + 1)
         self.assertNotIn("private-statistics", json.dumps(result))
 
-    def test_large_invalid_id_or_target_role_cannot_authorize_a_post(self):
+    def test_large_invalid_target_identity_cannot_authorize_a_post(self):
         for overrides in (
             {"id": str(uuid.uuid4())},
             {"id": "invalid"},
-            {"tags": {"project": "foreign", "evexdeliveryrole": "parent-main"}},
-            {"tags": {"project": "evex-u", "evexdeliveryrole": "spec"}},
         ):
             with self.subTest(overrides=overrides):
                 result, calls, _ = self.send(self.parent_bytes(69143, **overrides))
@@ -1623,6 +1622,21 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0].args[0].method, "GET")
                 self.assertNotIn("private-statistics", json.dumps(result))
+
+    def test_mutable_target_tags_do_not_revoke_signed_parent_binding(self):
+        for tags in (
+            {"project": "foreign", "evexdeliveryrole": "parent-main"},
+            {"project": "evex-u", "evexdeliveryrole": "spec"},
+            {},
+        ):
+            with self.subTest(tags=tags):
+                result, calls, _ = self.send(self.parent_bytes(69143, tags=tags))
+                self.assertEqual(result["result"]["structuredContent"], {
+                    "accepted": True, "messageKey": "final-review",
+                })
+                self.assertEqual(
+                    [call.args[0].method for call in calls], ["GET", "POST"]
+                )
 
 
 if __name__ == "__main__":

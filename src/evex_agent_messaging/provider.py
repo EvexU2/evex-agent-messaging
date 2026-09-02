@@ -931,6 +931,18 @@ class OpenHandsProvider:
         project_id: str | None = None,
     ) -> bool:
         target = self._request("GET", f"/api/conversations/{target_id}")
+        if role in {"deputy", "spec"}:
+            # The signed capability is the relationship authority. This read
+            # proves only that the exact Discussion still exists; mutable
+            # presentation tags cannot revoke or redirect its durable binding.
+            identities = [
+                target[key] for key in ("id", "conversation_id") if key in target
+            ]
+            return (
+                target_id == owning_main_id
+                and bool(identities)
+                and all(identity == str(target_id) for identity in identities)
+            )
         if role == "project" or (role == "main" and "evexProjectAdmission" in target):
             # Read BOTH exact objects for every Project send; no cache or tag fallback.
             sender = self._request("GET", f"/api/conversations/{sender_id}")
@@ -953,8 +965,6 @@ class OpenHandsProvider:
         )
         if target_identity != target_id:
             return False
-        if role in {"deputy", "spec"}:
-            return target_id == owning_main_id and target_role in {"parent-main", "child-main"}
         if role != "main":
             return False
         sender_identity, sender_tags, sender_role = self._identity(

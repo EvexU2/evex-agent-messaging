@@ -299,6 +299,78 @@ class OpenHandsProviderTest(unittest.TestCase):
             }}},
         ), transport.calls)
 
+    def test_repeated_reuse_accepts_legacy_initial_prompt_without_event_posts(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        existing = spec_discussion(self.spec, self.parent)
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        legacy_prompt = {
+            "kind": "MessageEvent",
+            "source": "user",
+            "llm_message": {"content": [{
+                "type": "text",
+                "text": (
+                    "EVEX_SPEC_CHAT\n"
+                    "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
+                    f"Parent Main: {self.parent}\n"
+                    "Your task now: run the interactive Spec Chat for this Issue using the "
+                    "admitted EVEX Spec skills. Start by reading the current Issue and living "
+                    "Specification."
+                ),
+            }]},
+        }
+        one_reuse = [
+            parent,
+            existing,
+            existing,
+            {},
+            {"items": [legacy_prompt]},
+            {"items": [goal_event(objective)]},
+        ]
+        provider, transport = self.provider(one_reuse + one_reuse)
+        provider.workspace_root = "/tmp"
+
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"),
+                    "a" * 40,
+                ),
+            ),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="b" * 40
+            ),
+        ):
+            first = provider.create_spec_chat(self.parent, self.spec, "evx2_first")
+            second = provider.create_spec_chat(self.parent, self.spec, "evx2_second")
+
+        self.assertFalse(first["created"])
+        self.assertFalse(second["created"])
+        event_posts = [
+            call for call in transport.calls
+            if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
+        ]
+        self.assertEqual(event_posts, [])
+        prompt_reads = [
+            call for call in transport.calls
+            if call[:2] == (
+                "GET",
+                f"/api/conversations/{self.spec}/events/search"
+                "?limit=1&source=user&sort_order=TIMESTAMP",
+            )
+        ]
+        self.assertEqual(len(prompt_reads), 2)
+
     def test_create_spec_chat_reconciles_an_ambiguous_create_response(self):
         parent = discussion(
             self.parent,
@@ -367,8 +439,11 @@ class OpenHandsProviderTest(unittest.TestCase):
             "EVEX_SPEC_CHAT\n"
             "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
             f"Parent Main: {self.parent}\n"
-            "Your task now: run the interactive Spec Chat for this Issue using the admitted "
-            "EVEX Spec skills. Start by reading the current Issue and living Specification."
+            "Your task now: run the interactive Spec Chat for this Issue. First call "
+            "invoke_skill(name=\"evex-delivery-spec\") and follow its runtime-installed EVEX "
+            "references and skills. Never search the source checkout for skills/ or skill-support "
+            "documents. After skill activation, read the current Issue and only the repository "
+            "files required by the invoked EVEX skills."
         )
         prompt_event = {
             "kind": "MessageEvent",

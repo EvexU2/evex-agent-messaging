@@ -194,8 +194,11 @@ class OpenHandsProvider:
             "EVEX_SPEC_CHAT\n"
             f"Issue: https://github.com/{issue_ref.replace('#', '/issues/')}\n"
             f"Parent Main: {parent_id}\n"
-            "Your task now: run the interactive Spec Chat for this Issue using the admitted "
-            "EVEX Spec skills. Start by reading the current Issue and living Specification."
+            "Your task now: run the interactive Spec Chat for this Issue. First call "
+            "invoke_skill(name=\"evex-delivery-spec\") and follow its runtime-installed EVEX "
+            "references and skills. Never search the source checkout for skills/ or skill-support "
+            "documents. After skill activation, read the current Issue and only the repository "
+            "files required by the invoked EVEX skills."
         )
         created = False
         try:
@@ -666,6 +669,10 @@ class OpenHandsProvider:
         return None
 
     def _has_initial_prompt(self, spec_chat_id: uuid.UUID, expected: str) -> bool:
+        expected_lines = expected.splitlines()
+        if len(expected_lines) < 3 or expected_lines[0] != "EVEX_SPEC_CHAT":
+            raise ProviderError("OpenHands Spec prompt identity is invalid")
+        stable_identity = "\n".join(expected_lines[:3]) + "\n"
         events = self._request(
             "GET",
             f"/api/conversations/{spec_chat_id}/events/search"
@@ -677,7 +684,11 @@ class OpenHandsProvider:
             if event.get("kind") == "MessageEvent" and event.get("source") == "user" and any(
                 isinstance(item, dict)
                 and item.get("type") == "text"
-                and item.get("text") == expected
+                and isinstance(item.get("text"), str)
+                and (
+                    item["text"] == expected
+                    or item["text"].startswith(stable_identity)
+                )
                 for item in content or []
             ):
                 return True

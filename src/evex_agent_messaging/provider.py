@@ -917,8 +917,8 @@ class OpenHandsProvider:
     def _project_admission(cls, value: dict, conversation_id: uuid.UUID) -> dict:
         """Consume only the authenticated host's fresh server-computed projection.
 
-        Its presence attests host-verified role, attributable PM-event provenance and
-        current native GitHub facts. Tags, viewers and generic turn state cannot fill gaps.
+        Its presence attests the host-verified Project/Chat/root binding and current
+        native GitHub facts. Tags, viewers and generic turn state cannot fill gaps.
         """
         error = ProviderError("Project relationship admission is unavailable or invalid")
         identities = [value[key] for key in ("id", "conversation_id") if key in value]
@@ -936,27 +936,25 @@ class OpenHandsProvider:
         project = admission["project"]
         if (
             not isinstance(project, dict)
-            or set(project) != {"id", "accountablePmId", "nominatedChatId", "state", "accountability", "subjectAccess"}
-            or not valid_native_id(project["id"]) or not valid_native_id(project["accountablePmId"])
-            or not cls._canonical_uuid(project["nominatedChatId"])
-            or project["state"] != "open" or project["accountability"] != "unique"
+            or set(project) != {"id", "chatId", "state", "subjectAccess"}
+            or not valid_native_id(project["id"])
+            or not cls._canonical_uuid(project["chatId"])
+            or project["state"] != "open"
             or project["subjectAccess"] != "allowed"
         ):
             raise error
         root = admission["root"]
         if admission["role"] == "project":
-            if root is not None or project["nominatedChatId"] != str(conversation_id):
+            if root is not None or project["chatId"] != str(conversation_id):
                 raise error
         elif (
             not isinstance(root, dict)
-            or set(root) != {"id", "repository", "number", "parentMainId", "accountableProjectId", "accountablePmId", "pmAssigned", "membershipProjectId", "state", "projectChatAccess"}
+            or set(root) != {"id", "repository", "number", "parentMainId", "membershipProjectId", "state", "projectChatAccess"}
             or not valid_native_id(root["id"]) or root["repository"] != _WORKSPACE_REPOSITORY
             or type(root["number"]) is not int or root["number"] <= 0
             or root["parentMainId"] != str(conversation_id)
-            or root["accountableProjectId"] != project["id"]
             or root["membershipProjectId"] != project["id"]
-            or root["accountablePmId"] != project["accountablePmId"]
-            or root["pmAssigned"] is not True or root["state"] != "eligible"
+            or root["state"] != "eligible"
             or root["projectChatAccess"] != "allowed"
         ):
             raise error

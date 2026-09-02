@@ -141,7 +141,7 @@ the exact evidence for the receiver without a legacy raw-text path. Malformed, o
 credential-bearing, or unrenderable input fails before any provider mutation with a bounded
 content-free error.
 
-The canonical EVEX dialogue skills own Eva's language, terminology, and explanation depth. Messaging
+The canonical EVEX dialogue skills own Eve's language, terminology, and explanation depth. Messaging
 does not impose a conversation language or locale authority tag, and replay does not rewrite the
 conversation's language or launch instructions. The skills follow the user's own prose from the
 first response, retain explicit Chat-local preferences, and use German only when no initial language

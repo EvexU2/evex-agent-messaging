@@ -940,7 +940,6 @@ class OpenHandsProvider:
             ]
             return (
                 target_id == owning_main_id
-                and bool(identities)
                 and all(identity == str(target_id) for identity in identities)
             )
         if role == "project" or (role == "main" and "evexProjectAdmission" in target):

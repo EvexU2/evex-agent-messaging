@@ -1623,6 +1623,19 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 self.assertEqual(calls[0].args[0].method, "GET")
                 self.assertNotIn("private-statistics", json.dumps(result))
 
+    def test_transitional_parent_without_projected_identity_uses_signed_binding(self):
+        parent = {
+            "execution_status": "running",
+            "stats": {"per_turn": "private-statistics" + "x" * 66000},
+        }
+
+        result, calls, _ = self.send(json.dumps(parent).encode())
+
+        self.assertEqual(result["result"]["structuredContent"], {
+            "accepted": True, "messageKey": "final-review",
+        })
+        self.assertEqual([call.args[0].method for call in calls], ["GET", "POST"])
+
     def test_mutable_target_tags_do_not_revoke_signed_parent_binding(self):
         for tags in (
             {"project": "foreign", "evexdeliveryrole": "parent-main"},

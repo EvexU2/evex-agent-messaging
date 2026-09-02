@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from evex_agent_messaging.mcp_server import McpServer, TOOLS, bearer_capability, make_http_server  # noqa: E402
-from evex_agent_messaging.provider import OpenHandsProvider  # noqa: E402
+from evex_agent_messaging.provider import OpenHandsProvider, ProviderError  # noqa: E402
 from evex_agent_messaging.service import MessagingService  # noqa: E402
 from evex_agent_messaging.capability import inspect_capability  # noqa: E402
 
@@ -185,6 +185,56 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(missing["error"]["code"], -32602)
         self.assertEqual(unknown["error"]["code"], -32602)
         self.assertEqual(self.service.calls, [])
+
+    def test_known_provider_failure_is_actionable_without_exposing_exception_details(self):
+        target = uuid.uuid4()
+        self.service.send_message = lambda *_args: (_ for _ in ()).throw(
+            ProviderError("OpenHands messaging transport failed", status=404)
+        )
+
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "targetId": str(target),
+                    "messageKey": "key",
+                    "message": self.message(),
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32000,
+            "message": "OpenHands messaging transport failed (HTTP 404)",
+        })
+
+    def test_unexpected_provider_exception_remains_generic(self):
+        target = uuid.uuid4()
+        self.service.send_message = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("private implementation detail")
+        )
+
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "targetId": str(target),
+                    "messageKey": "key",
+                    "message": self.message(),
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32000,
+            "message": "messaging operation failed",
+        })
 
     def test_initialize_reports_new_contract_version(self):
         response = self.server.handle({"id": 1, "method": "initialize"})

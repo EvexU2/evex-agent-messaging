@@ -8,7 +8,7 @@ import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .provider import OpenHandsProvider
+from .provider import OpenHandsProvider, ProviderError
 from .capability import PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
 from .service import MessagingService
 
@@ -137,6 +137,11 @@ class McpServer:
                 )
         except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, "invalid messaging request")
+        except ProviderError as exc:
+            message = str(exc)
+            if exc.status is not None:
+                message = f"{message} (HTTP {exc.status})"
+            return self._error(request_id, -32000, message)
         except Exception as exc:
             return self._error(request_id, -32000, "messaging operation failed")
         return self._result(request_id, {

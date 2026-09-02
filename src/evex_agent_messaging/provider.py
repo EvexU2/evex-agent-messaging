@@ -583,7 +583,27 @@ class OpenHandsProvider:
 
     def _ensure_spec_goal(self, spec_chat_id: uuid.UUID, objective: str) -> None:
         status = self._goal_status(spec_chat_id, objective)
-        if status in {"running", "complete", "interrupted"}:
+        if status in {"running", "complete"}:
+            return
+        if status == "interrupted":
+            try:
+                self._request(
+                    "POST",
+                    f"/api/conversations/{spec_chat_id}/goal/resume",
+                    {},
+                )
+            except ProviderError as resume_error:
+                if self._goal_status(spec_chat_id, objective) not in {
+                    "running",
+                    "complete",
+                }:
+                    raise resume_error
+                return
+            if self._goal_status(spec_chat_id, objective) not in {
+                "running",
+                "complete",
+            }:
+                raise ProviderError("OpenHands Spec goal did not resume")
             return
         if status is not None:
             raise ProviderError("OpenHands Spec goal is terminal or invalid")

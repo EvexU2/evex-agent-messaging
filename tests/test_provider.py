@@ -787,16 +787,54 @@ class OpenHandsProviderTest(unittest.TestCase):
             ],
         )
 
-    def test_interrupted_spec_goal_remains_paused_on_idempotent_reuse(self):
+    def test_interrupted_spec_goal_resumes_on_idempotent_reuse(self):
         objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
         interrupted = goal_event(objective)
         interrupted["value"]["status"] = "interrupted"
-        provider, transport = self.provider([{"items": [interrupted]}])
+        running = goal_event(objective)
+        provider, transport = self.provider([
+            {"items": [interrupted]},
+            {},
+            {"items": [running]},
+        ])
 
         provider._ensure_spec_goal(self.spec, objective)
 
-        self.assertEqual(len(transport.calls), 1)
-        self.assertFalse(any(method == "POST" for method, _, _ in transport.calls))
+        self.assertEqual(
+            transport.calls,
+            [
+                (
+                    "GET",
+                    f"/api/conversations/{self.spec}/events/search?limit=100&kind=ConversationStateUpdateEvent&sort_order=TIMESTAMP_DESC",
+                    None,
+                ),
+                (
+                    "POST",
+                    f"/api/conversations/{self.spec}/goal/resume",
+                    {},
+                ),
+                (
+                    "GET",
+                    f"/api/conversations/{self.spec}/events/search?limit=100&kind=ConversationStateUpdateEvent&sort_order=TIMESTAMP_DESC",
+                    None,
+                ),
+            ],
+        )
+
+    def test_ambiguous_spec_goal_resume_reconciles_running_state(self):
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        interrupted = goal_event(objective)
+        interrupted["value"]["status"] = "interrupted"
+        running = goal_event(objective)
+        provider, transport = self.provider([
+            {"items": [interrupted]},
+            ProviderError("connection closed"),
+            {"items": [running]},
+        ])
+
+        provider._ensure_spec_goal(self.spec, objective)
+
+        self.assertEqual(len(transport.calls), 3)
 
     def test_goal_lookup_paginates_before_starting_a_duplicate_round(self):
         objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")

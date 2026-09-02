@@ -1612,16 +1612,33 @@ class ConversationResponseBudgetTest(unittest.TestCase):
         self.assertNotIn("private-statistics", json.dumps(result))
 
     def test_large_invalid_target_identity_cannot_authorize_a_post(self):
-        for overrides in (
+        for identity in (
             {"id": str(uuid.uuid4())},
             {"id": "invalid"},
+            {"conversation_id": str(uuid.uuid4())},
+            {"id": str(self.parent), "conversation_id": str(uuid.uuid4())},
         ):
-            with self.subTest(overrides=overrides):
-                result, calls, _ = self.send(self.parent_bytes(69143, **overrides))
+            with self.subTest(identity=identity):
+                value = {
+                    **identity,
+                    "stats": {"per_turn": "private-statistics" + "x" * 66000},
+                }
+                result, calls, _ = self.send(json.dumps(value).encode())
                 self.assertIn("error", result)
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(calls[0].args[0].method, "GET")
                 self.assertNotIn("private-statistics", json.dumps(result))
+
+    def test_missing_parent_fails_after_one_get_without_event_post(self):
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=ProviderError("missing", status=404),
+        ) as http:
+            result = self.server.handle(self.request, capability_ref=self.capability)
+
+        self.assertEqual(result["error"]["code"], -32000)
+        self.assertEqual(len(http.call_args_list), 1)
+        self.assertEqual(http.call_args.args[0].method, "GET")
 
     def test_transitional_parent_without_projected_identity_uses_signed_binding(self):
         parent = {

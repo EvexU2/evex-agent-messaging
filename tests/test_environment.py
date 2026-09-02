@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 import uuid
 
-from test_provider import discussion, FakeTransport, configured_provider
+from test_provider import discussion, FakeTransport, configured_provider, spec_discussion
 from evex_agent_messaging.mcp_server import main
 from evex_agent_messaging.provider import OpenHandsProvider, ProviderError
 from evex_agent_messaging.capability import capability_token
@@ -60,6 +60,7 @@ class StandaloneConfigurationTest(unittest.TestCase):
             "EVEX_ENVIRONMENT_ID": "dev:lars", "EVEX_INTAKE_LABEL": "agent:dev:ready:lars",
             "EVEX_MESSAGING_SECRET": "secret", "OPENHANDS_URL": "http://openhands:8000",
             "OPENHANDS_API_KEY": "key", "OPENHANDS_PUBLIC_URL": "https://example.test/canvas",
+            "EVEX_DELIVERY_ADMISSION_KEY": "a" * 32,
         }
 
     def test_invalid_configuration_never_serves_or_exposes_value(self):
@@ -171,16 +172,7 @@ class DiscussionEnvironmentTest(unittest.TestCase):
             self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace", evexsourcebranch="main",
         )
-        self.existing = discussion(
-            self.spec, "spec", evexrole="role-child", evextask="issue-40-spec",
-            evexissue="EvexU2/evex-u-workspace#40", evexparent=str(self.parent),
-            evexrepository="EvexU2/evex-u-workspace", evexbranch="spec/issue-40",
-            evexmodel="gpt-5.6-sol", evexreasoning="high",
-        )
-        self.existing.update({
-            "workspace": {"working_dir": f"/tmp/spec-{self.spec}"},
-            "current_model_id": "gpt-5.6-sol",
-        })
+        self.existing = spec_discussion(self.spec, self.parent, legacy=True)
 
     @staticmethod
     def bad_contexts():
@@ -224,7 +216,10 @@ class DiscussionEnvironmentTest(unittest.TestCase):
 
     def test_existing_spec_checkout_failure_precedes_model_and_secret_mutations(self):
         transport = FakeTransport([self.parent_value, self.existing])
-        provider = configured_provider("http://openhands", "key", transport=transport, workspace_root="/tmp")
+        provider = configured_provider(
+            "http://openhands", "key", transport=transport, workspace_root="/tmp",
+            admission_key=b"admission-key" * 4,
+        )
         with patch.object(provider, "_validated_parent_checkout", return_value=(Path("/tmp/source"), "a" * 40)), patch.object(provider, "_validate_existing_checkout", side_effect=ProviderError("wrong checkout")):
             with self.assertRaisesRegex(ProviderError, "wrong checkout"):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_capability")
@@ -250,9 +245,14 @@ class DiscussionEnvironmentTest(unittest.TestCase):
         })
         transport = FakeTransport([
             self.parent_value, ProviderError("missing", status=404),
-            {"active_agent_profile_id": "acp"}, ProviderError("conflict", status=409), foreign,
+            {"active_agent_profile_id": "44444444-4444-4444-8444-444444444444", "profiles": [
+                {"id": "44444444-4444-4444-8444-444444444444", "agent_kind": "acp"},
+            ]}, ProviderError("conflict", status=409), foreign,
         ])
-        provider = configured_provider("http://openhands", "key", transport=transport, workspace_root="/tmp")
+        provider = configured_provider(
+            "http://openhands", "key", transport=transport, workspace_root="/tmp",
+            admission_key=b"admission-key" * 4,
+        )
         with patch.object(provider, "_validated_parent_checkout", return_value=(Path("/tmp/source"), "a" * 40)), patch.object(provider, "_ensure_checkout", return_value="a" * 40):
             with self.assertRaises(ProviderError):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_capability")

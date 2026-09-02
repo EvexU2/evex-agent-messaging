@@ -17,20 +17,123 @@ Only Parent Main may call `create_spec_chat`. It deterministically creates or re
 Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Parent
 Discussion, validates the Parent's clean `main` checkout, and derives one independent isolated Spec
 checkout from its observed head. The caller supplies no repository, branch, or SHA. Messaging needs no
-GitHub credential, public-egress rule, or shared mirror for this operation. It fixes the role to Spec
-on Sol/high and returns its stable ID and Canvas URL. The operation has no generic role, Mission,
-callback, task-control, or Conversation-search surface.
+GitHub credential, public-egress rule, or shared mirror for this operation. New chats bind the
+OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently selected supported
+Agent Profile (`acp` or native `openhands`); the profile, rather than Messaging, owns the model.
+Messaging never calls the ACP model-switch endpoint. It stages the canonical bootstrap without
+starting an ordinary turn, then idempotently establishes one durable OpenHands Goal for the Spec
+question/review/repair/human-approval loop. Existing legacy `spec` chats remain pinned to their
+original launched profile and are reused without metadata migration or model switching. The
+operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
+task-control, or Conversation-search surface.
 
-Only Parent Main, direct Child Main, and interactive Spec Chat receive a transport-bound HMAC Bearer
-capability. The capability identifies the sender and owning Parent. Before posting, the provider reads
-both the exact target and sender Discussions and verifies their relationship and operator-matching
-environment context from admission tags. It never searches or inventories Conversations.
+Parent Main, direct Child Main, and interactive Spec Chat retain their byte-identical `evx2_`
+transport-bound HMAC Bearer capabilities. They identify the sender and owning Parent. Before posting,
+the provider reads both exact Discussions and verifies their relationship and operator-matching
+environment context. It never searches or inventories Conversations.
 Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
 usage statistics. This transport bound does not increase the 20,000-byte outgoing message budget;
 over-limit responses still fail before parsing or dependent event delivery.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
 refresh lifecycle. Ordinary messages therefore post only the target event and never rewrite target
 secrets.
+
+### Project admission (consumer implementation; host producer required)
+
+The nominated Project Chat uses a distinct send-only `evx3_` capability. Messaging remains the sole
+signer. Its payload is `version 3 | sender UUID (16 bytes) | send-only action (2) | Project ID byte
+length (uint16, big-endian) | Project ID | HMAC-SHA256`. The Project capability has no owning Main or
+task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 bytes; no node-ID prefix
+is inferred. Existing `evx2_` bytes, Gateway issuance, and ordinary Delivery routes are unchanged.
+
+Both Project→root Parent and root Parent→Project sends read both exact authenticated
+`GET /api/conversations/{canonicalUuid}` objects on every call. Only the host-computed
+`evexProjectAdmission` projection supplies Project authority, never tags, caller-selected roles,
+token viewers, cached facts, or generic finished-turn status. All nested projection keys and types
+are strict; schema version is the integer `1` (not a boolean).
+Both exact objects must also carry the configured environment/intake tag pair; missing or foreign
+context fails before an event write and is never migrated implicitly.
+
+```text
+evexProjectAdmission = {
+  schemaVersion: 1, conversationId: canonicalUuid,
+  role: "project" | "parent-main", lifecycle: "eligible" | "terminal",
+  project: {
+    id: nativeProjectId, accountablePmId: nativeUserId, nominatedChatId: canonicalUuid,
+    state: "open" | "closed", accountability: "unique" | "ambiguous",
+    subjectAccess: "allowed" | "denied"
+  },
+  root: null | {
+    id: nativeWorkspaceIssueId, repository: "EvexU2/evex-u-workspace", number: positiveInteger,
+    parentMainId: canonicalUuid, accountableProjectId: nativeProjectId,
+    accountablePmId: nativeUserId, pmAssigned: boolean, membershipProjectId: nativeProjectId,
+    state: "eligible" | "terminal", projectChatAccess: "allowed" | "denied"
+  }
+}
+```
+
+`root` is null only for Project; Parent requires the root object. The host's projection attests its
+verified role, original attributable PM-event provenance and fresh native GitHub facts. Messaging
+cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Parent UUID, root
+accountability, native membership and PM assignment. Both endpoints must be eligible, open, uniquely
+accountable and accessible. Missing/malformed/stale, closed, terminal, denied, ambiguous, foreign,
+Child/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
+is absent. A successful event is still only a wake: recipients must revalidate current facts and
+original decision authority before acting.
+
+### Private Project capability provisioning
+
+The existing HTTP process accepts only the internal host trigger:
+
+```text
+POST /internal/project-capability
+Authorization: Bearer <existing host service credential>
+Content-Type: application/json
+
+{"schemaVersion":1,"conversationId":"<canonical UUID>"}
+```
+
+The existing OpenHands service credential authenticates this trigger only, not the PM. The body is
+limited to 1,024 bytes with exact keys; duplicate keys, noncanonical UUIDs, extra fields and unsupported
+versions fail closed. The provider alone checks the host credential and uses the existing authenticated
+host API. No public MCP initialize/list/send operation provisions a capability, and no public mint,
+inventory, lifecycle or control tool is added.
+
+Messaging reads that exact currently nominated eligible Project Chat, derives its deterministic
+capability with the existing Messaging secret, and sends exactly one existing
+`POST /api/conversations/{id}/secrets` request containing only:
+
+```text
+{"secrets":{"EVEX_AGENT_MESSAGING_CAPABILITY":{"kind":"StaticSecret","value":"<capability>"}}}
+```
+
+The required host response is exactly `{"success":true,"evexProjectCapability":{...}}`, whose inner
+object is exactly `{schemaVersion:1, conversationId:<same UUID>, projectId:<same ID>, bindingVerified:true}`.
+A generic legacy success, missing field, identity mismatch or malformed response is unverified.
+The private endpoint returns only that inner version/identity/verified-binding object, never the
+capability, MCP-loaded status, raw provider content or an admission receipt.
+
+The host must revalidate admission and serialize its live/durable comparison before writing. Equal
+live and durable bindings are a no-op without ACP refresh; equal live but missing durable binding
+repairs durable state only; a different binding uses the existing resume-secret path once. The host
+must verify persistence after writing. These are host obligations, not guarantees established by
+Messaging's consumer tests. No extra read API, comparison header, hash or receipt is introduced.
+Timeout or unknown outcome causes no automatic retry. A later normal exact-object trigger reads
+current admission again and relies on the host's compare-before-write behavior.
+
+Source delivery order is Messaging → host producer, with no circular runtime dependency. The host
+producer is currently unavailable, including the admitted per-PM GitHub entitlement/access path;
+consumer fixture passes are not installed support or general-PM access proof. Host authentication,
+PM provenance, persistence/no-refresh behavior, combined two-root Canary and exact-revision runtime
+proof remain required before rollout acceptance. No deployment, activation or live evaluation is
+part of this source change.
+
+Architecture impact: public MCP operations remain two; Messaging creates no new durable actor,
+checkout, service, workflow store, recovery transport or background loop. It admits one additional
+relationship class for the already-existing PM-nominated Chat. PM interaction creates/nominates that
+Chat in the host; the Project/PM owns its authority, it has no source Writer/checkout, and admitted
+messages wake only a bounded processing turn. Closed Projects and terminal Delivery actors remain
+ineligible. The private provisioning request is internal wiring in the existing process.
 
 The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
 most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.
@@ -61,59 +164,23 @@ checkout win on replay.
 
 ## Run
 
-Use the single operator configuration in `evex-u-k8s/.env`, prepared from that repository's
-`.env.example`. Its preflight maps approved values into `evex-agent-platform`; do not create a
-second Messaging `.env` template. This Python service reads its process environment only: it does
-not parse or source an `.env` file.
-
-| Service input | Kubernetes / canonical configuration source | Standalone behavior |
-| --- | --- | --- |
-| `EVEX_ENVIRONMENT_ID` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
-| `EVEX_INTAKE_LABEL` | Same key in canonical `.env`, then `evex-agent-platform` | Required |
-| `OPENHANDS_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) internal origin; no path except `/` |
-| `OPENHANDS_PUBLIC_URL` | Same key in canonical `.env`, then `evex-agent-platform` | Required HTTP(S) public URL ending in `/canvas` (optional trailing slash) |
-| `EVEX_MESSAGING_SECRET` | Runtime-managed `openhands-auth` Secret, same key | Trusted host supplies the existing per-environment HMAC secret |
-| `OPENHANDS_API_KEY` | Runtime-managed `openhands-auth` Secret, key `LOCAL_BACKEND_API_KEY` | Trusted host supplies the existing OpenHands session key |
-| `EVEX_MESSAGING_TRANSPORT` | Fixed deployment value `http` | Optional `http` or `stdio`; default `stdio` |
-| `EVEX_MESSAGING_HOST` | Default bind address `0.0.0.0` | Optional nonempty bind host/IP |
-| `EVEX_MESSAGING_PORT` | Fixed deployment value `3101` | Optional integer `1`–`65535`; default `3101` |
-
-Transport, host, and port are standalone controls, not extra canonical `.env` inputs. Kubernetes
-Service/probe ports remain coordinated deployment constants. Both URLs reject credentials, query,
-fragment, whitespace, and malformed ports. Invalid configuration fails before serving with a sanitized
-error; a transport typo never silently selects stdio. Production additionally requires HTTPS for
-the public URL and rejects known local hosts in both URLs: `localhost`, `.localhost` names,
-loopback IPs, and unspecified IPs (including IPv4-mapped IPv6). Ambiguous numeric IPv4 forms
-(such as `127.1` or hexadecimal addresses) are rejected in production. Encoded hostnames and
-backslashes are rejected in every environment. Production host classification includes IDNA
-normalization and performs no DNS lookup.
-Internal HTTP service origins such as `openhands.evex-agents.svc.cluster.local` remain supported;
-development may use HTTP and local hosts. This configuration check does not prove deployment,
-reachability, authentication, or production readiness.
-
-The OpenHands session key and Messaging signing secret remain stable runtime-managed credentials.
-Do not copy them into the canonical `.env`, export them blindly from Kubernetes, regenerate them
-on startup, or replace them with a personal GitHub token. The trusted standalone launcher supplies
-these credentials securely as part of the six required inputs, then runs:
-
 ```sh
+export EVEX_ENVIRONMENT_ID='dev:lars'
+export EVEX_INTAKE_LABEL='agent:dev:ready:lars'
+export EVEX_MESSAGING_SECRET='long-random-secret'
+export EVEX_DELIVERY_ADMISSION_KEY='long-random-admission-signing-secret'
+export OPENHANDS_URL='http://openhands:8000'
+export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
+export OPENHANDS_API_KEY='server-only-key'
+export EVEX_MESSAGING_TRANSPORT=http
 PYTHONPATH=src python3 -m evex_agent_messaging
 ```
 
-Both environment inputs are required without defaults or whitespace normalization. Production must
-explicitly configure `production` with `agent:ready`; development uses `dev:<developer>` with
-`agent:dev:ready:<developer>`. The developer suffix matches `[a-z0-9][a-z0-9-]{0,33}`.
-A development environment cannot use the production label.
-
-The Parent's `evexenvironment` and `evexintakelabel` tags must match this deployment before
-Spec lifecycle mutations. New Spec Chats receive the same pair in tags and runtime secrets;
-reuse validates context and checkout before model, capability, or event mutation. Every message
-requires current sender and target facts with the same configured pair. Missing, malformed, duplicate,
-or foreign context is rejected; untagged existing Discussions require fresh valid admission, not an
-automatic context backfill. The per-environment HMAC format and public MCP shapes are unchanged.
-Internal messaging does not read GitHub labels or acquire GitHub credentials, and removing an Issue
-intake label does not stop these already-admitted internal Conversations. There is no environment
-handover, new service, state store, or background loop.
+Both environment inputs are required exactly. Production uses `production` with `agent:ready`;
+development uses `dev:<developer>` with `agent:dev:ready:<developer>`, where the suffix matches
+`[a-z0-9][a-z0-9-]{0,33}`. The Parent must already carry the pair before Spec lifecycle work. New
+Spec Chats bind it in the signed admission tags and as `StaticSecret` values. Reused, untagged, or
+foreign Discussions fail closed without environment migration.
 
 The trusted host supplies the per-Discussion capability as the MCP Bearer credential. Agents never
 read or pass it as a tool argument. The OpenHands session credential stays server-side.

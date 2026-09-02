@@ -2,18 +2,31 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
+import ipaddress
 import os
 import re
-from urllib.parse import urlsplit
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 from .provider import OpenHandsProvider
-from .capability import REFERENCE_PREFIX
+from .capability import PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
 from .service import MessagingService
+
+
+_CAPABILITY_PREFIXES = (REFERENCE_PREFIX, PROJECT_REFERENCE_PREFIX)
+_MAX_PROVISION_BYTES = 1024
+
+
+def _unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate field")
+        value[key] = item
+    return value
 
 
 TOOLS = [{
@@ -96,7 +109,7 @@ class McpServer:
             name = params.get("name")
             if name not in {"create_spec_chat", "send_message"}:
                 return self._error(request_id, -32602, "unknown messaging tool")
-            if not isinstance(capability_ref, str) or not capability_ref.startswith(REFERENCE_PREFIX):
+            if not isinstance(capability_ref, str) or not capability_ref.startswith(_CAPABILITY_PREFIXES):
                 raise ValueError("transport capability is required")
             if name == "create_spec_chat":
                 if arguments:
@@ -182,6 +195,9 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/internal/project-capability":
+                self._provision_project_capability()
+                return
             if self.path != "/mcp":
                 self.send_error(404)
                 return
@@ -199,6 +215,38 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             if body:
                 self.wfile.write(body)
 
+        def _provision_project_capability(self):
+            self.close_connection = True
+            status, result = 403, {"error": "Project capability request denied"}
+            try:
+                authorized = server._service.provisioning_allowed(
+                    _bearer_credential(self.headers.get("Authorization"))
+                )
+                if authorized:
+                    lengths = self.headers.get_all("Content-Length", [])
+                    if (
+                        len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit()
+                        or not 0 < int(lengths[0]) <= _MAX_PROVISION_BYTES
+                        or self.headers.get("Transfer-Encoding") is not None
+                    ):
+                        raise ValueError("invalid content length")
+                    raw = self.rfile.read(int(lengths[0]))
+                    if len(raw) != int(lengths[0]):
+                        raise ValueError("incomplete request")
+                    request = json.loads(raw, object_pairs_hook=_unique_object)
+                    result = server._service.provision_project_capability(request)
+                    status = 200
+            except (TypeError, ValueError):
+                status, result = 400, {"error": "invalid Project capability request"}
+            except Exception:
+                status, result = 503, {"error": "Project capability operation failed"}
+            body = json.dumps(result, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *_args):
             return
 
@@ -210,10 +258,15 @@ def serve_http(server: McpServer, host: str = "0.0.0.0", port: int = 3101) -> No
 
 
 def bearer_capability(value: str | None) -> str | None:
-    if not isinstance(value, str) or not value.startswith(f"Bearer {REFERENCE_PREFIX}"):
+    token = _bearer_credential(value)
+    return token if token is not None and token.startswith(_CAPABILITY_PREFIXES) else None
+
+
+def _bearer_credential(value: str | None) -> str | None:
+    if not isinstance(value, str) or not value.startswith("Bearer "):
         return None
     token = value.removeprefix("Bearer ")
-    return token if " " not in token else None
+    return token if token and not any(character.isspace() for character in token) else None
 
 
 def is_local_or_ambiguous_host(host: str) -> bool:
@@ -226,7 +279,6 @@ def is_local_or_ambiguous_host(host: str) -> bool:
     try:
         address = ipaddress.ip_address(normalized)
     except ValueError:
-        # Reject numeric aliases such as 127.1, octal, hex, or integer IPv4 without DNS.
         return all(re.fullmatch(r"[0-9]+|0x[0-9a-f]+", part) for part in normalized.split("."))
     if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
         address = address.ipv4_mapped
@@ -266,8 +318,14 @@ def main() -> int:
     secret = os.environ.get("EVEX_MESSAGING_SECRET", "")
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
-    if not all(value.strip() for value in (secret, base_url, api_key)):
-        raise SystemExit("EVEX_MESSAGING_SECRET, OPENHANDS_URL, and OPENHANDS_API_KEY are required")
+    admission_key = os.environ.get("EVEX_DELIVERY_ADMISSION_KEY", "").strip()
+    if not all(value.strip() for value in (secret, base_url, api_key, admission_key)):
+        raise SystemExit(
+            "EVEX_MESSAGING_SECRET, EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, "
+            "and OPENHANDS_API_KEY are required"
+        )
+    if len(admission_key) < 32:
+        raise SystemExit("EVEX_DELIVERY_ADMISSION_KEY must be at least 32 characters")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
@@ -285,9 +343,12 @@ def main() -> int:
         raise SystemExit("EVEX_MESSAGING_PORT must be an integer from 1 to 65535")
     try:
         provider = OpenHandsProvider(
-            base_url, api_key, public_url=public_url,
+            base_url,
+            api_key,
             environment_id=os.environ.get("EVEX_ENVIRONMENT_ID", ""),
             intake_label=os.environ.get("EVEX_INTAKE_LABEL", ""),
+            public_url=public_url,
+            admission_key=admission_key.encode(),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None

@@ -713,20 +713,30 @@ class OpenHandsProvider:
             )
         else:
             raise ProviderError("OpenHands has no supported Agent Profile kind")
+        identity_lines = identity.splitlines()
+        if len(identity_lines) != 3 or identity_lines[0] != "EVEX_SPEC_CHAT":
+            raise ProviderError("OpenHands Spec prompt identity is invalid")
         return (
-            identity
-            + "Your task now: run the interactive Spec Chat for this Issue. "
+            "EVEX_SPEC_CHAT\n"
+            "Your task now: run the interactive Spec Chat for the Issue identified below. "
             + activation
             + " Never load skills from the source checkout or search it for skill-support "
             "documents. After loading the skill, read the current Issue and only the repository "
-            "files required by the EVEX skills."
+            "files required by the EVEX skills.\n"
+            + "\n".join(identity_lines[1:])
+            + "\n"
         )
 
     def _has_initial_prompt(self, spec_chat_id: uuid.UUID, expected: str) -> bool:
         expected_lines = expected.splitlines()
-        if len(expected_lines) < 3 or expected_lines[0] != "EVEX_SPEC_CHAT":
+        if not expected_lines or expected_lines[0] != "EVEX_SPEC_CHAT":
             raise ProviderError("OpenHands Spec prompt identity is invalid")
-        stable_identity = "\n".join(expected_lines[:3]) + "\n"
+        expected_identity = tuple(
+            line for line in expected_lines
+            if line.startswith("Issue: ") or line.startswith("Parent Main: ")
+        )
+        if len(expected_identity) != 2:
+            raise ProviderError("OpenHands Spec prompt identity is invalid")
         events = self._request(
             "GET",
             f"/api/conversations/{spec_chat_id}/events/search"
@@ -741,7 +751,10 @@ class OpenHandsProvider:
                 and isinstance(item.get("text"), str)
                 and (
                     item["text"] == expected
-                    or item["text"].startswith(stable_identity)
+                    or (
+                        item["text"].startswith("EVEX_SPEC_CHAT\n")
+                        and all(identity in item["text"].splitlines() for identity in expected_identity)
+                    )
                 )
                 for item in content or []
             ):

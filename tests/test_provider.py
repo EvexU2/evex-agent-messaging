@@ -635,14 +635,14 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
         expected_prompt = (
             "EVEX_SPEC_CHAT\n"
-            "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-            f"Parent Main: {self.parent}\n"
-            "Your task now: run the interactive Spec Chat for this Issue. First load the admitted "
+            "Your task now: run the interactive Spec Chat for the Issue identified below. First load the admitted "
             "`evex-delivery-spec` package from its registered runtime skill location and follow "
             "its EVEX references and skills. Do not call `invoke_skill`; that entry point is not "
             "exposed by this ACP runtime. Never load skills from the source checkout or search it "
             "for skill-support documents. After loading the skill, read the current Issue and only "
-            "the repository files required by the EVEX skills."
+            "the repository files required by the EVEX skills.\n"
+            "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
+            f"Parent Main: {self.parent}\n"
         )
         prompt_event = {
             "kind": "MessageEvent",

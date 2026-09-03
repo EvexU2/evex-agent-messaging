@@ -82,7 +82,7 @@ class McpServerTest(unittest.TestCase):
         )
         self.assertEqual(
             TOOLS[1]["inputSchema"]["properties"]["description"]["maxLength"],
-            120,
+            256,
         )
         self.assertNotIn(
             "repair", TOOLS[1]["inputSchema"]["properties"]["agentType"]["enum"]

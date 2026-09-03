@@ -231,11 +231,22 @@ class MessagingService:
                 raise CapabilityError("message AI evidence is invalid")
         for key in ("evidence", "findings"):
             values = evidence.get(key)
-            if not isinstance(values, list) or len(values) > _MAX_EVIDENCE_ITEMS or any(
-                not isinstance(value, str) or not value.strip() or len(value.encode()) > _MAX_EVIDENCE_ITEM_BYTES
-                for value in values
-            ):
-                raise CapabilityError("message AI evidence is invalid")
+            if not isinstance(values, list):
+                raise CapabilityError(f"message aiEvidence.{key} must be an array")
+            if len(values) > _MAX_EVIDENCE_ITEMS:
+                raise CapabilityError(
+                    f"message aiEvidence.{key} exceeds {_MAX_EVIDENCE_ITEMS} items"
+                )
+            for index, value in enumerate(values):
+                if not isinstance(value, str) or not value.strip():
+                    raise CapabilityError(
+                        f"message aiEvidence.{key}[{index}] must be a non-empty string"
+                    )
+                if len(value.encode()) > _MAX_EVIDENCE_ITEM_BYTES:
+                    raise CapabilityError(
+                        f"message aiEvidence.{key}[{index}] exceeds "
+                        f"{_MAX_EVIDENCE_ITEM_BYTES} UTF-8 bytes"
+                    )
         try:
             canonical = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError):

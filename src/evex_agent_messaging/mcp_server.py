@@ -36,7 +36,7 @@ TOOLS = [{
     },
 }, {
     "name": "send_message",
-    "description": "Send one bounded structured message to one exact known durable Discussion target.",
+    "description": "Send one bounded structured message to one exact known allowed Conversation target.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
@@ -92,7 +92,7 @@ class McpServer:
             return self._result(request_id, {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "evex-agent-messaging", "version": "0.3.0"},
+                "serverInfo": {"name": "evex-agent-messaging", "version": "0.4.0"},
             })
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
@@ -202,6 +202,9 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             if self.path == "/internal/project-capability":
                 self._provision_project_capability()
                 return
+            if self.path == "/internal/specialist-capability":
+                self._provision_specialist_capability()
+                return
             if self.path != "/mcp":
                 self.send_error(404)
                 return
@@ -244,6 +247,45 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
                 status, result = 400, {"error": "invalid Project capability request"}
             except Exception:
                 status, result = 503, {"error": "Project capability operation failed"}
+            body = json.dumps(result, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _provision_specialist_capability(self):
+            self.close_connection = True
+            status, result = 403, {"error": "Specialist capability request denied"}
+            capability = bearer_capability(self.headers.get("Authorization"))
+            if capability is None:
+                self._write_specialist_capability_response(status, result)
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (
+                    len(lengths) != 1
+                    or not lengths[0].isascii()
+                    or not lengths[0].isdigit()
+                    or not 0 < int(lengths[0]) <= _MAX_PROVISION_BYTES
+                    or self.headers.get("Transfer-Encoding") is not None
+                ):
+                    raise ValueError("invalid content length")
+                raw = self.rfile.read(int(lengths[0]))
+                if len(raw) != int(lengths[0]):
+                    raise ValueError("incomplete request")
+                request = json.loads(raw, object_pairs_hook=_unique_object)
+                result = server._service.provision_specialist_capability(
+                    capability, request
+                )
+                status = 200
+            except (CapabilityError, TypeError, ValueError):
+                status, result = 400, {"error": "invalid Specialist capability request"}
+            except Exception:
+                status, result = 503, {"error": "Specialist capability operation failed"}
+            self._write_specialist_capability_response(status, result)
+
+        def _write_specialist_capability_response(self, status, result):
             body = json.dumps(result, separators=(",", ":")).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")

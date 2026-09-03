@@ -81,6 +81,57 @@ class MessagingServiceTest(unittest.TestCase):
         with self.assertRaises(CapabilityError):
             inspect_capability(self.child_token()[:-1] + "x", self.secret)
 
+    def test_parent_delegates_one_specialist_capability_bound_to_itself(self):
+        specialist = uuid.uuid4()
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        result = service.provision_specialist_capability(
+            self.main_token(),
+            {
+                "schemaVersion": 1,
+                "parentId": str(self.parent),
+                "specialistId": str(specialist),
+                "taskKey": "plan-author-initial",
+            },
+        )
+
+        delegated = inspect_capability(result["capability"], self.secret)
+        self.assertEqual(delegated.owning_main_id, self.parent)
+        self.assertEqual(delegated.sender_id, specialist)
+        self.assertEqual(delegated.task_key, "plan-author-initial")
+        self.assertEqual(delegated.role, "specialist")
+        service.send_message(
+            result["capability"], self.parent, "plan-author-result", self.message()
+        )
+        self.assertEqual(
+            provider.calls[0],
+            ("allowed", (specialist, self.parent, "specialist", self.parent)),
+        )
+
+    def test_specialist_capability_cannot_delegate_or_target_another_discussion(self):
+        specialist = uuid.uuid4()
+        service = MessagingService(FakeProvider(), self.secret)
+        result = service.provision_specialist_capability(
+            self.main_token(),
+            {
+                "schemaVersion": 1,
+                "parentId": str(self.parent),
+                "specialistId": str(specialist),
+                "taskKey": "qa",
+            },
+        )
+        with self.assertRaisesRegex(CapabilityError, "coordinator"):
+            service.provision_specialist_capability(
+                result["capability"],
+                {
+                    "schemaVersion": 1,
+                    "parentId": str(specialist),
+                    "specialistId": str(uuid.uuid4()),
+                    "taskKey": "nested",
+                },
+            )
+
     def test_frozen_v2_capability_bytes_are_unchanged(self):
         owner = uuid.UUID("11111111-1111-4111-8111-111111111111")
         sender = uuid.UUID("22222222-2222-4222-8222-222222222222")

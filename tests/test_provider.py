@@ -1474,6 +1474,29 @@ class ProjectAdmissionTest(unittest.TestCase):
             self.assertTrue(service.send_message(token, self.parent, "ordinary", self.message)["accepted"])
             self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
 
+    def test_specialist_message_is_bound_to_its_exact_owning_discussion(self):
+        specialist = uuid.uuid4()
+        parent = self.conversation("parent-main")
+        service, transport = self.service([parent, {}])
+
+        self.assertTrue(
+            service.send_message(
+                capability_token(
+                    self.secret,
+                    owning_main_id=self.parent,
+                    sender_id=specialist,
+                    task_key="plan-author",
+                    role="specialist",
+                ),
+                self.parent,
+                "result",
+                self.message,
+            )["accepted"]
+        )
+        self.assertEqual(
+            [method for method, _, _ in transport.calls], ["GET", "POST"]
+        )
+
     def test_project_tags_cannot_supply_missing_projection(self):
         fake_chat = discussion(self.chat, "project", evexproject=self.project_id, evexpm="native-pm-node-id")
         service, transport = self.service([self.conversation("parent-main"), fake_chat])

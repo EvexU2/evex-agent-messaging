@@ -20,7 +20,7 @@ TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEADER = struct.Struct(">B16s16sBBH")
 _PROJECT_HEADER = struct.Struct(">B16sBH")
 _SIGNATURE_BYTES = 32
-_ROLE_IDS = {"main": 1, "deputy": 2, "spec": 3}
+_ROLE_IDS = {"main": 1, "deputy": 2, "spec": 3, "specialist": 4}
 _ROLES = {value: key for key, value in _ROLE_IDS.items()}
 _SEND_MESSAGE_BIT = 2
 _CREATE_SPEC_CHAT_BIT = 1
@@ -88,7 +88,7 @@ def capability_token(
         or not TASK_KEY_RE.fullmatch(task_key)
         or role not in _ROLE_IDS
         or (role == "main" and owning_main_id != sender_id)
-        or (role in {"deputy", "spec"} and owning_main_id == sender_id)
+        or (role in {"deputy", "spec", "specialist"} and owning_main_id == sender_id)
     ):
         raise CapabilityError("invalid capability inputs")
     task = task_key.encode()

@@ -8,8 +8,10 @@ from typing import Any, Protocol
 import uuid
 
 from .capability import (
+    Capability,
     CapabilityError,
     ProjectCapability,
+    TASK_KEY_RE,
     capability_token,
     deterministic_spec_chat_id,
     inspect_capability,
@@ -127,6 +129,48 @@ class MessagingService:
             spec_capability,
         )
         return {**result, "specChatId": str(spec_chat_id)}
+
+    def provision_specialist_capability(
+        self,
+        token: str,
+        request: object,
+    ) -> dict[str, Any]:
+        """Delegate the existing sender's message authority to one owned Specialist."""
+        parent = inspect_capability(token, self._secret)
+        if isinstance(parent, Capability) and parent.role == "specialist":
+            raise CapabilityError("only a coordinator may provision a Specialist capability")
+        if not isinstance(request, dict) or set(request) != {
+            "schemaVersion",
+            "parentId",
+            "specialistId",
+            "taskKey",
+        }:
+            raise CapabilityError("invalid Specialist capability request")
+        if request["schemaVersion"] != 1 or type(request["schemaVersion"]) is not int:
+            raise CapabilityError("invalid Specialist capability request")
+        try:
+            parent_id = uuid.UUID(request["parentId"])
+            specialist_id = uuid.UUID(request["specialistId"])
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise CapabilityError("invalid Specialist capability request") from exc
+        task_key = request["taskKey"]
+        if (
+            str(parent_id) != request["parentId"]
+            or str(specialist_id) != request["specialistId"]
+            or parent_id != parent.sender_id
+            or parent_id == specialist_id
+            or not isinstance(task_key, str)
+            or TASK_KEY_RE.fullmatch(task_key) is None
+        ):
+            raise CapabilityError("invalid Specialist capability request")
+        capability = capability_token(
+            self._secret,
+            owning_main_id=parent_id,
+            sender_id=specialist_id,
+            task_key=task_key,
+            role="specialist",
+        )
+        return {**request, "capability": capability}
 
     def send_message(
         self,

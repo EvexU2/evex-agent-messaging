@@ -34,22 +34,21 @@ _MAX_EVIDENCE_ITEMS = 100
 _MAX_EVIDENCE_ITEM_BYTES = 2_000
 _MAX_ARTIFACT_BYTES = 64_000
 _MAX_TERMINAL_MESSAGE_BYTES = 80_000
-_SPECIALIST_REASONING = {"spec-reviewer": "high"}
+_SPECIALIST_REASONING = {"spec-review": "high"}
 _SPECIALIST_SKILLS = {
-    "plan-author": "evex-delivery-planning",
-    "plan-reviewer": "evex-delivery-planning",
-    "project-reviewer": "evex-project-review",
+    "plan": "evex-delivery-planning",
+    "plan-review": "evex-delivery-planning",
+    "project-review": "evex-project-review",
     "qa": "evex-delivery-qa",
-    "repair": "evex-delivery-repair",
-    "reviewer": "evex-delivery-reviewer",
-    "spec-reviewer": "evex-spec-review",
+    "code-review": "evex-delivery-reviewer",
+    "spec-review": "evex-spec-review",
     "writer": "evex-delivery-writer",
 }
 _ROLE_SPECIALISTS = {
-    "main": {"plan-author", "plan-reviewer", "reviewer", "qa", "repair"},
-    "deputy": {"writer", "reviewer", "qa", "repair"},
-    "spec": {"spec-reviewer"},
-    "project": {"project-reviewer"},
+    "issue": {"plan", "plan-review", "code-review", "qa"},
+    "subissue": {"writer", "code-review", "qa"},
+    "spec": {"spec-review"},
+    "project": {"project-review"},
     "specialist": set(_SPECIALIST_SKILLS),
 }
 
@@ -83,7 +82,7 @@ class MessagingProvider(Protocol):
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         role: str,
-        owning_main_id: uuid.UUID | None,
+        owning_issue_id: uuid.UUID | None,
         project_id: str | None = None,
     ) -> bool: ...
 
@@ -139,14 +138,14 @@ class MessagingService:
     ) -> dict[str, Any]:
         capability = inspect_capability(token, self._secret)
         if (
-            capability.role != "main"
-            or capability.sender_id != capability.owning_main_id
+            capability.role != "issue"
+            or capability.sender_id != capability.owning_issue_id
         ):
-            raise CapabilityError("only a Parent Main may create the Spec Chat")
+            raise CapabilityError("only an Issue Conversation may create the Spec Chat")
         spec_chat_id = deterministic_spec_chat_id(capability.sender_id)
         spec_capability = capability_token(
             self._secret,
-            owning_main_id=capability.sender_id,
+            owning_issue_id=capability.sender_id,
             sender_id=spec_chat_id,
             task_key="spec",
             role="spec",
@@ -175,7 +174,9 @@ class MessagingService:
         if not isinstance(mission_key, str) or TASK_KEY_RE.fullmatch(mission_key) is None:
             raise CapabilityError("missionKey is invalid")
         normalized_prompt = self._bounded_text(prompt, "prompt", 32_768)
-        normalized_description = self._bounded_text(description, "description", 120)
+        normalized_description = self._bounded_text(
+            description, "description", 60, collapse_whitespace=True
+        )
         skill_names = self._skill_names(skills)
         role_skill = _SPECIALIST_SKILLS[agent_type]
         if role_skill not in skill_names:
@@ -208,7 +209,7 @@ class MessagingService:
         ).hexdigest()
         specialist_capability = capability_token(
             self._secret,
-            owning_main_id=parent.sender_id,
+            owning_issue_id=parent.sender_id,
             sender_id=specialist_id,
             task_key=mission_id,
             role="specialist",
@@ -233,10 +234,18 @@ class MessagingService:
         return {**result, "conversationId": str(specialist_id)}
 
     @staticmethod
-    def _bounded_text(value: object, label: str, maximum: int) -> str:
+    def _bounded_text(
+        value: object,
+        label: str,
+        maximum: int,
+        *,
+        collapse_whitespace: bool = False,
+    ) -> str:
         if not isinstance(value, str) or not value.strip():
             raise CapabilityError(f"{label} is required")
         normalized = value.strip()
+        if collapse_whitespace:
+            normalized = " ".join(normalized.replace("·", "-").split())
         if len(normalized) > maximum:
             raise CapabilityError(f"{label} exceeds {maximum} characters")
         return normalized
@@ -281,7 +290,7 @@ class MessagingService:
             )
         else:
             allowed = self._provider.target_allowed(
-                capability.sender_id, target_id, capability.role, capability.owning_main_id,
+                capability.sender_id, target_id, capability.role, capability.owning_issue_id,
             )
         if not allowed:
             raise CapabilityError("message target is not allowed")

@@ -9,7 +9,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider, ProviderError
-from .capability import PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
+from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
 from .service import MessagingService
 
 
@@ -135,6 +135,8 @@ class McpServer:
                     arguments["messageKey"],
                     arguments["message"],
                 )
+        except CapabilityError as exc:
+            return self._error(request_id, -32602, str(exc))
         except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, "invalid messaging request")
         except ProviderError as exc:

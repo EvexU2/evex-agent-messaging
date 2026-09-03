@@ -31,6 +31,10 @@ class FakeService:
         self.calls.append(args)
         return {"created": True, "specChatId": "spec-id"}
 
+    def start_specialist(self, *args, **kwargs):
+        self.calls.append(("start-specialist", args, kwargs))
+        return {"created": True, "conversationId": "specialist-id", "status": "running"}
+
     def readiness(self):
         return True
 
@@ -42,10 +46,6 @@ class FakeService:
         return {"schemaVersion": 1, "conversationId": request["conversationId"],
                 "projectId": "native-project-node-id", "bindingVerified": True}
 
-    def provision_specialist_capability(self, capability, request):
-        self.calls.append(("provision-specialist", capability, request))
-        return {**request, "capability": "evx2_specialist"}
-
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -56,20 +56,24 @@ class McpServerTest(unittest.TestCase):
     def message():
         return {"humanSummary": "Delivery passed", "aiEvidence": {"outcome": "passed", "evidence": [], "findings": [], "nextBoundary": "review"}}
 
-    def test_lists_only_spec_lifecycle_and_message_tools(self):
+    def test_lists_only_conversation_creation_and_message_tools(self):
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         self.assertEqual(
             [tool["name"] for tool in response["result"]["tools"]],
-            ["create_spec_chat", "send_message"],
+            ["create_spec_chat", "start_specialist", "send_message"],
         )
         self.assertEqual(TOOLS[0]["inputSchema"], {
             "type": "object",
             "additionalProperties": False,
             "properties": {},
         })
-        self.assertEqual(TOOLS[1]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
+        self.assertEqual(
+            TOOLS[1]["inputSchema"]["required"],
+            ["missionKey", "prompt", "agentType", "description"],
+        )
+        self.assertEqual(TOOLS[2]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
-        message_schema = TOOLS[1]["inputSchema"]["properties"]["message"]
+        message_schema = TOOLS[2]["inputSchema"]["properties"]["message"]
         self.assertIn("never a JSON-encoded string", message_schema["description"])
         self.assertEqual(message_schema["required"], ["humanSummary", "aiEvidence"])
         self.assertFalse(message_schema["additionalProperties"])
@@ -81,7 +85,7 @@ class McpServerTest(unittest.TestCase):
         self.assertFalse(evidence_schema["additionalProperties"])
         self.assertEqual(
             set(evidence_schema["properties"]),
-            {"outcome", "revision", "evidence", "findings", "nextBoundary"},
+            {"outcome", "revision", "evidence", "findings", "nextBoundary", "artifact"},
         )
         self.assertEqual(evidence_schema["properties"]["evidence"]["items"]["type"], "string")
         self.assertIn(
@@ -93,6 +97,30 @@ class McpServerTest(unittest.TestCase):
             evidence_schema["properties"]["evidence"]["description"],
         )
         self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
+        self.assertEqual(evidence_schema["properties"]["artifact"]["maxLength"], 64000)
+
+    def test_start_specialist_uses_transport_bound_coordinator_capability(self):
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "start_specialist",
+                "arguments": {
+                    "missionKey": "plan-author-initial",
+                    "prompt": "Draft the bounded plan.",
+                    "agentType": "plan-author",
+                    "description": "Draft plan",
+                    "skills": ["evex-delivery-planning"],
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(
+            response["result"]["structuredContent"]["conversationId"],
+            "specialist-id",
+        )
+        self.assertEqual(self.service.calls[0][0], "start-specialist")
 
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):
         response = self.server.handle({
@@ -274,7 +302,7 @@ class McpServerTest(unittest.TestCase):
 
     def test_initialize_reports_new_contract_version(self):
         response = self.server.handle({"id": 1, "method": "initialize"})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.4.0")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.5.0")
 
     def test_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx2_test"), "evx2_test")
@@ -340,35 +368,6 @@ class ProjectPrivateHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {**request, "projectId": "native-project-node-id", "bindingVerified": True})
         self.assertEqual(self.service.calls, [("provision", request)])
-
-    def test_specialist_capability_uses_existing_parent_capability_and_same_server(self):
-        request = {
-            "schemaVersion": 1,
-            "parentId": self.conversation_id,
-            "specialistId": str(uuid.uuid4()),
-            "taskKey": "plan-author",
-        }
-        status, body = self.post(
-            json.dumps(request),
-            credential="evx2_parent",
-            path="/internal/specialist-capability",
-        )
-        self.assertEqual(status, 200)
-        self.assertEqual(json.loads(body), {**request, "capability": "evx2_specialist"})
-        self.assertEqual(
-            self.service.calls,
-            [("provision-specialist", "evx2_parent", request)],
-        )
-
-    def test_specialist_capability_rejects_non_capability_before_parsing(self):
-        status, body = self.post(
-            "private-invalid-json",
-            credential="private-service-key",
-            path="/internal/specialist-capability",
-        )
-        self.assertEqual(status, 403)
-        self.assertEqual(json.loads(body), {"error": "Specialist capability request denied"})
-        self.assertEqual(self.service.calls, [])
 
     def test_project_private_http_real_service_uses_existing_exact_authenticated_host_paths(self):
         self.server._service = MessagingService(OpenHandsProvider("http://openhands", "private-service-key"), b"signing-secret")

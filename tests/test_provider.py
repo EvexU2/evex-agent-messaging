@@ -246,6 +246,121 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertIn("Never load skills from the source checkout", prompt_text)
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
 
+    def test_start_specialist_creates_one_direct_message_bound_conversation(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexrole="main",
+            evextask="issue-40",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-agent-skills",
+            evexsourcebranch="main",
+            evexagentprofile=ACP_PROFILE_ID,
+        )
+        parent["workspace"] = {"working_dir": "/workspace/root"}
+        parent["launched_agent_profile"] = {"agent_profile_id": ACP_PROFILE_ID}
+        mission = {
+            "missionKey": "plan-author-initial",
+            "missionId": "a" * 64,
+            "prompt": "Draft the bounded plan.",
+            "promptDigest": "b" * 64,
+            "agentType": "plan-author",
+            "description": "Draft plan",
+            "skills": ["evex-delivery-planning"],
+            "reasoning": "medium",
+            "descriptorDigest": "c" * 64,
+            "parentRole": "main",
+        }
+        capability = "evx2_specialist"
+        tags = {
+            "project": "evex-u",
+            "evextask": "issue-40",
+            "evexissue": "EvexU2/evex-u-workspace#40",
+            "evexsourcerepository": "EvexU2/evex-agent-skills",
+            "evexsourcebranch": "main",
+            "evexrole": "plan-author",
+            "evexdeliveryrole": "specialist",
+            "evexagenttype": "plan-author",
+            "evexparent": str(self.parent),
+            "evexskills": "evex-delivery-planning",
+            "evexdescription": "Draft plan",
+            "evexagentprofile": ACP_PROFILE_ID,
+            "evexreasoning": "medium",
+            "evexmission": "a" * 64,
+            "evexprompt": "b" * 64,
+            "evexmissionconfig": "c" * 64,
+        }
+        descriptor = {
+            "conversation_id": str(self.spec),
+            "parent_conversation_id": str(self.parent),
+            "profile_id": ACP_PROFILE_ID,
+            "working_dir": "/workspace/root",
+            "worktree": False,
+            "tags": tags,
+        }
+        canonical = json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+        token = "v1:messaging:" + hmac.new(
+            b"admission-key" * 4,
+            f"evex-delivery-admission:v1\0messaging\0{canonical}".encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        marker = "v3:messaging:" + hashlib.sha256(
+            f"evex-agent-config:v3\0{token}\0{capability}".encode()
+        ).hexdigest()
+        created = {
+            "id": str(self.spec),
+            "parent_conversation_id": str(self.parent),
+            "workspace": parent["workspace"],
+            "launched_agent_profile": {"agent_profile_id": ACP_PROFILE_ID},
+            "execution_status": "running",
+            "tags": {**tags, "evexadmission": marker},
+        }
+        provider, transport = self.provider([
+            parent,
+            ProviderError("missing", status=404),
+            {},
+            created,
+            {},
+        ])
+
+        result = provider.start_specialist(
+            self.parent,
+            self.spec,
+            capability,
+            mission,
+        )
+
+        self.assertTrue(result["created"])
+        create = next(call for call in transport.calls if call[:2] == ("POST", "/api/conversations"))
+        self.assertEqual(create[2]["parent_conversation_id"], str(self.parent))
+        self.assertEqual(create[2]["initial_message"]["content"][0]["text"], mission["prompt"])
+        self.assertTrue(create[2]["initial_message"]["run"])
+        self.assertEqual(create[2]["secrets"]["EVEX_DELIVERY_ADMISSION"]["value"], token)
+        self.assertEqual(
+            create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
+            capability,
+        )
+
+    def test_specialist_can_message_its_direct_specialist_child(self):
+        child = discussion(
+            self.child,
+            "specialist",
+            evexrole="reviewer",
+            evexagenttype="reviewer",
+            evexparent=str(self.parent),
+        )
+        child["parent_conversation_id"] = str(self.parent)
+        provider, _transport = self.provider([child])
+
+        self.assertTrue(
+            provider.target_allowed(
+                self.parent,
+                self.child,
+                "specialist",
+                uuid.uuid4(),
+            )
+        )
+
     def test_reused_spec_chat_receives_the_current_durable_capability(self):
         parent = discussion(
             self.parent,
@@ -1197,14 +1312,50 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn(' / "mirrors" / ', source)
         self.assertNotIn('"worktree", "add"', source)
 
-    def test_child_and_spec_use_only_their_signed_parent_identity(self):
-        for role in ("deputy", "spec"):
+    def test_child_spec_and_specialist_return_only_to_their_signed_owner(self):
+        for role in ("deputy", "spec", "specialist"):
             provider, transport = self.provider([{"id": str(self.parent), "tags": {}}])
             self.assertTrue(provider.target_allowed(self.child, self.parent, role, self.parent))
             self.assertEqual(transport.calls[0][1], f"/api/conversations/{self.parent}")
         provider, transport = self.provider([{"id": str(self.child)}])
         self.assertFalse(provider.target_allowed(self.child, self.child, "deputy", self.parent))
         self.assertEqual(len(transport.calls), 1)
+
+    def test_specialist_cannot_target_sibling_or_transitive_descendant(self):
+        sibling = discussion(
+            self.spec,
+            "specialist",
+            evexrole="qa",
+            evexparent=str(self.parent),
+        )
+        sibling["parent_conversation_id"] = str(self.parent)
+        provider, _ = self.provider([sibling])
+        self.assertFalse(
+            provider.target_allowed(
+                self.child,
+                self.spec,
+                "specialist",
+                self.parent,
+            )
+        )
+
+        intermediary = uuid.uuid4()
+        descendant = discussion(
+            self.spec,
+            "specialist",
+            evexrole="reviewer",
+            evexparent=str(intermediary),
+        )
+        descendant["parent_conversation_id"] = str(intermediary)
+        provider, _ = self.provider([descendant])
+        self.assertFalse(
+            provider.target_allowed(
+                self.child,
+                self.spec,
+                "specialist",
+                self.parent,
+            )
+        )
 
     def test_parent_can_target_only_direct_child_or_linked_spec(self):
         parent = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40")
@@ -1240,6 +1391,29 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(projection.endswith(" -->"))
         envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
         self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "result-1", "senderId": str(self.parent)})
+
+    def test_send_message_safely_escapes_machine_markers_in_terminal_artifact(self):
+        provider, transport = self.provider([{}, {}])
+        message = {
+            "humanSummary": "Plan ready.",
+            "aiEvidence": {
+                "outcome": "PASS",
+                "evidence": [],
+                "findings": [],
+                "nextBoundary": "plan review",
+                "artifact": "<!-- evex-delivery-plan -->\nExact plan",
+            },
+        }
+
+        provider.send_message(self.parent, self.child, "plan-result", message)
+
+        projection = transport.calls[-1][2]["content"][0]["text"]
+        self.assertEqual(projection.count("<!--"), 1)
+        self.assertEqual(projection.count("-->"), 1)
+        envelope = json.loads(
+            projection.split("<!-- evex-agent-message:v1 ", 1)[1].removesuffix(" -->")
+        )
+        self.assertEqual(envelope["aiEvidence"]["artifact"], message["aiEvidence"]["artifact"])
 
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])

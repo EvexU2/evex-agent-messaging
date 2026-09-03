@@ -1,8 +1,7 @@
 # EVEX Agent Messaging
 
-Cluster-internal authenticated lifecycle and transport for the one interactive Spec Chat plus bounded
-messages between already-known OpenHands Conversations. Messaging never inventories Conversations and
-does not control runtime task-managed Specialist Conversations.
+Cluster-internal authenticated creation and transport for the interactive Spec Chat and bounded
+Specialist Conversations. Messaging never inventories Conversations or owns workflow state.
 
 ## Contract
 
@@ -10,6 +9,7 @@ The MCP exposes exactly:
 
 ```text
 create_spec_chat()
+start_specialist(missionKey, prompt, agentType, description, skills?)
 send_message(targetId, messageKey, message)
 ```
 
@@ -28,8 +28,9 @@ operation returns the stable ID and Canvas URL and has no generic role, Mission,
 task-control, or Conversation-search surface.
 
 Parent Main, direct Child Main, and interactive Spec Chat retain their byte-identical `evx2_`
-transport-bound HMAC Bearer capabilities. A native Specialist receives the same capability format,
-bound to its exact Conversation and owning coordinator, and may send only to that Owner. Existing role
+transport-bound HMAC Bearer capabilities. A Specialist receives the same capability format,
+bound to its exact Conversation and immediate Owner. It may return to that Owner and send to a direct
+Specialist child whose live admission binds that child to it. Existing role
 bytes are unchanged; `specialist` adds role byte `4`. Before posting, the provider reads
 the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
 relationship from their admission tags. It never searches or inventories Conversations.
@@ -121,22 +122,6 @@ Messaging's consumer tests. No extra read API, comparison header, hash or receip
 Timeout or unknown outcome causes no automatic retry. A later normal exact-object trigger reads
 current admission again and relies on the host's compare-before-write behavior.
 
-### Private Specialist capability delegation
-
-The existing HTTP process also accepts one internal capability-delegation request at
-`POST /internal/specialist-capability`. It is authenticated by the owning coordinator's existing
-Messaging capability and accepts exactly `{schemaVersion, parentId, specialistId, taskKey}`. The
-parent ID must be the authenticated sender, the Specialist ID must be a different canonical UUID, and
-the task key must satisfy the existing bounded task-key grammar. A Specialist capability cannot
-delegate another capability.
-
-This private request creates no Conversation and exposes no public MCP tool. The native task adapter
-uses it before creating the already-authorized Specialist, installs the returned capability as the
-standard MCP Bearer binding, and the Specialist calls the same public `send_message` operation as
-every other Discussion. Its signed relationship permits only `Specialist → exact Owner`; Specialists
-cannot message peers or receive direct messages. No callback API, queue, poller, or workflow state is
-added.
-
 Source delivery order is Messaging → host producer, with no circular runtime dependency. The host
 producer is currently unavailable, including the admitted per-PM GitHub entitlement/access path;
 consumer fixture passes are not installed support or general-PM access proof. Host authentication,
@@ -144,7 +129,7 @@ PM provenance, persistence/no-refresh behavior, combined two-root Canary and exa
 proof remain required before rollout acceptance. No deployment, activation or live evaluation is
 part of this source change.
 
-Architecture impact: public MCP operations remain two; Messaging creates no new durable actor,
+Architecture impact: public MCP operations remain three; Messaging creates bounded durable Specialist Conversations but no
 checkout, service, workflow store, recovery transport or background loop. It admits one additional
 relationship class for the already-existing PM-nominated Chat. PM interaction creates/nominates that
 Chat in the host; the Project/PM owns its authority, it has no source Writer/checkout, and admitted
@@ -171,10 +156,11 @@ that request. `messageKey` is correlation data, not a lock or receipt. Multiple 
 allowed. The receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
-resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state. Plan Author,
-Plan Reviewer, Writer, Reviewer, QA, Repair, and Spec Reviewer Conversations use their owning
-coordinator's native task handles and send each submitted result once to that same Owner through the
-existing Messaging operation.
+resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state. A coordinator
+or Mission-authorized Specialist creates a bounded direct Specialist with `start_specialist`. Creator
+and direct child then communicate bidirectionally with `send_message`; questions, findings,
+follow-ups, releases, cancellation, and the child's terminal return all use that same operation.
+Siblings, unrelated peers, and transitive routes remain forbidden.
 
 Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
 observations never become caller authority or replay input; an existing deterministic Spec Chat and

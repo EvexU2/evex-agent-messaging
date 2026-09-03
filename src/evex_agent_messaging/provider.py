@@ -31,9 +31,11 @@ _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
 _SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
-_MESSAGING_ADMISSION = re.compile(r"v1:messaging:[0-9a-f]{64}")
+_MESSAGING_ADMISSION = re.compile(r"(v1|v2):messaging:[0-9a-f]{64}")
 _ADMISSION_CAPABILITY = "evex_delivery_admission_v1"
 _ADMISSION_MIGRATION_TAG = "evexadmissionrequest"
+_CURRENT_AGENT_CONFIG_MARKER_VERSION = "v2"
+_CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v2"
 
 
 class ProviderError(RuntimeError):
@@ -268,6 +270,7 @@ class OpenHandsProvider:
             issue_ref,
             issue_number,
             checkout,
+            capability_ref,
         )
         self._validate_existing_spec(
             verified,
@@ -277,6 +280,7 @@ class OpenHandsProvider:
             issue_number,
             checkout,
             profile_id if created else None,
+            capability_ref,
         )
         observed_head = self._validate_existing_checkout(
             self._checkout_path(spec_chat_id), checkout, exact=False
@@ -367,13 +371,26 @@ class OpenHandsProvider:
         profile_id: str,
         working_dir: str,
         tags: dict[str, str],
+        *,
+        capability_ref: str,
+        marker_version: str = _CURRENT_AGENT_CONFIG_MARKER_VERSION,
     ) -> str:
         token = self._admission_token(
             self._admission_descriptor(
                 spec_chat_id, profile_id, working_dir, tags
             )
         )
-        return f"v1:messaging:{hashlib.sha256(token.encode()).hexdigest()}"
+        if marker_version == "v1":
+            material = token
+        elif marker_version == _CURRENT_AGENT_CONFIG_MARKER_VERSION:
+            material = (
+                f"{_CURRENT_AGENT_CONFIG_MARKER_CONTEXT}\0{token}"
+                f"\0{capability_ref}"
+            )
+        else:
+            raise ProviderError("Existing Spec Chat admission marker is invalid")
+        digest = hashlib.sha256(material.encode()).hexdigest()
+        return f"{marker_version}:messaging:{digest}"
 
     def _require_admission_capability(self) -> None:
         info = self._request("GET", "/server_info")
@@ -394,6 +411,7 @@ class OpenHandsProvider:
         issue_ref: str,
         issue_number: str,
         checkout: dict[str, str],
+        capability_ref: str,
     ) -> dict:
         tags = value.get("tags")
         if (
@@ -415,6 +433,7 @@ class OpenHandsProvider:
             issue_number,
             checkout,
             profile_id,
+            capability_ref,
             allow_missing_admission=True,
         )
         self._require_admission_capability()
@@ -465,6 +484,7 @@ class OpenHandsProvider:
         issue_number: str,
         checkout: dict[str, str],
         expected_profile_id: str | None,
+        capability_ref: str,
         *,
         allow_missing_admission: bool = False,
     ) -> None:
@@ -554,14 +574,21 @@ class OpenHandsProvider:
                 for key, item in tags.items()
                 if key != "evexadmission"
             }
-            expected_marker = self._expected_admission_marker(
-                spec_chat_id,
-                str(launched_profile_id),
-                str(working_dir),
-                unsigned_tags,
+            marker_match = _MESSAGING_ADMISSION.fullmatch(marker)
+            expected_marker = (
+                self._expected_admission_marker(
+                    spec_chat_id,
+                    str(launched_profile_id),
+                    str(working_dir),
+                    unsigned_tags,
+                    capability_ref=capability_ref,
+                    marker_version=marker_match.group(1),
+                )
+                if marker_match is not None
+                else ""
             )
             if (
-                _MESSAGING_ADMISSION.fullmatch(marker) is None
+                marker_match is None
                 or not hmac.compare_digest(marker, expected_marker)
             ):
                 raise ProviderError("Existing Spec Chat admission does not match authority")

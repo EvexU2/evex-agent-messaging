@@ -817,6 +817,105 @@ class OpenHandsProviderTest(unittest.TestCase):
                     method == "POST" for method, _, _ in transport.calls
                 ))
 
+    def test_current_agent_config_marker_is_verified_before_spec_reuse(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        current = spec_discussion(self.spec, self.parent)
+        marker_provider, _ = self.provider([])
+        current["tags"]["evexadmission"] = marker_provider._expected_admission_marker(
+            self.spec,
+            ACP_PROFILE_ID,
+            current["workspace"]["working_dir"],
+            {
+                key: value
+                for key, value in current["tags"].items()
+                if key != "evexadmission"
+            },
+            capability_ref="evx2_current",
+            marker_version="v2",
+        )
+        objective = OpenHandsProvider._spec_goal("EvexU2/evex-u-workspace#40")
+        provider, transport = self.provider([
+            parent, current, current, {}, {"items": [goal_event(objective)]}
+        ])
+        provider.workspace_root = "/tmp"
+        with (
+            patch.object(
+                provider,
+                "_validated_parent_checkout",
+                return_value=(
+                    Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+                ),
+            ),
+            patch.object(
+                provider, "_validate_existing_checkout", return_value="a" * 40
+            ),
+            patch.object(provider, "_has_initial_prompt", return_value=True),
+        ):
+            result = provider.create_spec_chat(
+                self.parent, self.spec, "evx2_current"
+            )
+
+        self.assertFalse(result["created"])
+        self.assertIn((
+            "POST",
+            f"/api/conversations/{self.spec}/secrets",
+            {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                "kind": "StaticSecret", "value": "evx2_current",
+            }}},
+        ), transport.calls)
+
+    def test_current_agent_config_marker_rejects_wrong_messaging_binding(self):
+        parent = discussion(
+            self.parent,
+            "parent-main",
+            evexissue="EvexU2/evex-u-workspace#40",
+            evexsourcerepository="EvexU2/evex-u-workspace",
+            evexsourcebranch="main",
+        )
+        parent["workspace"] = {
+            "working_dir": "/tmp/issue-40-source/evex-u-workspace"
+        }
+        current = spec_discussion(self.spec, self.parent)
+        marker_provider, _ = self.provider([])
+        current["tags"]["evexadmission"] = marker_provider._expected_admission_marker(
+            self.spec,
+            ACP_PROFILE_ID,
+            current["workspace"]["working_dir"],
+            {
+                key: value
+                for key, value in current["tags"].items()
+                if key != "evexadmission"
+            },
+            capability_ref="evx2_original",
+            marker_version="v2",
+        )
+        provider, transport = self.provider([parent, current, current])
+        provider.workspace_root = "/tmp"
+        with patch.object(
+            provider,
+            "_validated_parent_checkout",
+            return_value=(
+                Path("/tmp/issue-40-source/evex-u-workspace"), "a" * 40,
+            ),
+        ):
+            with self.assertRaisesRegex(ProviderError, "does not match authority"):
+                provider.create_spec_chat(
+                    self.parent, self.spec, "evx2_different"
+                )
+
+        self.assertFalse(any(
+            method == "POST" for method, _, _ in transport.calls
+        ))
+
     def test_current_spec_identity_is_migrated_with_descriptor_bound_hmac(self):
         parent = discussion(
             self.parent,

@@ -336,11 +336,7 @@ class OpenHandsProvider:
                 except ProviderError:
                     raise create_error
             else:
-                self._request(
-                    "PATCH",
-                    f"/api/conversations/{specialist_id}",
-                    {"title": title},
-                )
+                self._set_title(specialist_id, title)
                 created = True
             existing = self._request("GET", f"/api/conversations/{specialist_id}")
 
@@ -488,11 +484,7 @@ class OpenHandsProvider:
                 created = create_error.status != 409
                 prompt = None
             else:
-                self._request(
-                    "PATCH",
-                    f"/api/conversations/{spec_chat_id}",
-                    {"title": title},
-                )
+                self._set_title(spec_chat_id, title)
                 created = True
                 create_confirmed = True
             existing = None
@@ -558,6 +550,15 @@ class OpenHandsProvider:
                 "headSha": observed_head,
             },
         }
+
+    def _set_title(self, conversation_id: uuid.UUID, title: str) -> None:
+        result = self._request(
+            "PATCH",
+            f"/api/conversations/{conversation_id}",
+            {"title": title},
+        )
+        if result.get("success") is False:
+            raise ProviderError("OpenHands Conversation title update was rejected")
 
     def _admission_token(self, descriptor: dict[str, Any]) -> str:
         admission_key = self.admission_key.strip()

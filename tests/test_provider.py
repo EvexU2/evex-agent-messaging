@@ -388,6 +388,17 @@ class OpenHandsProviderTest(unittest.TestCase):
             "Projekt · Review · Dokumente schneller finden",
         )
 
+    def test_title_update_rejects_explicit_openhands_failure(self):
+        provider, transport = self.provider([{"success": False}])
+
+        with self.assertRaisesRegex(ProviderError, "title update was rejected"):
+            provider._set_title(self.spec, "#40 · Spezifikation")
+
+        self.assertEqual(
+            transport.calls,
+            [("PATCH", f"/api/conversations/{self.spec}", {"title": "#40 · Spezifikation"})],
+        )
+
     def test_specialist_description_is_compact_and_cannot_inject_title_delimiters(self):
         self.assertEqual(
             MessagingService._bounded_text(

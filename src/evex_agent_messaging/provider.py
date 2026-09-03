@@ -291,6 +291,12 @@ class OpenHandsProvider:
             tags,
             parent_id=parent_id,
         )
+        title = _specialist_title(
+            parent_role,
+            parent_tags,
+            str(mission["agentType"]),
+            str(mission["description"]),
+        )
         payload = {
             "conversation_id": str(specialist_id),
             "workspace": workspace,
@@ -314,12 +320,6 @@ class OpenHandsProvider:
                 },
             },
             "autotitle": False,
-            "title": _specialist_title(
-                parent_role,
-                parent_tags,
-                str(mission["agentType"]),
-                str(mission["description"]),
-            ),
             "max_iterations": 300,
         }
         created = False
@@ -330,12 +330,18 @@ class OpenHandsProvider:
                 raise
             try:
                 self._request("POST", "/api/conversations", payload)
-                created = True
             except ProviderError as create_error:
                 try:
                     self._request("GET", f"/api/conversations/{specialist_id}")
                 except ProviderError:
                     raise create_error
+            else:
+                self._request(
+                    "PATCH",
+                    f"/api/conversations/{specialist_id}",
+                    {"title": title},
+                )
+                created = True
             existing = self._request("GET", f"/api/conversations/{specialist_id}")
 
         self._validate_existing_specialist(
@@ -448,6 +454,7 @@ class OpenHandsProvider:
             descriptor = self._admission_descriptor(
                 spec_chat_id, profile_id, workspace["working_dir"], tags
             )
+            title = f"#{issue_number} · Spezifikation"
             payload = {
                 "conversation_id": str(spec_chat_id),
                 "agent_profile_id": profile_id,
@@ -455,7 +462,6 @@ class OpenHandsProvider:
                 "worktree": False,
                 "tags": tags,
                 "autotitle": False,
-                "title": f"#{issue_number} · Spezifikation",
                 "max_iterations": 300,
                 "secrets": {
                     "EVEX_AGENT_INSTANCE_ID": {
@@ -474,8 +480,6 @@ class OpenHandsProvider:
             }
             try:
                 self._request("POST", "/api/conversations", payload)
-                created = True
-                create_confirmed = True
             except ProviderError as create_error:
                 try:
                     self._request("GET", f"/api/conversations/{spec_chat_id}")
@@ -483,6 +487,14 @@ class OpenHandsProvider:
                     raise create_error
                 created = create_error.status != 409
                 prompt = None
+            else:
+                self._request(
+                    "PATCH",
+                    f"/api/conversations/{spec_chat_id}",
+                    {"title": title},
+                )
+                created = True
+                create_confirmed = True
             existing = None
 
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")

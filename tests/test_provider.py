@@ -165,6 +165,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             ProviderError("missing", status=404),
             profiles(),
             {},
+            {},
             created,
             {},
             {"items": []},
@@ -213,8 +214,11 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn("EVEX_REASONING_EFFORT", create[2]["secrets"])
         self.assertNotIn("mcp_config", create[2])
         self.assertNotIn("evexmodel", create[2]["tags"])
-        self.assertEqual(create[2]["title"], "#40 · Spezifikation")
-        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
+        self.assertNotIn("title", create[2])
+        self.assertEqual(
+            next(call for call in transport.calls if call[0] == "PATCH"),
+            ("PATCH", f"/api/conversations/{self.spec}", {"title": "#40 · Spezifikation"}),
+        )
         descriptor = {
             "conversation_id": str(self.spec),
             "parent_conversation_id": "",
@@ -327,6 +331,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             parent,
             ProviderError("missing", status=404),
             {},
+            {},
             created,
             {},
         ])
@@ -348,8 +353,11 @@ class OpenHandsProviderTest(unittest.TestCase):
             create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
             capability,
         )
-        self.assertEqual(create[2]["title"], "#40 · Plan · Draft plan")
-        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
+        self.assertNotIn("title", create[2])
+        self.assertEqual(
+            next(call for call in transport.calls if call[0] == "PATCH"),
+            ("PATCH", f"/api/conversations/{self.spec}", {"title": "#40 · Plan · Draft plan"}),
+        )
 
         reused_provider, reused_transport = self.provider([parent, created, {}])
         reused = reused_provider.start_specialist(
@@ -757,6 +765,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             parent,
             ProviderError("missing", status=404),
             profiles("openai-production", "openhands"),
+            {},
             {},
             created,
             {},

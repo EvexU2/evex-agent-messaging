@@ -1,8 +1,8 @@
 # EVEX Agent Messaging
 
 Cluster-internal authenticated lifecycle and transport for the one interactive Spec Chat plus bounded
-messages between already-known durable OpenHands Conversations. Messaging never inventories Conversations
-and does not control runtime task-managed Specialist Conversations.
+messages between already-known OpenHands Conversations. Messaging never inventories Conversations and
+does not control runtime task-managed Specialist Conversations.
 
 ## Contract
 
@@ -28,7 +28,9 @@ operation returns the stable ID and Canvas URL and has no generic role, Mission,
 task-control, or Conversation-search surface.
 
 Parent Main, direct Child Main, and interactive Spec Chat retain their byte-identical `evx2_`
-transport-bound HMAC Bearer capabilities. They identify the sender and owning Parent. Before posting, the provider reads
+transport-bound HMAC Bearer capabilities. A native Specialist receives the same capability format,
+bound to its exact Conversation and owning coordinator, and may send only to that Owner. Existing role
+bytes are unchanged; `specialist` adds role byte `4`. Before posting, the provider reads
 the exact target Discussion—and, for Parent-to-Child/Spec messages, the exact sender—and verifies the
 relationship from their admission tags. It never searches or inventories Conversations.
 Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
@@ -119,6 +121,22 @@ Messaging's consumer tests. No extra read API, comparison header, hash or receip
 Timeout or unknown outcome causes no automatic retry. A later normal exact-object trigger reads
 current admission again and relies on the host's compare-before-write behavior.
 
+### Private Specialist capability delegation
+
+The existing HTTP process also accepts one internal capability-delegation request at
+`POST /internal/specialist-capability`. It is authenticated by the owning coordinator's existing
+Messaging capability and accepts exactly `{schemaVersion, parentId, specialistId, taskKey}`. The
+parent ID must be the authenticated sender, the Specialist ID must be a different canonical UUID, and
+the task key must satisfy the existing bounded task-key grammar. A Specialist capability cannot
+delegate another capability.
+
+This private request creates no Conversation and exposes no public MCP tool. The native task adapter
+uses it before creating the already-authorized Specialist, installs the returned capability as the
+standard MCP Bearer binding, and the Specialist calls the same public `send_message` operation as
+every other Discussion. Its signed relationship permits only `Specialist → exact Owner`; Specialists
+cannot message peers or receive direct messages. No callback API, queue, poller, or workflow state is
+added.
+
 Source delivery order is Messaging → host producer, with no circular runtime dependency. The host
 producer is currently unavailable, including the admitted per-PM GitHub entitlement/access path;
 consumer fixture passes are not installed support or general-PM access proof. Host authentication,
@@ -153,9 +171,10 @@ that request. `messageKey` is correlation data, not a lock or receipt. Multiple 
 allowed. The receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
-resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state.
-Plan Author, Plan Reviewer, Writer, Reviewer, QA, Repair, and Spec Reviewer Conversations use their
-owning coordinator's native task handles.
+resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state. Plan Author,
+Plan Reviewer, Writer, Reviewer, QA, Repair, and Spec Reviewer Conversations use their owning
+coordinator's native task handles and send each submitted result once to that same Owner through the
+existing Messaging operation.
 
 Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
 observations never become caller authority or replay input; an existing deterministic Spec Chat and

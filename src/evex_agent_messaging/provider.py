@@ -754,7 +754,7 @@ class OpenHandsProvider:
         project_id: str | None = None,
     ) -> bool:
         target = self._request("GET", f"/api/conversations/{target_id}")
-        if role in {"deputy", "spec"}:
+        if role in {"deputy", "spec", "specialist"}:
             # The signed capability is the relationship authority. This read
             # proves only that the exact Discussion still exists; mutable
             # presentation tags cannot revoke or redirect its durable binding.

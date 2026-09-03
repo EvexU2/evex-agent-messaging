@@ -2,8 +2,9 @@
 
 - Keep the MCP provider-neutral; OpenHands details belong only in `provider.py`.
 - No database, queue, ledger, poller, or workflow state.
-- Only Parent Main may create or reuse its one deterministic Spec Chat; other bounded internal roles
-  are Specialist Conversations controlled through the runtime's native task lifecycle.
+- Only Parent Main may create or reuse its one deterministic Spec Chat. Specialist Conversations stay
+  controlled through the runtime's native task lifecycle and may send only one result to their exact
+  owning coordinator through the existing Messaging route.
 - Every lifecycle or message operation requires an HMAC capability bound to Main, sender, task, and exact action.
 - Authorize the requested target from exact sender/target Discussion facts; never add inventory search.
 - Use the standard-library implementation unless a dependency is strictly necessary.

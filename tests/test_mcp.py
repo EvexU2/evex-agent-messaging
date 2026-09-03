@@ -42,6 +42,10 @@ class FakeService:
         return {"schemaVersion": 1, "conversationId": request["conversationId"],
                 "projectId": "native-project-node-id", "bindingVerified": True}
 
+    def provision_specialist_capability(self, capability, request):
+        self.calls.append(("provision-specialist", capability, request))
+        return {**request, "capability": "evx2_specialist"}
+
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -262,7 +266,7 @@ class McpServerTest(unittest.TestCase):
 
     def test_initialize_reports_new_contract_version(self):
         response = self.server.handle({"id": 1, "method": "initialize"})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.3.0")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.4.0")
 
     def test_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx2_test"), "evx2_test")
@@ -328,6 +332,35 @@ class ProjectPrivateHttpTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {**request, "projectId": "native-project-node-id", "bindingVerified": True})
         self.assertEqual(self.service.calls, [("provision", request)])
+
+    def test_specialist_capability_uses_existing_parent_capability_and_same_server(self):
+        request = {
+            "schemaVersion": 1,
+            "parentId": self.conversation_id,
+            "specialistId": str(uuid.uuid4()),
+            "taskKey": "plan-author",
+        }
+        status, body = self.post(
+            json.dumps(request),
+            credential="evx2_parent",
+            path="/internal/specialist-capability",
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {**request, "capability": "evx2_specialist"})
+        self.assertEqual(
+            self.service.calls,
+            [("provision-specialist", "evx2_parent", request)],
+        )
+
+    def test_specialist_capability_rejects_non_capability_before_parsing(self):
+        status, body = self.post(
+            "private-invalid-json",
+            credential="private-service-key",
+            path="/internal/specialist-capability",
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(json.loads(body), {"error": "Specialist capability request denied"})
+        self.assertEqual(self.service.calls, [])
 
     def test_project_private_http_real_service_uses_existing_exact_authenticated_host_paths(self):
         self.server._service = MessagingService(OpenHandsProvider("http://openhands", "private-service-key"), b"signing-secret")

@@ -303,7 +303,7 @@ class OpenHandsProvider:
                     {
                         "role": "user",
                         "content": [{"type": "text", "text": prompt}],
-                        "run": False,
+                        "run": True,
                     },
                 )
             except ProviderError as prompt_error:

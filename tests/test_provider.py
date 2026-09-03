@@ -235,7 +235,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             call for call in transport.calls
             if call[:2] == ("POST", f"/api/conversations/{self.spec}/events")
         )
-        self.assertIs(prompt_call[2]["run"], False)
+        self.assertIs(prompt_call[2]["run"], True)
         prompt_text = prompt_call[2]["content"][0]["text"]
         self.assertIn(
             "load the admitted `evex-delivery-spec` package from its registered runtime skill location",

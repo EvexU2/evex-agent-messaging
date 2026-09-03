@@ -15,7 +15,6 @@ import tempfile
 import threading
 from typing import Any, Callable
 import urllib.error
-import urllib.parse
 import urllib.request
 import uuid
 
@@ -31,11 +30,10 @@ _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
 _SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
-_MESSAGING_ADMISSION = re.compile(r"(v1|v2):messaging:[0-9a-f]{64}")
+_MESSAGING_ADMISSION = re.compile(r"v3:messaging:[0-9a-f]{64}")
 _ADMISSION_CAPABILITY = "evex_delivery_admission_v1"
-_ADMISSION_MIGRATION_TAG = "evexadmissionrequest"
-_CURRENT_AGENT_CONFIG_MARKER_VERSION = "v2"
-_CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v2"
+_CURRENT_AGENT_CONFIG_MARKER_VERSION = "v3"
+_CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v3"
 
 
 class ProviderError(RuntimeError):
@@ -263,15 +261,6 @@ class OpenHandsProvider:
             existing = None
 
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")
-        verified = self._migrate_spec_if_needed(
-            verified,
-            parent_id,
-            spec_chat_id,
-            issue_ref,
-            issue_number,
-            checkout,
-            capability_ref,
-        )
         self._validate_existing_spec(
             verified,
             parent_id,
@@ -320,13 +309,6 @@ class OpenHandsProvider:
             except ProviderError as prompt_error:
                 if not self._has_initial_prompt(spec_chat_id, prompt_identity):
                     raise prompt_error
-        verified_tags = verified.get("tags")
-        if (
-            isinstance(verified_tags, dict)
-            and verified_tags.get("evexdeliveryrole") == "spec"
-            and verified_tags.get("evexskills") == _SPEC_SKILL
-        ):
-            self._ensure_spec_goal(spec_chat_id, self._spec_goal(issue_ref))
         return {
             "conversationUrl": (
                 f"{self.public_url.rstrip('/')}/conversations/{spec_chat_id}"
@@ -373,24 +355,18 @@ class OpenHandsProvider:
         tags: dict[str, str],
         *,
         capability_ref: str,
-        marker_version: str = _CURRENT_AGENT_CONFIG_MARKER_VERSION,
     ) -> str:
         token = self._admission_token(
             self._admission_descriptor(
                 spec_chat_id, profile_id, working_dir, tags
             )
         )
-        if marker_version == "v1":
-            material = token
-        elif marker_version == _CURRENT_AGENT_CONFIG_MARKER_VERSION:
-            material = (
-                f"{_CURRENT_AGENT_CONFIG_MARKER_CONTEXT}\0{token}"
-                f"\0{capability_ref}"
-            )
-        else:
-            raise ProviderError("Existing Spec Chat admission marker is invalid")
+        material = (
+            f"{_CURRENT_AGENT_CONFIG_MARKER_CONTEXT}\0{token}"
+            f"\0{capability_ref}"
+        )
         digest = hashlib.sha256(material.encode()).hexdigest()
-        return f"{marker_version}:messaging:{digest}"
+        return f"{_CURRENT_AGENT_CONFIG_MARKER_VERSION}:messaging:{digest}"
 
     def _require_admission_capability(self) -> None:
         info = self._request("GET", "/server_info")
@@ -402,56 +378,6 @@ class OpenHandsProvider:
             raise ProviderError(
                 "OpenHands delivery admission capability is unavailable"
             )
-
-    def _migrate_spec_if_needed(
-        self,
-        value: dict,
-        parent_id: uuid.UUID,
-        spec_chat_id: uuid.UUID,
-        issue_ref: str,
-        issue_number: str,
-        checkout: dict[str, str],
-        capability_ref: str,
-    ) -> dict:
-        tags = value.get("tags")
-        if (
-            not isinstance(tags, dict)
-            or "evexagentprofile" not in tags
-            or "evexadmission" in tags
-        ):
-            return value
-        profile_id = tags.get("evexagentprofile")
-        workspace = value.get("workspace")
-        working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
-        if not isinstance(profile_id, str) or not isinstance(working_dir, str):
-            return value
-        self._validate_existing_spec(
-            value,
-            parent_id,
-            spec_chat_id,
-            issue_ref,
-            issue_number,
-            checkout,
-            profile_id,
-            capability_ref,
-            allow_missing_admission=True,
-        )
-        self._require_admission_capability()
-        unsigned_tags = {str(key): str(item) for key, item in tags.items()}
-        canonical_tags = self._spec_tags(
-            parent_id, issue_ref, issue_number, checkout, profile_id
-        )
-        token = self._admission_token(
-            self._admission_descriptor(
-                spec_chat_id, profile_id, working_dir, canonical_tags
-            )
-        )
-        self._request(
-            "PATCH",
-            f"/api/conversations/{spec_chat_id}",
-            {"tags": {**unsigned_tags, _ADMISSION_MIGRATION_TAG: token}},
-        )
-        return self._request("GET", f"/api/conversations/{spec_chat_id}")
 
     @staticmethod
     def _spec_tags(
@@ -485,8 +411,6 @@ class OpenHandsProvider:
         checkout: dict[str, str],
         expected_profile_id: str | None,
         capability_ref: str,
-        *,
-        allow_missing_admission: bool = False,
     ) -> None:
         identity, tags, role = self._identity(value)
         workspace = value.get("workspace")
@@ -500,98 +424,63 @@ class OpenHandsProvider:
             workspace_matches = False
         new_metadata = {"evexskills", "evexagentprofile"}
         present_new_metadata = new_metadata.intersection(tags)
-        legacy = role == "spec" and not present_new_metadata
         profile = value.get("launched_agent_profile")
         launched_profile_id = (
             profile.get("agent_profile_id") if isinstance(profile, dict) else None
         )
-        if legacy:
-            expected_tags = {
-                key: expected
-                for key, expected in self._spec_tags(
-                    parent_id,
-                    issue_ref,
-                    issue_number,
-                    checkout,
-                    launched_profile_id if isinstance(launched_profile_id, str) else "",
-                ).items()
-                if key not in {"evexdeliveryrole", "evexskills", "evexagentprofile"}
-            }
-        else:
-            bound_profile_id = tags.get("evexagentprofile")
-            expected_tags = self._spec_tags(
-                parent_id,
-                issue_ref,
-                issue_number,
-                checkout,
-                bound_profile_id if isinstance(bound_profile_id, str) else "",
-            )
-        unexpected_reserved = (
-            {
-                str(key)
-                for key in tags
-                if str(key).startswith("evex")
-                and key not in expected_tags
-                and key != "evexadmission"
-            }
-            if not legacy
-            else set()
+        bound_profile_id = tags.get("evexagentprofile")
+        expected_tags = self._spec_tags(
+            parent_id,
+            issue_ref,
+            issue_number,
+            checkout,
+            bound_profile_id if isinstance(bound_profile_id, str) else "",
         )
+        unexpected_reserved = {
+            str(key)
+            for key in tags
+            if str(key).startswith("evex")
+            and key not in expected_tags
+            and key != "evexadmission"
+        }
         if (
             identity != spec_chat_id
             or role != "spec"
-            or (not legacy and present_new_metadata != new_metadata)
+            or present_new_metadata != new_metadata
             or any(tags.get(key) != expected for key, expected in expected_tags.items())
             or unexpected_reserved
             or not workspace_matches
             or not isinstance(launched_profile_id, str)
             or not launched_profile_id
             or (
-                legacy
-                and (
-                    tags.get("evexmodel") != "gpt-5.6-sol"
-                    or value.get("current_model_id") != "gpt-5.6-sol"
-                )
-            )
-            or (
-                not legacy
-                and (
-                    launched_profile_id != tags.get("evexagentprofile")
-                    or (
-                        expected_profile_id is not None
-                        and launched_profile_id != expected_profile_id
-                    )
+                launched_profile_id != tags.get("evexagentprofile")
+                or (
+                    expected_profile_id is not None
+                    and launched_profile_id != expected_profile_id
                 )
             )
         ):
             raise ProviderError("Existing Spec Chat does not match authority")
-        if not legacy:
-            marker = tags.get("evexadmission", "")
-            if allow_missing_admission and not marker:
-                return
-            unsigned_tags = {
-                str(key): str(item)
-                for key, item in tags.items()
-                if key != "evexadmission"
-            }
-            marker_match = _MESSAGING_ADMISSION.fullmatch(marker)
-            expected_marker = (
-                self._expected_admission_marker(
-                    spec_chat_id,
-                    str(launched_profile_id),
-                    str(working_dir),
-                    unsigned_tags,
-                    capability_ref=capability_ref,
-                    marker_version=marker_match.group(1),
-                )
-                if marker_match is not None
-                else ""
+        marker = tags.get("evexadmission", "")
+        unsigned_tags = {
+            str(key): str(item)
+            for key, item in tags.items()
+            if key != "evexadmission"
+        }
+        marker_match = _MESSAGING_ADMISSION.fullmatch(marker)
+        expected_marker = (
+            self._expected_admission_marker(
+                spec_chat_id,
+                str(launched_profile_id),
+                str(working_dir),
+                unsigned_tags,
+                capability_ref=capability_ref,
             )
-            if (
-                marker_match is None
-                or not hmac.compare_digest(marker, expected_marker)
-            ):
-                raise ProviderError("Existing Spec Chat admission does not match authority")
+            if marker_match is not None
+            else ""
+        )
+        if marker_match is None or not hmac.compare_digest(marker, expected_marker):
+            raise ProviderError("Existing Spec Chat admission does not match authority")
 
     @staticmethod
     def _selected_profile(profiles: dict) -> str:
@@ -654,99 +543,6 @@ class OpenHandsProvider:
             "documents. After loading the skill, read the current Issue and only the repository "
             "files required by the EVEX skills."
         )
-
-    @staticmethod
-    def _spec_goal(issue_ref: str) -> str:
-        return (
-            f"Deliver reviewed Specification authority for {issue_ref} through the "
-            "interactive question, review, repair, and human-approval loop. Complete "
-            "the OpenHands goal only after the exact Spec result is terminally projected "
-            "to the bound Parent Main."
-        )
-
-    def _ensure_spec_goal(self, spec_chat_id: uuid.UUID, objective: str) -> None:
-        status = self._goal_status(spec_chat_id, objective)
-        if status in {"running", "complete"}:
-            return
-        if status == "interrupted":
-            try:
-                self._request(
-                    "POST",
-                    f"/api/conversations/{spec_chat_id}/goal/resume",
-                    {},
-                )
-            except ProviderError as resume_error:
-                if self._goal_status(spec_chat_id, objective) not in {
-                    "running",
-                    "complete",
-                }:
-                    raise resume_error
-                return
-            if self._goal_status(spec_chat_id, objective) not in {
-                "running",
-                "complete",
-            }:
-                raise ProviderError("OpenHands Spec goal did not resume")
-            return
-        if status is not None:
-            raise ProviderError("OpenHands Spec goal is terminal or invalid")
-        try:
-            self._request(
-                "POST",
-                f"/api/conversations/{spec_chat_id}/goal",
-                {"objective": objective, "max_iterations": 100},
-            )
-        except ProviderError as goal_error:
-            if self._goal_status(spec_chat_id, objective) not in {
-                "running",
-                "complete",
-            }:
-                raise goal_error
-            return
-        if self._goal_status(spec_chat_id, objective) not in {"running", "complete"}:
-            raise ProviderError("OpenHands Spec goal was not durably established")
-
-    def _goal_status(self, spec_chat_id: uuid.UUID, expected: str) -> str | None:
-        cursor: str | None = None
-        seen_cursors: set[str] = set()
-        while True:
-            query = {
-                "limit": 100,
-                "kind": "ConversationStateUpdateEvent",
-                "sort_order": "TIMESTAMP_DESC",
-            }
-            if cursor is not None:
-                query["page_id"] = cursor
-            events = self._request(
-                "GET",
-                f"/api/conversations/{spec_chat_id}/events/search?"
-                + urllib.parse.urlencode(query),
-            )
-            items = events.get("items")
-            if not isinstance(items, list):
-                raise ProviderError("OpenHands goal state is unavailable")
-            for event in items:
-                value = event.get("value") if isinstance(event, dict) else None
-                if not (
-                    event.get("kind") == "ConversationStateUpdateEvent"
-                    and event.get("key") == "goal"
-                    and isinstance(value, dict)
-                ):
-                    continue
-                if str(value.get("objective") or "").strip() != expected:
-                    raise ProviderError("OpenHands Spec goal authority does not match")
-                status = value.get("status")
-                return status if isinstance(status, str) else ""
-            next_cursor = events.get("next_page_id")
-            if next_cursor is None:
-                break
-            if not isinstance(next_cursor, str) or not next_cursor:
-                raise ProviderError("OpenHands goal cursor is invalid")
-            if next_cursor in seen_cursors:
-                raise ProviderError("OpenHands goal pagination repeated")
-            seen_cursors.add(next_cursor)
-            cursor = next_cursor
-        return None
 
     def _has_initial_prompt(self, spec_chat_id: uuid.UUID, expected: str) -> bool:
         expected_lines = expected.splitlines()

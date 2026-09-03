@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from evex_agent_messaging.mcp_server import McpServer, TOOLS, bearer_capability, make_http_server  # noqa: E402
 from evex_agent_messaging.provider import OpenHandsProvider, ProviderError  # noqa: E402
 from evex_agent_messaging.service import MessagingService  # noqa: E402
-from evex_agent_messaging.capability import inspect_capability  # noqa: E402
+from evex_agent_messaging.capability import CapabilityError, inspect_capability  # noqa: E402
 
 
 class FakeService:
@@ -209,6 +209,30 @@ class McpServerTest(unittest.TestCase):
         self.assertEqual(response["error"], {
             "code": -32000,
             "message": "OpenHands messaging transport failed (HTTP 404)",
+        })
+
+    def test_capability_denial_preserves_safe_failure_classification(self):
+        self.service.send_message = lambda *_args: (_ for _ in ()).throw(
+            CapabilityError("message target is not allowed")
+        )
+
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {
+                "name": "send_message",
+                "arguments": {
+                    "targetId": str(uuid.uuid4()),
+                    "messageKey": "key",
+                    "message": self.message(),
+                },
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(response["error"], {
+            "code": -32602,
+            "message": "message target is not allowed",
         })
 
     def test_unexpected_provider_exception_remains_generic(self):

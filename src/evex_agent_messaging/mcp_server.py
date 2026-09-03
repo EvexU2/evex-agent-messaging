@@ -254,7 +254,7 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
-            if self.path == "/internal/deliver-main":
+            if self.path == "/internal/agent-deliveries":
                 self._deliver_main()
                 return
             if self.path == "/internal/project-capability":

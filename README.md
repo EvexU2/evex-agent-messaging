@@ -169,7 +169,7 @@ checkout win on replay.
 
 ## Run
 
-The same HTTP process also exposes provider-neutral `POST /internal/deliver-main` for the Gateway.
+The same HTTP process also exposes provider-neutral `POST /internal/agent-deliveries` for the Gateway.
 It is not an MCP tool. A dedicated Bearer credential is checked before the exact request body is
 parsed. Messaging then owns Main admission, creation, identity verification, wake delivery, and the
 short retry of safe OpenHands GETs. A missing target that the routed event may not create returns the

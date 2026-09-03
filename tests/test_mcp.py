@@ -384,7 +384,7 @@ class DeliveryPrivateHttpTest(unittest.TestCase):
     def post(self, body, credential="gateway-delivery-key", headers=None):
         client = http.client.HTTPConnection(*self.http.server_address, timeout=2)
         try:
-            client.request("POST", "/internal/deliver-main", body=body, headers={
+            client.request("POST", "/internal/agent-deliveries", body=body, headers={
                 "Authorization": "Bearer " + credential,
                 "Content-Type": "application/json",
                 **(headers or {}),

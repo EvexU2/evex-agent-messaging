@@ -10,7 +10,7 @@
   owning coordinator through the existing Messaging route.
 - Every lifecycle or message operation requires an HMAC capability bound to Main, sender, task, and exact action.
 - Authorize the requested target from exact sender/target Discussion facts; never add inventory search.
-- Keep `POST /internal/deliver-main` private and out of `tools/list`; authenticate its dedicated
+- Keep `POST /internal/agent-deliveries` private and out of `tools/list`; authenticate its dedicated
   Gateway credential before parsing its bounded exact JSON body.
 - Use the standard-library implementation unless a dependency is strictly necessary.
 - Run `python3 -m unittest discover -s tests -p 'test_*.py' -q` before handoff.

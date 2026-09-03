@@ -47,7 +47,8 @@ The nominated Project Chat uses a distinct send-only `evx3_` capability. Messagi
 signer. Its payload is `version 3 | sender UUID (16 bytes) | send-only action (2) | Project ID byte
 length (uint16, big-endian) | Project ID | HMAC-SHA256`. The Project capability has no owning Main or
 task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 bytes; no node-ID prefix
-is inferred. Existing `evx2_` bytes, Gateway issuance, and ordinary Delivery routes are unchanged.
+is inferred. Existing `evx2_` bytes and public Messaging operations are unchanged; Messaging now
+mints the same capability bytes while admitting a Main through its private Gateway operation.
 
 Both Project→Issue-Conversation and Issue-Conversation→Project sends read both exact authenticated
 `GET /api/conversations/{canonicalUuid}` objects on every call. Only the host-computed
@@ -75,10 +76,10 @@ evexProjectAdmission = {
 
 `root` is null only for Project; Issue Conversation requires the root object. The host's projection attests its
 verified role, original attributable PM-event provenance and fresh native GitHub facts. Messaging
-cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Parent UUID, root
+cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Issue UUID, root
 accountability, native membership and PM assignment. Both endpoints must be eligible, open, uniquely
 accountable and accessible. Missing/malformed/stale, closed, terminal, denied, ambiguous, foreign,
-Child/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
+Subissue/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
 is absent. A successful event is still only a wake: recipients must revalidate current facts and
 original decision authority before acting.
 
@@ -168,8 +169,16 @@ checkout win on replay.
 
 ## Run
 
+The same HTTP process also exposes provider-neutral `POST /internal/agent-deliveries` for the Gateway.
+It is not an MCP tool. A dedicated Bearer credential is checked before the exact request body is
+parsed. Messaging then owns Main admission, creation, identity verification, wake delivery, and the
+short retry of safe OpenHands GETs. A missing target that the routed event may not create returns the
+normal result `{"accepted":false,"reason":"target_missing_not_intake_authorized"}`.
+
 ```sh
 export EVEX_MESSAGING_SECRET='long-random-secret'
+export EVEX_GATEWAY_DELIVERY_SECRET='separate-long-random-secret'
+export EVEX_DELIVERY_ADMISSION_KEY='long-random-admission-key'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
 export OPENHANDS_API_KEY='server-only-key'

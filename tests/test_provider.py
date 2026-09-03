@@ -1534,8 +1534,9 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def conversation(self, role):
         identity = self.chat if role == "project" else self.parent
+        admission_role = role
         return {"id": str(identity), "evexProjectAdmission": {
-            "schemaVersion": 1, "conversationId": str(identity), "role": role,
+            "schemaVersion": 1, "conversationId": str(identity), "role": admission_role,
             "lifecycle": "eligible", "project": copy.deepcopy(self.project),
             "root": None if role == "project" else copy.deepcopy(self.root),
         }}

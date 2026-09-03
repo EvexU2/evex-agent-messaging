@@ -46,6 +46,15 @@ class FakeService:
         return {"schemaVersion": 1, "conversationId": request["conversationId"],
                 "projectId": "native-project-node-id", "bindingVerified": True}
 
+    def delivery_allowed(self, credential):
+        return credential == "gateway-delivery-key"
+
+    def deliver_main(self, credential, request):
+        if not self.delivery_allowed(credential):
+            raise PermissionError("denied")
+        self.calls.append(("deliver-main", request))
+        return {"accepted": True, "conversationId": request["target"]["conversationId"], "outcome": "woken"}
+
 
 class McpServerTest(unittest.TestCase):
     def setUp(self):
@@ -329,6 +338,128 @@ class McpServerTest(unittest.TestCase):
             result = self.server.handle({"id": 3, "method": "tools/call", "params": {"name": name}}, capability_ref="evx3_test")
             self.assertIn("error", result)
         self.assertEqual(len(self.service.calls), 1)
+
+
+class DeliveryPrivateHttpTest(unittest.TestCase):
+    def setUp(self):
+        self.service = FakeService()
+        self.server = McpServer(self.service)
+        self.http = make_http_server(self.server, "127.0.0.1", 0)
+        self.thread = threading.Thread(target=self.http.serve_forever, kwargs={"poll_interval": 0.01})
+        self.thread.start()
+        self.conversation_id = str(uuid.uuid4())
+
+    def tearDown(self):
+        self.http.shutdown()
+        self.thread.join(timeout=2)
+        self.http.server_close()
+
+    def request(self):
+        return {
+            "schemaVersion": "evex.agent-delivery/1",
+            "target": {
+                "conversationId": self.conversation_id,
+                "issueRepository": "EvexU2/evex-u-workspace",
+                "issueNumber": 42,
+                "issueTitle": "Delivery",
+                "deliveryRole": "issue",
+                "parentIssue": None,
+                "allowCreate": True,
+                "recoveryMode": False,
+                "source": {"repository": "EvexU2/evex-u-workspace", "branch": "main"},
+            },
+            "event": {
+                "schemaVersion": "evex.github-event/1",
+                "eventKey": "github:delivery-1:issues:labeled",
+                "deliveryGuid": "delivery-1",
+                "event": "issues",
+                "action": "labeled",
+                "repository": "EvexU2/evex-u-workspace",
+                "resourceUrl": "https://github.com/EvexU2/evex-u-workspace/issues/42",
+                "resourceNumber": 42,
+                "actor": "taxaos",
+                "installationId": 7,
+                "payloadDigest": "a" * 64,
+                "observedAt": "2026-09-03T00:00:00Z",
+            },
+        }
+
+    def post(self, body, credential="gateway-delivery-key", headers=None):
+        client = http.client.HTTPConnection(*self.http.server_address, timeout=2)
+        try:
+            client.request("POST", "/internal/agent-deliveries", body=body, headers={
+                "Authorization": "Bearer " + credential,
+                "Content-Type": "application/json",
+                **(headers or {}),
+            })
+            response = client.getresponse()
+            return response.status, json.loads(response.read())
+        finally:
+            client.close()
+
+    def test_delivery_auth_precedes_body_parsing(self):
+        for credential in ("", "foreign", "evx2_agent", "evx3_agent", "gateway-delivery-key extra"):
+            with self.subTest(credential=credential):
+                self.assertEqual(
+                    self.post("private-invalid-json", credential),
+                    (403, {"reason": "delivery_forbidden"}),
+                )
+        self.assertEqual(self.service.calls, [])
+
+    def test_delivery_success_and_irrelevant_are_http_200(self):
+        value = self.request()
+        self.assertEqual(self.post(json.dumps(value)), (
+            200,
+            {"accepted": True, "conversationId": self.conversation_id, "outcome": "woken"},
+        ))
+        self.service.deliver_main = lambda _credential, _request: {
+            "accepted": False,
+            "reason": "target_missing_not_intake_authorized",
+        }
+        self.assertEqual(self.post(json.dumps(value)), (
+            200,
+            {"accepted": False, "reason": "target_missing_not_intake_authorized"},
+        ))
+
+    def test_delivery_body_is_exact_bounded_json(self):
+        for body, headers in (
+            ('{"schemaVersion":1,"schemaVersion":1}', {}),
+            ("x" * 32_769, {}),
+            ("{}", {"Content-Length": "-1"}),
+            ("{}", {"Content-Length": "32769"}),
+            ("{}", {"Transfer-Encoding": "chunked"}),
+        ):
+            with self.subTest(body_length=len(body), headers=headers):
+                self.assertEqual(self.post(body, headers=headers), (
+                    400,
+                    {"reason": "invalid_delivery_request"},
+                ))
+        self.assertEqual(self.service.calls, [])
+
+    def test_delivery_provider_reasons_map_without_leaking_details(self):
+        for reason, status in (
+            ("target_busy", 409),
+            ("target_not_wakeable", 409),
+            ("target_identity_mismatch", 409),
+            ("runtime_unavailable", 503),
+        ):
+            with self.subTest(reason=reason):
+                def fail(_credential, _request, reason=reason):
+                    raise ProviderError("private provider response", reason=reason)
+                self.service.deliver_main = fail
+                self.assertEqual(self.post(json.dumps(self.request())), (
+                    status,
+                    {"reason": reason},
+                ))
+
+    def test_delivery_unexpected_failure_is_bounded(self):
+        self.service.deliver_main = lambda *_args: (_ for _ in ()).throw(
+            RuntimeError("gateway-delivery-key private provider body")
+        )
+        self.assertEqual(self.post(json.dumps(self.request())), (
+            503,
+            {"reason": "runtime_unavailable"},
+        ))
 
 
 class ProjectPrivateHttpTest(unittest.TestCase):

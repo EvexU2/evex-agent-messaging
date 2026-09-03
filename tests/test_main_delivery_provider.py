@@ -227,7 +227,7 @@ class MainDeliveryProviderTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "runtime_unavailable")
         self.assertEqual([call[0] for call in transport.calls], ["GET", "GET", "POST"])
 
-    def test_unknown_create_outcome_reconciles_by_exact_get_without_reposting(self) -> None:
+    def test_unknown_create_outcome_reconciles_as_created_without_reposting(self) -> None:
         request = delivery_request()
         provider, transport = self.provider([])
         created = self.identity(provider, request)
@@ -239,14 +239,74 @@ class MainDeliveryProviderTests(unittest.TestCase):
             ProviderError("unknown mutation outcome"),
             created,
             {},
+            {},
         ]
 
         result = provider.deliver_main(request)
 
-        self.assertEqual(result["outcome"], "woken")
+        self.assertEqual(result["outcome"], "created")
         creates = [call for call in transport.calls if call[:2] == ("POST", "/api/conversations")]
         self.assertEqual(len(creates), 1)
-        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
+        self.assertEqual(sum(call[0] == "PATCH" for call in transport.calls), 1)
+        self.assertIn("Immediate task", transport.calls[-1][2]["content"][0]["text"])
+
+    def test_create_conflict_repairs_only_compatible_missing_admission(self) -> None:
+        request = delivery_request()
+        provider, transport = self.provider([])
+        repaired = self.identity(provider, request)
+        partial = {
+            **repaired,
+            "tags": {
+                key: value
+                for key, value in repaired["tags"].items()
+                if key != "evexadmission"
+            },
+        }
+        transport.responses = [
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": PROFILE_ID, "profiles": [
+                {"id": PROFILE_ID, "agent_kind": "acp"},
+            ]},
+            ProviderError("conflict", status=409),
+            partial,
+            {},
+            repaired,
+            {},
+            {},
+        ]
+
+        result = provider.deliver_main(request)
+
+        self.assertEqual(result["outcome"], "created")
+        secret_call = next(
+            body for method, path, body in transport.calls
+            if method == "POST" and path.endswith("/secrets")
+        )
+        self.assertEqual(set(secret_call["secrets"]), {
+            "EVEX_AGENT_MESSAGING_CAPABILITY",
+            "EVEX_DELIVERY_ADMISSION",
+        })
+        self.assertIn("Immediate task", transport.calls[-1][2]["content"][0]["text"])
+
+    def test_create_conflict_never_repairs_an_invalid_admission(self) -> None:
+        request = delivery_request()
+        provider, transport = self.provider([])
+        invalid = self.identity(provider, request)
+        invalid["tags"]["evexadmission"] = "v3:messaging:" + "0" * 64
+        transport.responses = [
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": PROFILE_ID, "profiles": [
+                {"id": PROFILE_ID, "agent_kind": "acp"},
+            ]},
+            ProviderError("conflict", status=409),
+            invalid,
+        ]
+
+        with self.assertRaises(ProviderError) as caught:
+            provider.deliver_main(request)
+
+        self.assertEqual(caught.exception.reason, "target_identity_mismatch")
+        self.assertFalse(any(path.endswith("/secrets") for _method, path, _body in transport.calls))
 
     def test_busy_and_invalid_statuses_are_distinct(self) -> None:
         request = delivery_request()

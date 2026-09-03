@@ -250,24 +250,105 @@ class OpenHandsProvider:
             )
             if current.status != 200:
                 raise mutation_error
-            self._verify_main_identity(
-                request, current, expected_profile_id=profile_id
-            )
-            return False, current
+            try:
+                self._verify_main_identity(
+                    request, current, expected_profile_id=profile_id
+                )
+            except ProviderError:
+                current = self._reconcile_missing_main_admission(
+                    request, current, profile_id, secrets, deadline
+                )
+            self._update_main_title(request, deadline)
+            return True, current
         if response.status == 409:
-            return False, None
+            current = self._delivery_request(
+                "GET", f"/api/conversations/{target.conversation_id}", None, deadline
+            )
+            try:
+                self._verify_main_identity(
+                    request, current, expected_profile_id=profile_id
+                )
+                return False, current
+            except ProviderError:
+                current = self._reconcile_missing_main_admission(
+                    request, current, profile_id, secrets, deadline
+                )
+                self._update_main_title(request, deadline)
+                return True, current
         if response.status not in {200, 201}:
             raise ProviderError("Main creation failed", reason="runtime_unavailable")
 
         path = f"/api/conversations/{target.conversation_id}"
-        patched = self._delivery_request(
-            "PATCH", path, {"title": self._main_title(request)}, deadline
-        )
-        if patched.status not in {200, 204}:
-            raise ProviderError("Main title update failed", reason="runtime_unavailable")
+        self._update_main_title(request, deadline)
         verified = self._delivery_request("GET", path, None, deadline)
         self._verify_main_identity(request, verified, expected_profile_id=profile_id)
         return True, None
+
+    def _reconcile_missing_main_admission(
+        self,
+        request: MainDeliveryRequest,
+        current: _DeliveryResponse,
+        profile_id: str,
+        secrets: dict[str, dict[str, str]],
+        deadline: float,
+    ) -> _DeliveryResponse:
+        target = request.target
+        expected_tags = {**self._main_tags(request), "evexagentprofile": profile_id}
+        tags = current.body.get("tags")
+        launched = current.body.get("launched_agent_profile")
+        if (
+            current.status != 200
+            or current.body.get("id") != str(target.conversation_id)
+            or not isinstance(tags, dict)
+            or "evexadmission" in tags
+            or tags != expected_tags
+            or current.body.get("workspace") != self._main_workspace(request)
+            or not isinstance(launched, dict)
+            or launched.get("agent_profile_id") != profile_id
+        ):
+            raise ProviderError(
+                "Main identity mismatch", reason="target_identity_mismatch"
+            )
+        path = f"/api/conversations/{target.conversation_id}"
+        repair = {
+            "secrets": {
+                key: secrets[key]
+                for key in (
+                    "EVEX_AGENT_MESSAGING_CAPABILITY",
+                    "EVEX_DELIVERY_ADMISSION",
+                )
+            }
+        }
+        try:
+            written = self._delivery_request("POST", f"{path}/secrets", repair, deadline)
+            if written.status not in {200, 204}:
+                raise ProviderError(
+                    "Main admission repair failed", reason="target_identity_mismatch"
+                )
+        except ProviderError as mutation_error:
+            verified = self._delivery_request("GET", path, None, deadline)
+            try:
+                self._verify_main_identity(
+                    request, verified, expected_profile_id=profile_id
+                )
+            except ProviderError:
+                raise mutation_error
+            return verified
+        verified = self._delivery_request("GET", path, None, deadline)
+        self._verify_main_identity(request, verified, expected_profile_id=profile_id)
+        return verified
+
+    def _update_main_title(
+        self, request: MainDeliveryRequest, deadline: float
+    ) -> None:
+        patched = self._delivery_request(
+            "PATCH",
+            f"/api/conversations/{request.target.conversation_id}",
+            {"title": self._main_title(request)},
+            deadline,
+        )
+        if patched.status not in {200, 204}:
+            raise ProviderError("Main title update failed", reason="runtime_unavailable")
 
     def _delivery_request(
         self,

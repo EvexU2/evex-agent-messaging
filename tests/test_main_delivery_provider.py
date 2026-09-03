@@ -156,6 +156,8 @@ class MainDeliveryProviderTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "created")
         create = next(body for method, path, body in transport.calls if method == "POST" and path == "/api/conversations")
         self.assertEqual(create["tags"]["evexdeliveryrole"], "subissue")
+        self.assertEqual(create["tags"]["evexskills"], "evex-delivery-subissue")
+        self.assertEqual(create["secrets"]["EVEX_AGENT_ROLE"]["value"], "subissue")
         self.assertTrue(create["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"].startswith("evx2_"))
         patch = next(body for method, _path, body in transport.calls if method == "PATCH")
         self.assertEqual(patch["title"], "#1067 / #297 · skills · Subissue · Duration fix")
@@ -170,6 +172,19 @@ class MainDeliveryProviderTests(unittest.TestCase):
             OpenHandsProvider._main_title(request),
             "#1067 · Issue · Duration fix",
         )
+
+    def test_issue_uses_registered_issue_role_and_skill(self) -> None:
+        request = delivery_request()
+        provider, _transport = self.provider([])
+
+        self.assertEqual(provider._main_tags(request)["evexskills"], "evex-delivery-issue")
+        self.assertEqual(
+            provider._main_secrets(
+                request, provider._main_delivery_capability(request)
+            )["EVEX_AGENT_ROLE"]["value"],
+            "issue",
+        )
+        self.assertIn("`evex-delivery-issue` Skill", provider._main_bootstrap_text(request))
 
     def test_recovery_bootstrap_is_creation_only(self) -> None:
         request = delivery_request(

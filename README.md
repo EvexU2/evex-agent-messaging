@@ -1,8 +1,8 @@
 # EVEX Agent Messaging
 
 Cluster-internal authenticated lifecycle and transport for the one interactive Spec Chat plus bounded
-messages between already-known durable OpenHands Discussions. Messaging never inventories Discussions
-and does not control native subagents.
+messages between already-known durable OpenHands Conversations. Messaging never inventories Conversations
+and does not control runtime task-managed Specialist Conversations.
 
 ## Contract
 
@@ -21,9 +21,9 @@ GitHub credential, public-egress rule, or shared mirror for this operation. New 
 OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently selected supported
 Agent Profile (`acp` or native `openhands`); the profile, rather than Messaging, owns the model.
 Messaging never calls the ACP model-switch endpoint. It stages the canonical bootstrap without
-starting an ordinary turn, then idempotently establishes one durable OpenHands Goal for the Spec
-question/review/repair/human-approval loop. Existing legacy `spec` chats remain pinned to their
-original launched profile and are reused without metadata migration or model switching. The
+starting an ordinary turn. The Spec Chat proceeds from that bootstrap and uses no OpenHands Delivery
+Goal. Only freshly admitted `v3` Spec Chats are reusable. Retained earlier generations remain
+untouched and fail closed without metadata migration, event delivery, or model switching. The
 operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
 task-control, or Conversation-search surface.
 
@@ -154,7 +154,8 @@ allowed. The receiver re-reads GitHub, Git, Spec, and runtime facts before actin
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
 resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state.
-Native Plan, Writer, Review, QA, Repair, and Spec Review use their owning Discussion's task handles.
+Plan Author, Plan Reviewer, Writer, Reviewer, QA, Repair, and Spec Reviewer Conversations use their
+owning coordinator's native task handles.
 
 Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
 observations never become caller authority or replay input; an existing deterministic Spec Chat and

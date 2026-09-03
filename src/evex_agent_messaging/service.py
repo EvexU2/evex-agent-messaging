@@ -285,13 +285,15 @@ class MessagingService:
         *,
         collapse_whitespace: bool = False,
     ) -> str:
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
+            raise CapabilityError(f"{label} is required")
+        if len(value) > maximum:
+            raise CapabilityError(f"{label} exceeds {maximum} characters")
+        if not value.strip():
             raise CapabilityError(f"{label} is required")
         normalized = value.strip()
         if collapse_whitespace:
             normalized = " ".join(normalized.replace("·", "-").split())
-        if len(normalized) > maximum:
-            raise CapabilityError(f"{label} exceeds {maximum} characters")
         return normalized
 
     @staticmethod

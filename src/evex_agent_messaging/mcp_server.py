@@ -10,6 +10,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .provider import OpenHandsProvider, ProviderError
 from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
+from .delivery import DeliveryContractError, MAX_DELIVERY_BYTES
 from .service import MessagingService
 
 
@@ -253,6 +254,9 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/internal/deliver-main":
+                self._deliver_main()
+                return
             if self.path == "/internal/project-capability":
                 self._provision_project_capability()
                 return
@@ -305,6 +309,49 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             self.end_headers()
             self.wfile.write(body)
 
+        def _deliver_main(self):
+            self.close_connection = True
+            credential = _bearer_credential(self.headers.get("Authorization"))
+            if not server._service.delivery_allowed(credential):
+                self._write_delivery_response(403, {"reason": "delivery_forbidden"})
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (
+                    len(lengths) != 1
+                    or not lengths[0].isascii()
+                    or not lengths[0].isdigit()
+                    or not 0 < int(lengths[0]) <= MAX_DELIVERY_BYTES
+                    or self.headers.get("Transfer-Encoding") is not None
+                    or self.headers.get("Content-Type") != "application/json"
+                ):
+                    raise DeliveryContractError("invalid delivery request")
+                raw = self.rfile.read(int(lengths[0]))
+                if len(raw) != int(lengths[0]):
+                    raise DeliveryContractError("invalid delivery request")
+                request = json.loads(raw, object_pairs_hook=_unique_object)
+                result = server._service.deliver_main(credential, request)
+                status = 200
+            except (DeliveryContractError, json.JSONDecodeError, TypeError, ValueError):
+                status, result = 400, {"reason": "invalid_delivery_request"}
+            except PermissionError:
+                status, result = 403, {"reason": "delivery_forbidden"}
+            except ProviderError as exc:
+                reason = exc.reason or "runtime_unavailable"
+                status = 503 if reason == "runtime_unavailable" else 409
+                result = {"reason": reason}
+            except Exception:
+                status, result = 503, {"reason": "runtime_unavailable"}
+            self._write_delivery_response(status, result)
+
+        def _write_delivery_response(self, status: int, result: dict):
+            body = json.dumps(result, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
         def log_message(self, *_args):
             return
 
@@ -332,13 +379,18 @@ def main() -> int:
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
     admission_key = os.environ.get("EVEX_DELIVERY_ADMISSION_KEY", "").strip()
-    if not all(value.strip() for value in (secret, base_url, api_key, admission_key)):
+    delivery_secret = os.environ.get("EVEX_GATEWAY_DELIVERY_SECRET", "").strip()
+    if not all(value.strip() for value in (
+        secret, base_url, api_key, admission_key, delivery_secret,
+    )):
         raise SystemExit(
-            "EVEX_MESSAGING_SECRET, EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, "
-            "and OPENHANDS_API_KEY are required"
+            "EVEX_MESSAGING_SECRET, EVEX_GATEWAY_DELIVERY_SECRET, "
+            "EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, and OPENHANDS_API_KEY are required"
         )
     if len(admission_key) < 32:
         raise SystemExit("EVEX_DELIVERY_ADMISSION_KEY must be at least 32 characters")
+    if len(delivery_secret) < 32:
+        raise SystemExit("EVEX_GATEWAY_DELIVERY_SECRET must be at least 32 characters")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
@@ -348,8 +400,10 @@ def main() -> int:
             api_key,
             public_url=public_url,
             admission_key=admission_key.encode(),
+            messaging_secret=secret.encode(),
         ),
         secret.encode(),
+        delivery_secret=delivery_secret.encode(),
     ))
     if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
         serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))

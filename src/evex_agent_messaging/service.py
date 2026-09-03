@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from typing import Any, Protocol
@@ -17,6 +18,7 @@ from .capability import (
     inspect_capability,
     project_capability_token,
 )
+from .delivery import MainDeliveryRequest
 
 
 _MESSAGE_KEY = re.compile(r"^[\x21-\x7e]{1,200}$")
@@ -55,6 +57,8 @@ _ROLE_SPECIALISTS = {
 
 
 class MessagingProvider(Protocol):
+    def deliver_main(self, request: MainDeliveryRequest) -> dict[str, Any]: ...
+
     def provisioning_allowed(self, credential: str | None) -> bool: ...
 
     def project_binding(self, conversation_id: uuid.UUID) -> str: ...
@@ -99,11 +103,47 @@ class MessagingProvider(Protocol):
 
 
 class MessagingService:
-    def __init__(self, provider: MessagingProvider, secret: bytes) -> None:
+    def __init__(
+        self,
+        provider: MessagingProvider,
+        secret: bytes,
+        *,
+        delivery_secret: bytes = b"",
+    ) -> None:
         if not secret:
             raise ValueError("messaging secret is required")
         self._provider = provider
         self._secret = secret
+        self._delivery_secret = delivery_secret
+
+    def delivery_allowed(self, credential: str | None) -> bool:
+        return (
+            isinstance(credential, str)
+            and len(self._delivery_secret) >= 32
+            and hmac.compare_digest(credential.encode(), self._delivery_secret)
+        )
+
+    def deliver_main(self, credential: str | None, request: object) -> dict[str, Any]:
+        """Private Gateway operation; never exposed through the MCP tool list."""
+        if not self.delivery_allowed(credential):
+            raise PermissionError("delivery credential denied")
+        parsed = MainDeliveryRequest.parse(request)
+        result = self._provider.deliver_main(parsed)
+        if not isinstance(result, dict):
+            raise RuntimeError("provider returned an invalid delivery result")
+        if result.get("accepted") is True:
+            if (
+                set(result) != {"accepted", "conversationId", "outcome"}
+                or result.get("conversationId") != str(parsed.target.conversation_id)
+                or result.get("outcome") not in {"created", "woken"}
+            ):
+                raise RuntimeError("provider returned an invalid delivery result")
+        elif result != {
+            "accepted": False,
+            "reason": "target_missing_not_intake_authorized",
+        }:
+            raise RuntimeError("provider returned an invalid delivery result")
+        return result
 
     def readiness(self) -> bool:
         try:

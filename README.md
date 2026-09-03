@@ -168,8 +168,16 @@ checkout win on replay.
 
 ## Run
 
+The same HTTP process also exposes provider-neutral `POST /internal/deliver-main` for the Gateway.
+It is not an MCP tool. A dedicated Bearer credential is checked before the exact request body is
+parsed. Messaging then owns Main admission, creation, identity verification, wake delivery, and the
+short retry of safe OpenHands GETs. A missing target that the routed event may not create returns the
+normal result `{"accepted":false,"reason":"target_missing_not_intake_authorized"}`.
+
 ```sh
 export EVEX_MESSAGING_SECRET='long-random-secret'
+export EVEX_GATEWAY_DELIVERY_SECRET='separate-long-random-secret'
+export EVEX_DELIVERY_ADMISSION_KEY='long-random-admission-key'
 export OPENHANDS_URL='http://openhands:8000'
 export OPENHANDS_PUBLIC_URL='http://openhands.local/canvas'
 export OPENHANDS_API_KEY='server-only-key'

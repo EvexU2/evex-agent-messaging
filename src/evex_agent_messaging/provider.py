@@ -469,9 +469,9 @@ class OpenHandsProvider:
     def _main_tags(request: MainDeliveryRequest) -> dict[str, str]:
         target = request.target
         skill = (
-            "evex-delivery-sheriff"
+            "evex-delivery-issue"
             if target.delivery_role == "issue"
-            else "evex-delivery-deputy"
+            else "evex-delivery-subissue"
         )
         tags = {
             "project": "evex-u",
@@ -509,7 +509,7 @@ class OpenHandsProvider:
             },
             "EVEX_AGENT_ROLE": {
                 "kind": "StaticSecret",
-                "value": "sheriff" if target.delivery_role == "issue" else "deputy",
+                "value": target.delivery_role,
             },
             "EVEX_AGENT_INSTANCE_ID": {
                 "kind": "StaticSecret", "value": str(target.conversation_id),
@@ -626,13 +626,13 @@ class OpenHandsProvider:
         if target.delivery_role == "issue":
             role_contract = (
                 f"You are the Issue Main accountable for {identity}. Read and follow the "
-                "admitted `evex-delivery-sheriff` Skill; it is authoritative for this role.\n"
+                "admitted `evex-delivery-issue` Skill; it is authoritative for this role.\n"
             )
         else:
             role_contract = (
                 f"You are the Subissue Main accountable for {identity} under "
                 f"{WORKSPACE_REPOSITORY}#{target.parent_issue}. Read and follow the admitted "
-                "`evex-delivery-deputy` Skill; it is authoritative for this role.\n"
+                "`evex-delivery-subissue` Skill; it is authoritative for this role.\n"
                 f"Exact admitted source: repository `{target.source.repository}`, branch "
                 f"`{target.source.branch}`.\n"
             )

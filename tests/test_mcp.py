@@ -84,6 +84,14 @@ class McpServerTest(unittest.TestCase):
             {"outcome", "revision", "evidence", "findings", "nextBoundary"},
         )
         self.assertEqual(evidence_schema["properties"]["evidence"]["items"]["type"], "string")
+        self.assertIn(
+            "compact stable references",
+            evidence_schema["properties"]["evidence"]["description"],
+        )
+        self.assertIn(
+            "do not copy full artifact bodies",
+            evidence_schema["properties"]["evidence"]["description"],
+        )
         self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
 
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):

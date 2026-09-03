@@ -332,6 +332,19 @@ class MessagingServiceTest(unittest.TestCase):
 
         self.assertEqual(provider.calls[-1][1][3], message)
 
+    def test_oversized_evidence_item_names_the_exact_repairable_bound(self):
+        service = MessagingService(FakeProvider(), self.secret)
+        message = self.message()
+        message["aiEvidence"]["evidence"] = ["x" * 2001]
+
+        with self.assertRaisesRegex(
+            CapabilityError,
+            r"aiEvidence\.evidence\[0\] exceeds 2000 UTF-8 bytes",
+        ):
+            service.send_message(self.child_token(), self.parent, "result", message)
+
+        self.assertEqual(service._provider.calls, [])
+
     def test_readiness_is_provider_only_and_fail_closed(self):
         self.assertTrue(MessagingService(FakeProvider(), self.secret).readiness())
         self.assertFalse(MessagingService(FakeProvider(ready=False), self.secret).readiness())

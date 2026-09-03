@@ -63,6 +63,11 @@ TOOLS = [{
                             "evidence": {
                                 "type": "array",
                                 "maxItems": 100,
+                                "description": (
+                                    "Use compact stable references and short observations; "
+                                    "do not copy full artifact bodies. Every item must fit "
+                                    "within 2000 UTF-8 bytes."
+                                ),
                                 "items": {"type": "string", "minLength": 1, "maxLength": 2000},
                             },
                             "findings": {

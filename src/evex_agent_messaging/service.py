@@ -1,14 +1,14 @@
-"""One provider-neutral cross-Discussion message operation."""
+"""Provider-neutral direct Conversation creation and messaging."""
 
 from __future__ import annotations
 
-import re
+import hashlib
 import json
+import re
 from typing import Any, Protocol
 import uuid
 
 from .capability import (
-    Capability,
     CapabilityError,
     ProjectCapability,
     TASK_KEY_RE,
@@ -32,6 +32,26 @@ _MAX_MESSAGE_BYTES = 20_000
 _MAX_SUMMARY_BYTES = 2_000
 _MAX_EVIDENCE_ITEMS = 100
 _MAX_EVIDENCE_ITEM_BYTES = 2_000
+_MAX_ARTIFACT_BYTES = 64_000
+_MAX_TERMINAL_MESSAGE_BYTES = 80_000
+_SPECIALIST_REASONING = {"spec-reviewer": "high"}
+_SPECIALIST_SKILLS = {
+    "plan-author": "evex-delivery-planning",
+    "plan-reviewer": "evex-delivery-planning",
+    "project-reviewer": "evex-project-review",
+    "qa": "evex-delivery-qa",
+    "repair": "evex-delivery-repair",
+    "reviewer": "evex-delivery-reviewer",
+    "spec-reviewer": "evex-spec-review",
+    "writer": "evex-delivery-writer",
+}
+_ROLE_SPECIALISTS = {
+    "main": {"plan-author", "plan-reviewer", "reviewer", "qa", "repair"},
+    "deputy": {"writer", "reviewer", "qa", "repair"},
+    "spec": {"spec-reviewer"},
+    "project": {"project-reviewer"},
+    "specialist": set(_SPECIALIST_SKILLS),
+}
 
 
 class MessagingProvider(Protocol):
@@ -48,6 +68,14 @@ class MessagingProvider(Protocol):
         parent_id: uuid.UUID,
         spec_chat_id: uuid.UUID,
         capability_ref: str,
+    ) -> dict[str, Any]: ...
+
+    def start_specialist(
+        self,
+        parent_id: uuid.UUID,
+        specialist_id: uuid.UUID,
+        capability_ref: str,
+        mission: dict[str, Any],
     ) -> dict[str, Any]: ...
 
     def target_allowed(
@@ -130,47 +158,105 @@ class MessagingService:
         )
         return {**result, "specChatId": str(spec_chat_id)}
 
-    def provision_specialist_capability(
+    def start_specialist(
         self,
         token: str,
-        request: object,
+        *,
+        mission_key: str,
+        prompt: str,
+        agent_type: str,
+        description: str,
+        skills: object,
     ) -> dict[str, Any]:
-        """Delegate the existing sender's message authority to one owned Specialist."""
         parent = inspect_capability(token, self._secret)
-        if isinstance(parent, Capability) and parent.role == "specialist":
-            raise CapabilityError("only a coordinator may provision a Specialist capability")
-        if not isinstance(request, dict) or set(request) != {
-            "schemaVersion",
-            "parentId",
-            "specialistId",
-            "taskKey",
-        }:
-            raise CapabilityError("invalid Specialist capability request")
-        if request["schemaVersion"] != 1 or type(request["schemaVersion"]) is not int:
-            raise CapabilityError("invalid Specialist capability request")
-        try:
-            parent_id = uuid.UUID(request["parentId"])
-            specialist_id = uuid.UUID(request["specialistId"])
-        except (TypeError, ValueError, AttributeError) as exc:
-            raise CapabilityError("invalid Specialist capability request") from exc
-        task_key = request["taskKey"]
-        if (
-            str(parent_id) != request["parentId"]
-            or str(specialist_id) != request["specialistId"]
-            or parent_id != parent.sender_id
-            or parent_id == specialist_id
-            or not isinstance(task_key, str)
-            or TASK_KEY_RE.fullmatch(task_key) is None
-        ):
-            raise CapabilityError("invalid Specialist capability request")
-        capability = capability_token(
+        role = parent.role
+        if agent_type not in _ROLE_SPECIALISTS.get(role, set()):
+            raise CapabilityError(f"{role} may not start {agent_type} Specialists")
+        if not isinstance(mission_key, str) or TASK_KEY_RE.fullmatch(mission_key) is None:
+            raise CapabilityError("missionKey is invalid")
+        normalized_prompt = self._bounded_text(prompt, "prompt", 32_768)
+        normalized_description = self._bounded_text(description, "description", 120)
+        skill_names = self._skill_names(skills)
+        role_skill = _SPECIALIST_SKILLS[agent_type]
+        if role_skill not in skill_names:
+            skill_names.insert(0, role_skill)
+        conflicting = (set(skill_names) & set(_SPECIALIST_SKILLS.values())) - {role_skill}
+        if conflicting:
+            raise CapabilityError("Specialist may not combine canonical role skills")
+        if len(",".join(skill_names)) > 256:
+            raise CapabilityError("skills exceed the OpenHands tag limit")
+
+        specialist_id = uuid.uuid5(parent.sender_id, f"evex-specialist:{mission_key}")
+        mission_id = hashlib.sha256(
+            f"{parent.sender_id}\0{mission_key}".encode()
+        ).hexdigest()
+        prompt_digest = hashlib.sha256(normalized_prompt.encode()).hexdigest()
+        reasoning = _SPECIALIST_REASONING.get(agent_type, "medium")
+        descriptor_digest = hashlib.sha256(
+            json.dumps(
+                {
+                    "agentType": agent_type,
+                    "description": normalized_description,
+                    "prompt": normalized_prompt,
+                    "reasoning": reasoning,
+                    "skills": skill_names,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        specialist_capability = capability_token(
             self._secret,
-            owning_main_id=parent_id,
+            owning_main_id=parent.sender_id,
             sender_id=specialist_id,
-            task_key=task_key,
+            task_key=mission_id,
             role="specialist",
         )
-        return {**request, "capability": capability}
+        result = self._provider.start_specialist(
+            parent.sender_id,
+            specialist_id,
+            specialist_capability,
+            {
+                "missionKey": mission_key,
+                "missionId": mission_id,
+                "prompt": normalized_prompt,
+                "promptDigest": prompt_digest,
+                "agentType": agent_type,
+                "description": normalized_description,
+                "skills": skill_names,
+                "reasoning": reasoning,
+                "descriptorDigest": descriptor_digest,
+                "parentRole": role,
+            },
+        )
+        return {**result, "conversationId": str(specialist_id)}
+
+    @staticmethod
+    def _bounded_text(value: object, label: str, maximum: int) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise CapabilityError(f"{label} is required")
+        normalized = value.strip()
+        if len(normalized) > maximum:
+            raise CapabilityError(f"{label} exceeds {maximum} characters")
+        return normalized
+
+    @staticmethod
+    def _skill_names(skills: object) -> list[str]:
+        if not isinstance(skills, list) or len(skills) > 32:
+            raise CapabilityError("skills must be a bounded array")
+        result: list[str] = []
+        for value in skills:
+            if (
+                not isinstance(value, str)
+                or not value
+                or len(value) > 64
+                or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789-" for character in value)
+            ):
+                raise CapabilityError("skills must contain canonical names")
+            if value not in result:
+                result.append(value)
+        return result
 
     def send_message(
         self,
@@ -219,7 +305,7 @@ class MessagingService:
             or _CREDENTIAL.search(summary)
         ):
             raise CapabilityError("message summary is invalid")
-        if not isinstance(evidence, dict) or not {"outcome", "evidence", "findings", "nextBoundary"} <= set(evidence) or set(evidence) - {"outcome", "revision", "evidence", "findings", "nextBoundary"}:
+        if not isinstance(evidence, dict) or not {"outcome", "evidence", "findings", "nextBoundary"} <= set(evidence) or set(evidence) - {"outcome", "revision", "evidence", "findings", "nextBoundary", "artifact"}:
             raise CapabilityError("message AI evidence is invalid")
         for key in ("outcome", "nextBoundary"):
             value = evidence.get(key)
@@ -229,6 +315,14 @@ class MessagingService:
             revision = evidence["revision"]
             if not isinstance(revision, str) or not revision.strip() or len(revision.encode()) > _MAX_EVIDENCE_ITEM_BYTES:
                 raise CapabilityError("message AI evidence is invalid")
+        if "artifact" in evidence:
+            artifact = evidence["artifact"]
+            if not isinstance(artifact, str) or not artifact.strip():
+                raise CapabilityError("message aiEvidence.artifact must be a non-empty string")
+            if len(artifact.encode()) > _MAX_ARTIFACT_BYTES:
+                raise CapabilityError(
+                    f"message aiEvidence.artifact exceeds {_MAX_ARTIFACT_BYTES} UTF-8 bytes"
+                )
         for key in ("evidence", "findings"):
             values = evidence.get(key)
             if not isinstance(values, list):
@@ -251,6 +345,18 @@ class MessagingService:
             canonical = json.dumps(message, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
         except (TypeError, ValueError):
             raise CapabilityError("message AI evidence is invalid") from None
-        if len(canonical.encode()) > _MAX_MESSAGE_BYTES or _MACHINE_DELIMITER.search(canonical) or _CREDENTIAL.search(canonical):
-            raise CapabilityError("message is unsafe or exceeds its byte budget")
+        maximum = _MAX_TERMINAL_MESSAGE_BYTES if "artifact" in evidence else _MAX_MESSAGE_BYTES
+        if len(canonical.encode()) > maximum:
+            raise CapabilityError(f"message exceeds {maximum} UTF-8 bytes")
+        evidence_without_artifact = {key: value for key, value in evidence.items() if key != "artifact"}
+        non_artifact = json.dumps(
+            {"humanSummary": summary, "aiEvidence": evidence_without_artifact},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if _MACHINE_DELIMITER.search(non_artifact):
+            raise CapabilityError("message contains a reserved machine delimiter outside artifact")
+        if _CREDENTIAL.search(canonical):
+            raise CapabilityError("message contains a credential-like value")
         return json.loads(canonical)

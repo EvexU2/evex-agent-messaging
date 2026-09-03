@@ -39,6 +39,10 @@ class FakeProvider:
         self.calls.append(("create-spec", args))
         return {"created": True, "conversationUrl": "http://openhands/spec"}
 
+    def start_specialist(self, *args):
+        self.calls.append(("start-specialist", args))
+        return {"created": True, "conversationUrl": "http://openhands/specialist", "status": "running"}
+
     def readiness(self):
         return self.ready
 
@@ -81,56 +85,50 @@ class MessagingServiceTest(unittest.TestCase):
         with self.assertRaises(CapabilityError):
             inspect_capability(self.child_token()[:-1] + "x", self.secret)
 
-    def test_parent_delegates_one_specialist_capability_bound_to_itself(self):
-        specialist = uuid.uuid4()
+    def test_parent_starts_one_direct_messaging_specialist(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
-        result = service.provision_specialist_capability(
+        result = service.start_specialist(
             self.main_token(),
-            {
-                "schemaVersion": 1,
-                "parentId": str(self.parent),
-                "specialistId": str(specialist),
-                "taskKey": "plan-author-initial",
-            },
+            mission_key="plan-author-initial",
+            prompt="Draft the bounded plan.",
+            agent_type="plan-author",
+            description="Draft plan",
+            skills=["evex-delivery-planning"],
         )
 
-        delegated = inspect_capability(result["capability"], self.secret)
-        self.assertEqual(delegated.owning_main_id, self.parent)
-        self.assertEqual(delegated.sender_id, specialist)
-        self.assertEqual(delegated.task_key, "plan-author-initial")
+        self.assertTrue(result["created"])
+        self.assertEqual(uuid.UUID(result["conversationId"]).version, 5)
+        call = provider.calls[0]
+        self.assertEqual(call[0], "start-specialist")
+        delegated = inspect_capability(call[1][2], self.secret)
         self.assertEqual(delegated.role, "specialist")
-        service.send_message(
-            result["capability"], self.parent, "plan-author-result", self.message()
+        self.assertEqual(delegated.owning_main_id, self.parent)
+
+    def test_specialist_starts_and_messages_one_direct_child_specialist(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        specialist = uuid.uuid4()
+        token = capability_token(
+            self.secret,
+            owning_main_id=self.parent,
+            sender_id=specialist,
+            task_key="plan-author-initial",
+            role="specialist",
         )
-        self.assertEqual(
-            provider.calls[0],
-            ("allowed", (specialist, self.parent, "specialist", self.parent)),
+        result = service.start_specialist(
+            token,
+            mission_key="nested-review",
+            prompt="Review the bounded candidate.",
+            agent_type="reviewer",
+            description="Nested review",
+            skills=[],
         )
 
-    def test_specialist_capability_cannot_delegate_or_target_another_discussion(self):
-        specialist = uuid.uuid4()
-        service = MessagingService(FakeProvider(), self.secret)
-        result = service.provision_specialist_capability(
-            self.main_token(),
-            {
-                "schemaVersion": 1,
-                "parentId": str(self.parent),
-                "specialistId": str(specialist),
-                "taskKey": "qa",
-            },
-        )
-        with self.assertRaisesRegex(CapabilityError, "coordinator"):
-            service.provision_specialist_capability(
-                result["capability"],
-                {
-                    "schemaVersion": 1,
-                    "parentId": str(specialist),
-                    "specialistId": str(uuid.uuid4()),
-                    "taskKey": "nested",
-                },
-            )
+        child_capability = inspect_capability(provider.calls[0][1][2], self.secret)
+        self.assertEqual(child_capability.owning_main_id, specialist)
+        self.assertEqual(child_capability.sender_id, uuid.UUID(result["conversationId"]))
 
     def test_frozen_v2_capability_bytes_are_unchanged(self):
         owner = uuid.UUID("11111111-1111-4111-8111-111111111111")
@@ -327,6 +325,19 @@ class MessagingServiceTest(unittest.TestCase):
         service = MessagingService(provider, self.secret)
         message = self.message()
         message["aiEvidence"]["revision"] = "abc123"
+
+        service.send_message(self.child_token(), self.parent, "result", message)
+
+        self.assertEqual(provider.calls[-1][1][3], message)
+
+    def test_terminal_message_accepts_one_bounded_complete_artifact(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        message = self.message()
+        message["aiEvidence"]["artifact"] = (
+            "<!-- evex-delivery-plan -->\nComplete reviewed plan\n"
+            "<!-- evex-plan-slice:v1 id=one -->"
+        )
 
         service.send_message(self.child_token(), self.parent, "result", message)
 

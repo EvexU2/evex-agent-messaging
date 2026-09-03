@@ -24,7 +24,7 @@ from .capability import valid_native_id
 # Exact Conversation responses include growing usage statistics, not only identity tags.
 # Keep a finite transport budget independent of the much smaller outgoing message limit.
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_DURABLE_ROLES = {"parent-main", "child-main", "spec"}
+_DISCUSSION_ROLES = {"parent-main", "child-main", "spec", "project-chat", "specialist"}
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
@@ -172,6 +172,181 @@ class OpenHandsProvider:
                 parent_head,
                 capability_ref,
             )
+
+    def start_specialist(
+        self,
+        parent_id: uuid.UUID,
+        specialist_id: uuid.UUID,
+        capability_ref: str,
+        mission: dict[str, Any],
+    ) -> dict[str, Any]:
+        required = {
+            "missionKey", "missionId", "prompt", "promptDigest", "agentType",
+            "description", "skills", "reasoning", "descriptorDigest", "parentRole",
+        }
+        if set(mission) != required:
+            raise ProviderError("Specialist Mission is invalid")
+        parent = self._request("GET", f"/api/conversations/{parent_id}")
+        identity, parent_tags, parent_role = self._identity(parent)
+        expected_parent_role = {
+            "main": "parent-main",
+            "deputy": "child-main",
+            "spec": "spec",
+            "project": "project-chat",
+            "specialist": "specialist",
+        }.get(mission["parentRole"])
+        profile = parent.get("launched_agent_profile")
+        profile_id = profile.get("agent_profile_id") if isinstance(profile, dict) else None
+        workspace = parent.get("workspace")
+        working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
+        if (
+            identity != parent_id
+            or parent_role != expected_parent_role
+            or not isinstance(profile_id, str)
+            or not profile_id
+            or parent_tags.get("evexagentprofile") != profile_id
+            or not isinstance(working_dir, str)
+            or not working_dir
+        ):
+            raise ProviderError("Specialist Owner identity is invalid")
+
+        tags = {
+            key: value
+            for key, value in parent_tags.items()
+            if key in {
+                "project", "evextask", "evexissue", "evexsourcerepository",
+                "evexsourcebranch", "evexrepository", "evexbranch",
+            }
+        }
+        tags.update({
+            "evexrole": str(mission["agentType"]),
+            "evexdeliveryrole": "specialist",
+            "evexagenttype": str(mission["agentType"]),
+            "evexparent": str(parent_id),
+            "evexskills": ",".join(mission["skills"]),
+            "evexdescription": str(mission["description"]),
+            "evexagentprofile": profile_id,
+            "evexreasoning": str(mission["reasoning"]),
+            "evexmission": str(mission["missionId"]),
+            "evexprompt": str(mission["promptDigest"]),
+            "evexmissionconfig": str(mission["descriptorDigest"]),
+        })
+        descriptor = self._admission_descriptor(
+            specialist_id,
+            profile_id,
+            working_dir,
+            tags,
+            parent_id=parent_id,
+        )
+        payload = {
+            "conversation_id": str(specialist_id),
+            "workspace": workspace,
+            "worktree": False,
+            "parent_conversation_id": str(parent_id),
+            "agent_profile_id": profile_id,
+            "initial_message": {
+                "role": "user",
+                "content": [{"type": "text", "text": str(mission["prompt"])}],
+                "run": True,
+            },
+            "tags": tags,
+            "secrets": {
+                "EVEX_DELIVERY_ADMISSION": {
+                    "kind": "StaticSecret",
+                    "value": self._admission_token(descriptor),
+                },
+                "EVEX_AGENT_MESSAGING_CAPABILITY": {
+                    "kind": "StaticSecret",
+                    "value": capability_ref,
+                },
+            },
+            "autotitle": False,
+            "max_iterations": 300,
+        }
+        created = False
+        try:
+            existing = self._request("GET", f"/api/conversations/{specialist_id}")
+        except ProviderError as exc:
+            if exc.status != 404:
+                raise
+            try:
+                self._request("POST", "/api/conversations", payload)
+                created = True
+            except ProviderError as create_error:
+                try:
+                    self._request("GET", f"/api/conversations/{specialist_id}")
+                except ProviderError:
+                    raise create_error
+            existing = self._request("GET", f"/api/conversations/{specialist_id}")
+
+        self._validate_existing_specialist(
+            existing,
+            parent_id,
+            specialist_id,
+            profile_id,
+            workspace,
+            tags,
+            capability_ref,
+        )
+        if not created:
+            self._request(
+                "POST",
+                f"/api/conversations/{specialist_id}/secrets",
+                {"secrets": {"EVEX_AGENT_MESSAGING_CAPABILITY": {
+                    "kind": "StaticSecret",
+                    "value": capability_ref,
+                }}},
+            )
+        self._request(
+            "PATCH",
+            f"/api/conversations/{specialist_id}",
+            {"title": str(mission["description"])},
+        )
+        return {
+            "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{specialist_id}",
+            "provider": "openhands",
+            "created": created,
+            "status": str(existing.get("execution_status") or "running"),
+        }
+
+    def _validate_existing_specialist(
+        self,
+        value: dict[str, Any],
+        parent_id: uuid.UUID,
+        specialist_id: uuid.UUID,
+        profile_id: str,
+        workspace: dict[str, Any],
+        expected_tags: dict[str, str],
+        capability_ref: str,
+    ) -> None:
+        identity, tags, role = self._identity(value)
+        actual_profile = value.get("launched_agent_profile")
+        actual_profile_id = (
+            actual_profile.get("agent_profile_id")
+            if isinstance(actual_profile, dict)
+            else None
+        )
+        unsigned_tags = {key: item for key, item in tags.items() if key != "evexadmission"}
+        marker = tags.get("evexadmission", "")
+        expected_marker = self._expected_admission_marker(
+            specialist_id,
+            profile_id,
+            str(workspace["working_dir"]),
+            expected_tags,
+            capability_ref=capability_ref,
+            parent_id=parent_id,
+        )
+        if (
+            identity != specialist_id
+            or role != "specialist"
+            or value.get("parent_conversation_id") != str(parent_id)
+            or value.get("workspace") != workspace
+            or actual_profile_id != profile_id
+            or unsigned_tags != expected_tags
+            or not isinstance(marker, str)
+            or not hmac.compare_digest(marker, expected_marker)
+        ):
+            raise ProviderError("Existing Specialist does not match authority")
 
     def _create_spec_chat_locked(
         self,
@@ -337,10 +512,12 @@ class OpenHandsProvider:
         profile_id: str,
         working_dir: str,
         tags: dict[str, str],
+        *,
+        parent_id: uuid.UUID | None = None,
     ) -> dict[str, Any]:
         return {
             "conversation_id": str(spec_chat_id),
-            "parent_conversation_id": "",
+            "parent_conversation_id": str(parent_id) if parent_id is not None else "",
             "profile_id": profile_id,
             "working_dir": working_dir,
             "worktree": False,
@@ -355,10 +532,11 @@ class OpenHandsProvider:
         tags: dict[str, str],
         *,
         capability_ref: str,
+        parent_id: uuid.UUID | None = None,
     ) -> str:
         token = self._admission_token(
             self._admission_descriptor(
-                spec_chat_id, profile_id, working_dir, tags
+                spec_chat_id, profile_id, working_dir, tags, parent_id=parent_id
             )
         )
         material = (
@@ -740,7 +918,7 @@ class OpenHandsProvider:
         if (
             not isinstance(tags, dict)
             or tags.get("project") != "evex-u"
-            or role not in _DURABLE_ROLES
+            or role not in _DISCUSSION_ROLES
         ):
             raise ProviderError("OpenHands Discussion identity is invalid")
         return conversation_id, tags, role
@@ -754,6 +932,17 @@ class OpenHandsProvider:
         project_id: str | None = None,
     ) -> bool:
         target = self._request("GET", f"/api/conversations/{target_id}")
+        try:
+            target_identity, target_tags, target_role = self._identity(target)
+        except ProviderError:
+            target_identity, target_tags, target_role = None, {}, ""
+        if (
+            target_identity == target_id
+            and target_role == "specialist"
+            and target_tags.get("evexparent") == str(sender_id)
+            and target.get("parent_conversation_id") == str(sender_id)
+        ):
+            return True
         if role in {"deputy", "spec", "specialist"}:
             # The signed capability is the relationship authority. This read
             # proves only that the exact Discussion still exists; mutable
@@ -782,9 +971,8 @@ class OpenHandsProvider:
                 project["role"] == "project" and parent["role"] == "parent-main"
                 and project["project"] == parent["project"]
             )
-        target_identity, target_tags, target_role = self._identity(
-            target
-        )
+        if target_identity is None:
+            target_identity, target_tags, target_role = self._identity(target)
         if target_identity != target_id:
             return False
         if role != "main":
@@ -882,6 +1070,7 @@ class OpenHandsProvider:
             separators=(",", ":"),
             allow_nan=False,
         )
+        envelope = envelope.replace("<", "\\u003c").replace(">", "\\u003e")
         projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
         self._request(
             "POST",

@@ -163,6 +163,14 @@ class MainDeliveryProviderTests(unittest.TestCase):
         self.assertIn("Subissue Main", event)
         self.assertNotIn("RECOVERY MODE", event)
 
+    def test_issue_title_uses_canonical_root_grammar(self) -> None:
+        request = delivery_request()
+
+        self.assertEqual(
+            OpenHandsProvider._main_title(request),
+            "#1067 · Issue · Duration fix",
+        )
+
     def test_recovery_bootstrap_is_creation_only(self) -> None:
         request = delivery_request(
             role="subissue",
@@ -177,6 +185,32 @@ class MainDeliveryProviderTests(unittest.TestCase):
 
         text = transport.calls[-1][2]["content"][0]["text"]
         self.assertNotIn("RECOVERY MODE", text)
+
+    def test_missing_recovery_target_gets_recovery_bootstrap_on_creation(self) -> None:
+        request = delivery_request(
+            role="subissue",
+            recovery_mode=True,
+            event="issue_comment",
+            action="created",
+        )
+        provider, transport = self.provider([])
+        transport.responses = [
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": PROFILE_ID, "profiles": [
+                {"id": PROFILE_ID, "agent_kind": "acp"},
+            ]},
+            {},
+            {},
+            self.identity(provider, request),
+            {},
+        ]
+
+        result = provider.deliver_main(request)
+
+        self.assertEqual(result["outcome"], "created")
+        text = transport.calls[-1][2]["content"][0]["text"]
+        self.assertIn("RECOVERY MODE", text)
+        self.assertIn("recovery-mode.md", text)
 
     def test_only_safe_get_is_retried(self) -> None:
         request = delivery_request()

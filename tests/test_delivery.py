@@ -142,6 +142,14 @@ class DeliveryContractTests(unittest.TestCase):
         with self.assertRaises(DeliveryContractError):
             MainDeliveryRequest.parse(invalid)
 
+    def test_full_utf8_github_title_bound_is_accepted(self) -> None:
+        value = request()
+        value["target"]["issueTitle"] = "🛠" * 256
+
+        parsed = MainDeliveryRequest.parse(value)
+
+        self.assertEqual(parsed.target.issue_title, "🛠" * 256)
+
 
 class DeliveryServiceTests(unittest.TestCase):
     def test_dedicated_credential_allows_delivery(self) -> None:

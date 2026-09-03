@@ -90,7 +90,7 @@ class MainDeliveryRequest:
         if (
             not isinstance(repository, str) or _REPOSITORY.fullmatch(repository) is None
             or type(number) is not int or number < 1
-            or not isinstance(title, str) or not title.strip() or len(title.encode()) > 512
+            or not isinstance(title, str) or not title.strip() or len(title.encode()) > 1024
             or role not in {"issue", "subissue"}
             or type(allow_create) is not bool
             or type(recovery_mode) is not bool

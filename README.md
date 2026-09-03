@@ -13,9 +13,9 @@ start_specialist(missionKey, prompt, agentType, description, skills?)
 send_message(targetId, messageKey, message)
 ```
 
-Only Issue Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
-Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Issue
-Discussion, validates the Issue Main's clean `main` checkout, and derives one independent isolated Spec
+Only the Issue Conversation may call `create_spec_chat`. It deterministically creates or reuses the root
+Issue's one Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified
+Issue Conversation, validates its clean `main` checkout, and derives one independent isolated Spec
 checkout from its observed head. The caller supplies no repository, branch, or SHA. Messaging needs no
 GitHub credential, public-egress rule, or shared mirror for this operation. New chats bind the
 OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently selected supported
@@ -27,7 +27,7 @@ untouched and fail closed without metadata migration, event delivery, or model s
 operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
 task-control, or Conversation-search surface.
 
-Issue Main, direct Subissue Main, and interactive Spec Chat retain their byte-identical `evx2_`
+Issue Conversation, direct Subissue Conversation, and interactive Spec Chat retain their byte-identical `evx2_`
 transport-bound HMAC Bearer capabilities. A Specialist receives the same capability format,
 bound to its exact Conversation and immediate Owner. It may return to that Owner and send to a direct
 Specialist child whose live admission binds that child to it. Existing role
@@ -50,7 +50,7 @@ task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 byt
 is inferred. Existing `evx2_` bytes and public Messaging operations are unchanged; Messaging now
 mints the same capability bytes while admitting a Main through its private Gateway operation.
 
-Both Project→root Issue and root Issue→Project sends read both exact authenticated
+Both Project→Issue-Conversation and Issue-Conversation→Project sends read both exact authenticated
 `GET /api/conversations/{canonicalUuid}` objects on every call. Only the host-computed
 `evexProjectAdmission` projection supplies Project authority, never tags, caller-selected roles,
 token viewers, cached facts, or generic finished-turn status. All nested projection keys and types
@@ -59,7 +59,7 @@ are strict; schema version is the integer `1` (not a boolean).
 ```text
 evexProjectAdmission = {
   schemaVersion: 1, conversationId: canonicalUuid,
-  role: "project" | "parent-main", lifecycle: "eligible" | "terminal",
+  role: "project" | "issue", lifecycle: "eligible" | "terminal",
   project: {
     id: nativeProjectId, accountablePmId: nativeUserId, nominatedChatId: canonicalUuid,
     state: "open" | "closed", accountability: "unique" | "ambiguous",
@@ -67,14 +67,14 @@ evexProjectAdmission = {
   },
   root: null | {
     id: nativeWorkspaceIssueId, repository: "EvexU2/evex-u-workspace", number: positiveInteger,
-    parentMainId: canonicalUuid, accountableProjectId: nativeProjectId,
+    issueConversationId: canonicalUuid, accountableProjectId: nativeProjectId,
     accountablePmId: nativeUserId, pmAssigned: boolean, membershipProjectId: nativeProjectId,
     state: "eligible" | "terminal", projectChatAccess: "allowed" | "denied"
   }
 }
 ```
 
-`root` is null only for Project; the Issue requires the root object. The host's projection attests its
+`root` is null only for Project; Issue Conversation requires the root object. The host's projection attests its
 verified role, original attributable PM-event provenance and fresh native GitHub facts. Messaging
 cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Issue UUID, root
 accountability, native membership and PM assignment. Both endpoints must be eligible, open, uniquely
@@ -145,12 +145,12 @@ the exact evidence for the receiver without a legacy raw-text path. Malformed, o
 credential-bearing, or unrenderable input fails before any provider mutation with a bounded
 content-free error.
 
-The canonical EVEX dialogue skills own Eve's language, terminology, and explanation depth. Messaging
-does not impose a conversation language or locale authority tag, and replay does not rewrite the
-conversation's language or launch instructions. The skills follow the user's own prose from the
-first response, retain explicit Chat-local preferences, and use German only when no initial language
-signal exists. Durable artifacts remain English. Existing conversations keep their original launch
-instructions; this change does not migrate or replace them.
+The canonical EVEX dialogue skills own Eve's terminology and explanation depth. Project Chat and Spec
+Chat always present human-facing prose in friendly, motivating, non-technical German, regardless of
+the input language; necessary exact identifiers and technical evidence receive German context.
+Durable artifacts remain English. Messaging adds no locale authority tag or translation service.
+Existing Conversations keep their original launch instructions and titles; this change does not
+migrate, retitle, or replace them.
 
 The provider then posts one bounded user event and returns `accepted: true` only after OpenHands accepts
 that request. `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are

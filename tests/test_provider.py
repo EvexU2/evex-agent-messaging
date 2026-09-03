@@ -18,9 +18,13 @@ import uuid
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from evex_agent_messaging.provider import OpenHandsProvider, ProviderError  # noqa: E402
+from evex_agent_messaging.provider import (  # noqa: E402
+    OpenHandsProvider,
+    ProviderError,
+    _specialist_title,
+)
 from evex_agent_messaging.capability import (  # noqa: E402
-    CapabilityError, capability_token, main_capability_token, project_capability_token,
+    CapabilityError, capability_token, issue_capability_token, project_capability_token,
 )
 from evex_agent_messaging.service import MessagingService  # noqa: E402
 from evex_agent_messaging.mcp_server import McpServer  # noqa: E402
@@ -86,7 +90,7 @@ def spec_discussion(
     value = discussion(
         conversation_id,
         "spec",
-        evexrole="role-child",
+        evexrole="spec",
         evextask="issue-40-spec",
         evexissue="EvexU2/evex-u-workspace#40",
         evexparent=str(parent_id),
@@ -161,7 +165,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             ProviderError("missing", status=404),
             profiles(),
             {},
-            {},
             created,
             {},
             {"items": []},
@@ -210,6 +213,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn("EVEX_REASONING_EFFORT", create[2]["secrets"])
         self.assertNotIn("mcp_config", create[2])
         self.assertNotIn("evexmodel", create[2]["tags"])
+        self.assertEqual(create[2]["title"], "#40 · Spezifikation")
+        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
         descriptor = {
             "conversation_id": str(self.spec),
             "parent_conversation_id": "",
@@ -242,6 +247,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             prompt_text,
         )
         self.assertIn("Do not call `invoke_skill`", prompt_text)
+        self.assertIn("Du bist Eve", prompt_text)
+        self.assertIn("menschenlesbaren Ausgabe auf Deutsch", prompt_text)
+        self.assertIn("dauerhafte Artefakte bleiben auf Englisch", prompt_text)
         self.assertNotIn('invoke_skill(name="evex-delivery-spec")', prompt_text)
         self.assertIn("Never load skills from the source checkout", prompt_text)
         self.assertFalse(any(path == "/api/conversations/search" for _, path, _ in transport.calls))
@@ -250,7 +258,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent = discussion(
             self.parent,
             "issue",
-            evexrole="main",
+            evexrole="issue",
             evextask="issue-40",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-agent-skills",
@@ -260,16 +268,16 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent["workspace"] = {"working_dir": "/workspace/root"}
         parent["launched_agent_profile"] = {"agent_profile_id": ACP_PROFILE_ID}
         mission = {
-            "missionKey": "plan-author-initial",
+            "missionKey": "plan-initial",
             "missionId": "a" * 64,
             "prompt": "Draft the bounded plan.",
             "promptDigest": "b" * 64,
-            "agentType": "plan-author",
+            "agentType": "plan",
             "description": "Draft plan",
             "skills": ["evex-delivery-planning"],
             "reasoning": "medium",
             "descriptorDigest": "c" * 64,
-            "parentRole": "main",
+            "parentRole": "issue",
         }
         capability = "evx2_specialist"
         tags = {
@@ -278,9 +286,9 @@ class OpenHandsProviderTest(unittest.TestCase):
             "evexissue": "EvexU2/evex-u-workspace#40",
             "evexsourcerepository": "EvexU2/evex-agent-skills",
             "evexsourcebranch": "main",
-            "evexrole": "plan-author",
+            "evexrole": "plan",
             "evexdeliveryrole": "specialist",
-            "evexagenttype": "plan-author",
+            "evexagenttype": "plan",
             "evexparent": str(self.parent),
             "evexskills": "evex-delivery-planning",
             "evexdescription": "Draft plan",
@@ -340,13 +348,55 @@ class OpenHandsProviderTest(unittest.TestCase):
             create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
             capability,
         )
+        self.assertEqual(create[2]["title"], "#40 · Plan · Draft plan")
+        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
+
+        reused_provider, reused_transport = self.provider([parent, created, {}])
+        reused = reused_provider.start_specialist(
+            self.parent,
+            self.spec,
+            capability,
+            mission,
+        )
+        self.assertFalse(reused["created"])
+        self.assertFalse(any(method == "PATCH" for method, _path, _body in reused_transport.calls))
+
+    def test_specialist_titles_lead_with_ticket_hierarchy_and_keep_source_repository(self):
+        self.assertEqual(
+            _specialist_title(
+                "subissue",
+                {
+                    "evexparentissue": "EvexU2/evex-u-workspace#1067",
+                    "evexissue": "EvexU2/evex-agent-skills#297",
+                    "evexsourcerepository": "EvexU2/evex-agent-skills",
+                },
+                "writer",
+                "Duration fix",
+            ),
+            "#1067 / #297 · skills · Writer · Duration fix",
+        )
+        self.assertEqual(
+            _specialist_title("project-chat", {}, "project-review", "Dokumente schneller finden"),
+            "Projekt · Review · Dokumente schneller finden",
+        )
+
+    def test_specialist_description_is_compact_and_cannot_inject_title_delimiters(self):
+        self.assertEqual(
+            MessagingService._bounded_text(
+                "  Duration\nfix · focused  ",
+                "description",
+                60,
+                collapse_whitespace=True,
+            ),
+            "Duration fix - focused",
+        )
 
     def test_specialist_can_message_its_direct_specialist_child(self):
         child = discussion(
             self.child,
             "specialist",
-            evexrole="reviewer",
-            evexagenttype="reviewer",
+            evexrole="code-review",
+            evexagenttype="code-review",
             evexparent=str(self.parent),
         )
         child["parent_conversation_id"] = str(self.parent)
@@ -436,7 +486,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 "text": (
                     "EVEX_SPEC_CHAT\n"
                     "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-                    f"Issue Main: {self.parent}\n"
+                    f"Issue Conversation: {self.parent}\n"
                     "Your task now: run the interactive Spec Chat for this Issue using the "
                     "admitted EVEX Spec skills. Start by reading the current Issue and living "
                     "Specification."
@@ -506,7 +556,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             profiles(),
             ProviderError("connection closed"),
             created,
-            {},
             created,
             {"items": []},
             profiles(),
@@ -567,7 +616,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 identity = (
                     "EVEX_SPEC_CHAT\n"
                     "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-                    f"Issue Main: {self.parent}\n"
+                    f"Issue Conversation: {self.parent}\n"
                 )
                 prompt_event = {
                     "kind": "MessageEvent",
@@ -582,7 +631,6 @@ class OpenHandsProviderTest(unittest.TestCase):
                     profiles(),
                     create_error,
                     reconciled,
-                    {},
                     reconciled,
                 ]
                 if not expected_created:
@@ -611,6 +659,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                     )
 
                 self.assertEqual(result["created"], expected_created)
+                self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
                 event_posts = [
                     call for call in transport.calls
                     if call[:2] == (
@@ -642,7 +691,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "for skill-support documents. After loading the skill, read the current Issue and only "
             "the repository files required by the EVEX skills.\n"
             "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-            f"Issue Main: {self.parent}\n"
+            f"Issue Conversation: {self.parent}\n"
         )
         prompt_event = {
             "kind": "MessageEvent",
@@ -708,7 +757,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             parent,
             ProviderError("missing", status=404),
             profiles("openai-production", "openhands"),
-            {},
             {},
             created,
             {},
@@ -1301,7 +1349,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
         provider, transport = self.provider([parent])
-        with self.assertRaisesRegex(ProviderError, "Issue Main checkout authority"):
+        with self.assertRaisesRegex(ProviderError, "Issue Conversation checkout authority"):
             provider.create_spec_chat(self.parent, self.spec, "evx1_spec")
 
         self.assertEqual(len(transport.calls), 1)
@@ -1313,12 +1361,12 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn('"worktree", "add"', source)
 
     def test_child_spec_and_specialist_return_only_to_their_signed_owner(self):
-        for role in ("deputy", "spec", "specialist"):
+        for role in ("subissue", "spec", "specialist"):
             provider, transport = self.provider([{"id": str(self.parent), "tags": {}}])
             self.assertTrue(provider.target_allowed(self.child, self.parent, role, self.parent))
             self.assertEqual(transport.calls[0][1], f"/api/conversations/{self.parent}")
         provider, transport = self.provider([{"id": str(self.child)}])
-        self.assertFalse(provider.target_allowed(self.child, self.child, "deputy", self.parent))
+        self.assertFalse(provider.target_allowed(self.child, self.child, "subissue", self.parent))
         self.assertEqual(len(transport.calls), 1)
 
     def test_specialist_cannot_target_sibling_or_transitive_descendant(self):
@@ -1343,7 +1391,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         descendant = discussion(
             self.spec,
             "specialist",
-            evexrole="reviewer",
+            evexrole="code-review",
             evexparent=str(intermediary),
         )
         descendant["parent_conversation_id"] = str(intermediary)
@@ -1361,18 +1409,18 @@ class OpenHandsProviderTest(unittest.TestCase):
         parent = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#40")
         child = discussion(self.child, "subissue", evexparentissue="EvexU2/evex-u-workspace#40")
         provider, transport = self.provider([child, parent])
-        self.assertTrue(provider.target_allowed(self.parent, self.child, "main", self.parent))
+        self.assertTrue(provider.target_allowed(self.parent, self.child, "issue", self.parent))
         self.assertEqual(len(transport.calls), 2)
 
         spec = discussion(self.spec, "spec", evexparent=str(self.parent))
         provider, _ = self.provider([spec, parent])
-        self.assertTrue(provider.target_allowed(self.parent, self.spec, "main", self.parent))
+        self.assertTrue(provider.target_allowed(self.parent, self.spec, "issue", self.parent))
 
     def test_foreign_or_unrelated_target_is_rejected_without_search(self):
         parent = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#40")
         child = discussion(self.child, "subissue", evexparentissue="EvexU2/evex-u-workspace#99")
         provider, transport = self.provider([child, parent])
-        self.assertFalse(provider.target_allowed(self.parent, self.child, "main", self.parent))
+        self.assertFalse(provider.target_allowed(self.parent, self.child, "issue", self.parent))
         self.assertFalse(any("search" in path for _, path, _ in transport.calls))
 
     def test_send_message_projects_visible_summary_and_hidden_canonical_evidence(self):
@@ -1434,7 +1482,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_invalid_identity_and_readiness_fail_closed(self):
         provider, _ = self.provider([{"id": "bad", "tags": {}}])
         with self.assertRaises(ProviderError):
-            provider.target_allowed(self.parent, self.child, "main", self.parent)
+            provider.target_allowed(self.parent, self.child, "issue", self.parent)
         provider, _ = self.provider([profiles()])
         self.assertTrue(provider.readiness())
 
@@ -1454,7 +1502,7 @@ class ProjectAdmissionTest(unittest.TestCase):
         }
         self.root = {
             "id": "native-workspace-issue-node-id", "repository": "EvexU2/evex-u-workspace",
-            "number": 42, "parentMainId": str(self.parent),
+            "number": 42, "issueConversationId": str(self.parent),
             "accountableProjectId": self.project_id, "accountablePmId": "native-pm-node-id",
             "pmAssigned": True, "membershipProjectId": self.project_id,
             "state": "eligible", "projectChatAccess": "allowed",
@@ -1466,7 +1514,7 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def conversation(self, role):
         identity = self.chat if role == "project" else self.parent
-        admission_role = "parent-main" if role == "issue" else role
+        admission_role = role
         return {"id": str(identity), "evexProjectAdmission": {
             "schemaVersion": 1, "conversationId": str(identity), "role": admission_role,
             "lifecycle": "eligible", "project": copy.deepcopy(self.project),
@@ -1480,7 +1528,7 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def token(self, direction):
         return (project_capability_token(self.secret, self.chat, self.project_id)
-                if direction == "project" else main_capability_token(self.secret, self.parent))
+                if direction == "project" else issue_capability_token(self.secret, self.parent))
 
     def test_project_both_directions_read_exact_endpoints_and_preserve_envelope(self):
         for direction in ("project", "issue"):
@@ -1539,7 +1587,7 @@ class ProjectAdmissionTest(unittest.TestCase):
             (("root",), None), (("root", "extra"), True), (("root", "id"), ""),
             (("root", "repository"), "EvexU2/another-repo"), (("root", "number"), True),
             (("root", "number"), 0), (("root", "number"), 42.0),
-            (("root", "parentMainId"), str(uuid.uuid4())),
+            (("root", "issueConversationId"), str(uuid.uuid4())),
             (("root", "accountableProjectId"), "foreign-project"),
             (("root", "accountablePmId"), "different-pm"),
             (("root", "pmAssigned"), False), (("root", "pmAssigned"), 1),
@@ -1644,8 +1692,8 @@ class ProjectAdmissionTest(unittest.TestCase):
             self.assertTrue(result["accepted"])
             self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
             service, transport = self.service([parent, {}])
-            token = capability_token(self.secret, owning_main_id=self.parent, sender_id=target_id,
-                                     role="spec" if role == "spec" else "deputy", task_key="issue-42")
+            token = capability_token(self.secret, owning_issue_id=self.parent, sender_id=target_id,
+                                     role="spec" if role == "spec" else "subissue", task_key="issue-42")
             self.assertTrue(service.send_message(token, self.parent, "ordinary", self.message)["accepted"])
             self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
 
@@ -1658,9 +1706,9 @@ class ProjectAdmissionTest(unittest.TestCase):
             service.send_message(
                 capability_token(
                     self.secret,
-                    owning_main_id=self.parent,
+                    owning_issue_id=self.parent,
                     sender_id=specialist,
-                    task_key="plan-author",
+                    task_key="plan",
                     role="specialist",
                 ),
                 self.parent,
@@ -1769,8 +1817,8 @@ class ConversationResponseBudgetTest(unittest.TestCase):
     def setUp(self):
         self.parent, self.child = uuid.uuid4(), uuid.uuid4()
         self.capability = capability_token(
-            b"test-secret", owning_main_id=self.parent, sender_id=self.child,
-            task_key="issue-927", role="deputy",
+            b"test-secret", owning_issue_id=self.parent, sender_id=self.child,
+            task_key="issue-927", role="subissue",
         )
         self.provider = OpenHandsProvider("http://openhands", "test-api-key")
         self.server = McpServer(MessagingService(self.provider, b"test-secret"))

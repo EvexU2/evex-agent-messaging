@@ -16,7 +16,7 @@ from evex_agent_messaging.capability import (  # noqa: E402
     CapabilityError,
     capability_token,
     inspect_capability,
-    main_capability_token,
+    issue_capability_token,
     deterministic_spec_chat_id,
 )
 from evex_agent_messaging.service import MessagingService  # noqa: E402
@@ -54,12 +54,12 @@ class MessagingServiceTest(unittest.TestCase):
         self.child = uuid.uuid4()
 
     def main_token(self):
-        return main_capability_token(self.secret, self.parent)
+        return issue_capability_token(self.secret, self.parent)
 
-    def child_token(self, role="deputy"):
+    def child_token(self, role="subissue"):
         return capability_token(
             self.secret,
-            owning_main_id=self.parent,
+            owning_issue_id=self.parent,
             sender_id=self.child,
             task_key="issue-42",
             role=role,
@@ -79,9 +79,9 @@ class MessagingServiceTest(unittest.TestCase):
 
     def test_capability_is_signed_sender_bound_and_send_only(self):
         capability = inspect_capability(self.child_token(), self.secret)
-        self.assertEqual(capability.owning_main_id, self.parent)
+        self.assertEqual(capability.owning_issue_id, self.parent)
         self.assertEqual(capability.sender_id, self.child)
-        self.assertEqual(capability.role, "deputy")
+        self.assertEqual(capability.role, "subissue")
         with self.assertRaises(CapabilityError):
             inspect_capability(self.child_token()[:-1] + "x", self.secret)
 
@@ -91,9 +91,9 @@ class MessagingServiceTest(unittest.TestCase):
 
         result = service.start_specialist(
             self.main_token(),
-            mission_key="plan-author-initial",
+            mission_key="plan-initial",
             prompt="Draft the bounded plan.",
-            agent_type="plan-author",
+            agent_type="plan",
             description="Draft plan",
             skills=["evex-delivery-planning"],
         )
@@ -104,7 +104,7 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(call[0], "start-specialist")
         delegated = inspect_capability(call[1][2], self.secret)
         self.assertEqual(delegated.role, "specialist")
-        self.assertEqual(delegated.owning_main_id, self.parent)
+        self.assertEqual(delegated.owning_issue_id, self.parent)
 
     def test_specialist_starts_and_messages_one_direct_child_specialist(self):
         provider = FakeProvider()
@@ -112,38 +112,38 @@ class MessagingServiceTest(unittest.TestCase):
         specialist = uuid.uuid4()
         token = capability_token(
             self.secret,
-            owning_main_id=self.parent,
+            owning_issue_id=self.parent,
             sender_id=specialist,
-            task_key="plan-author-initial",
+            task_key="plan-initial",
             role="specialist",
         )
         result = service.start_specialist(
             token,
             mission_key="nested-review",
             prompt="Review the bounded candidate.",
-            agent_type="reviewer",
+            agent_type="code-review",
             description="Nested review",
             skills=[],
         )
 
         child_capability = inspect_capability(provider.calls[0][1][2], self.secret)
-        self.assertEqual(child_capability.owning_main_id, specialist)
+        self.assertEqual(child_capability.owning_issue_id, specialist)
         self.assertEqual(child_capability.sender_id, uuid.UUID(result["conversationId"]))
 
     def test_frozen_v2_capability_bytes_are_unchanged(self):
         owner = uuid.UUID("11111111-1111-4111-8111-111111111111")
         sender = uuid.UUID("22222222-2222-4222-8222-222222222222")
         expected = {
-            "main": "evx2_AhEREREREUERgRERERERERERERERERFBEYERERERERERAQMABHJvb3Rutjf5dleSJ6vwP79dGatYJTDYi2U70A5PWLatyaH9Rg",
-            "deputy": "evx2_AhEREREREUERgREREREREREiIiIiIiJCIoIiIiIiIiIiAgIACGlzc3VlLTQyYX3YyOqYyAG-eSWChzl7mtZ2uGquaUVQglzWuFG_B4c",
+            "issue": "evx2_AhEREREREUERgRERERERERERERERERFBEYERERERERERAQMABHJvb3Rutjf5dleSJ6vwP79dGatYJTDYi2U70A5PWLatyaH9Rg",
+            "subissue": "evx2_AhEREREREUERgREREREREREiIiIiIiJCIoIiIiIiIiIiAgIACGlzc3VlLTQyYX3YyOqYyAG-eSWChzl7mtZ2uGquaUVQglzWuFG_B4c",
             "spec": "evx2_AhEREREREUERgREREREREREiIiIiIiJCIoIiIiIiIiIiAwIACGlzc3VlLTQyXYd27yB8UqwCn9U_CZABuo9D_g_RN-SUR41KZNucBXU",
         }
         for role, frozen in expected.items():
             with self.subTest(role=role):
                 token = capability_token(
-                    b"frozen-test-secret", owning_main_id=owner,
-                    sender_id=owner if role == "main" else sender,
-                    task_key="root" if role == "main" else "issue-42", role=role,
+                    b"frozen-test-secret", owning_issue_id=owner,
+                    sender_id=owner if role == "issue" else sender,
+                    task_key="root" if role == "issue" else "issue-42", role=role,
                 )
                 self.assertEqual(token, frozen)
                 self.assertEqual(inspect_capability(token, b"frozen-test-secret").role, role)
@@ -155,7 +155,7 @@ class MessagingServiceTest(unittest.TestCase):
         parsed = inspect_capability(token, self.secret)
         self.assertIsInstance(parsed, capabilities.ProjectCapability)
         self.assertEqual((parsed.sender_id, parsed.project_id, parsed.role), (self.child, "native-project-id", "project"))
-        self.assertFalse(hasattr(parsed, "owning_main_id"))
+        self.assertFalse(hasattr(parsed, "owning_issue_id"))
         self.assertFalse(hasattr(parsed, "task_key"))
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
@@ -273,7 +273,7 @@ class MessagingServiceTest(unittest.TestCase):
 
         self.assertEqual(len(provider.calls[-1][1]), 4)
 
-    def test_only_parent_main_can_create_one_deterministic_spec_chat(self):
+    def test_only_issue_conversation_can_create_one_deterministic_spec_chat(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
 
@@ -285,7 +285,7 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(provider.calls[0][0], "create-spec")
         self.assertEqual(provider.calls[0][1][:2], (self.parent, expected))
         self.assertEqual(len(provider.calls[0][1]), 3)
-        with self.assertRaisesRegex(CapabilityError, "Issue Main"):
+        with self.assertRaisesRegex(CapabilityError, "Issue Conversation"):
             service.create_spec_chat(self.child_token())
 
     def test_wrong_target_and_self_target_fail_closed(self):

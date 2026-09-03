@@ -80,6 +80,9 @@ class McpServerTest(unittest.TestCase):
             TOOLS[1]["inputSchema"]["required"],
             ["missionKey", "prompt", "agentType", "description"],
         )
+        self.assertNotIn(
+            "repair", TOOLS[1]["inputSchema"]["properties"]["agentType"]["enum"]
+        )
         self.assertEqual(TOOLS[2]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
         message_schema = TOOLS[2]["inputSchema"]["properties"]["message"]
@@ -116,9 +119,9 @@ class McpServerTest(unittest.TestCase):
             "params": {
                 "name": "start_specialist",
                 "arguments": {
-                    "missionKey": "plan-author-initial",
+                    "missionKey": "plan-initial",
                     "prompt": "Draft the bounded plan.",
-                    "agentType": "plan-author",
+                    "agentType": "plan",
                     "description": "Draft plan",
                     "skills": ["evex-delivery-planning"],
                 },

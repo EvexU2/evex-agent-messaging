@@ -19,7 +19,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from .capability import capability_token, main_capability_token, valid_native_id
+from .capability import capability_token, issue_capability_token, valid_native_id
 from .delivery import MainDeliveryRequest, WORKSPACE_REPOSITORY
 
 
@@ -40,6 +40,59 @@ _MAIN_MAX_ITERATIONS = 500
 _WAKEABLE_EXECUTION_STATUSES = {"idle", "paused", "finished", "error", "stuck"}
 _DELIVERY_LOCKS = tuple(threading.Lock() for _ in range(64))
 _AUTOMATION_NAMESPACE = uuid.UUID("d6179e10-dc5d-4168-a6f8-cd398d55d9e8")
+_SPECIALIST_TITLE_TYPES = {
+    "plan": "Plan",
+    "plan-review": "Plan Review",
+    "project-review": "Review",
+    "qa": "QA",
+    "code-review": "Code Review",
+    "spec-review": "Spec Review",
+    "writer": "Writer",
+}
+
+
+def _repository_short_name(repository: str) -> str:
+    name = repository.rsplit("/", 1)[-1]
+    for prefix in ("evex-agent-", "evex-u-"):
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return name
+
+
+def _issue_number(issue_ref: object) -> str | None:
+    if not isinstance(issue_ref, str) or "#" not in issue_ref:
+        return None
+    number = issue_ref.rsplit("#", 1)[1]
+    return number if number.isdigit() and int(number) > 0 else None
+
+
+def _specialist_title(
+    parent_role: str,
+    parent_tags: dict[str, Any],
+    agent_type: str,
+    description: str,
+) -> str:
+    title_type = _SPECIALIST_TITLE_TYPES.get(agent_type)
+    if title_type is None:
+        raise ProviderError("Specialist title type is invalid")
+    if parent_role == "project-chat":
+        if agent_type != "project-review":
+            raise ProviderError("Project Specialist title type is invalid")
+        return f"Projekt · Review · {description}"
+
+    root_number = _issue_number(parent_tags.get("evexparentissue"))
+    direct_number = _issue_number(parent_tags.get("evexissue"))
+    if root_number is not None:
+        repository = parent_tags.get("evexsourcerepository")
+        if direct_number is None or not isinstance(repository, str) or not repository:
+            raise ProviderError("Source Specialist title identity is invalid")
+        return (
+            f"#{root_number} / #{direct_number} · {_repository_short_name(repository)} · "
+            f"{title_type} · {description}"
+        )
+    if direct_number is None:
+        raise ProviderError("Root Specialist title identity is invalid")
+    return f"#{direct_number} · {title_type} · {description}"
 
 
 class ProviderError(RuntimeError):
@@ -398,7 +451,7 @@ class OpenHandsProvider:
         if not self.messaging_secret:
             return ""
         if target.delivery_role == "issue":
-            return main_capability_token(self.messaging_secret, target.conversation_id)
+            return issue_capability_token(self.messaging_secret, target.conversation_id)
         assert target.parent_issue is not None
         owner = uuid.uuid5(
             _AUTOMATION_NAMESPACE,
@@ -406,10 +459,10 @@ class OpenHandsProvider:
         )
         return capability_token(
             self.messaging_secret,
-            owning_main_id=owner,
+            owning_issue_id=owner,
             sender_id=target.conversation_id,
             task_key=f"issue-{target.issue_number}",
-            role="deputy",
+            role="subissue",
         )
 
     @staticmethod
@@ -652,10 +705,10 @@ class OpenHandsProvider:
             or not isinstance(issue_ref, str)
             or "#" not in issue_ref
         ):
-            raise ProviderError("Issue Main identity is invalid")
+            raise ProviderError("Issue Conversation identity is invalid")
         issue_repository, issue_number = issue_ref.rsplit("#", 1)
         if issue_repository != _WORKSPACE_REPOSITORY or not issue_number.isdigit():
-            raise ProviderError("Issue Main Issue identity is invalid")
+            raise ProviderError("Issue Conversation root identity is invalid")
         branch = f"spec/issue-{issue_number}"
         parent_checkout, parent_head = self._validated_parent_checkout(
             parent_value, parent_tags, issue_number
@@ -691,8 +744,8 @@ class OpenHandsProvider:
         parent = self._request("GET", f"/api/conversations/{parent_id}")
         identity, parent_tags, parent_role = self._identity(parent)
         expected_parent_role = {
-            "main": "issue",
-            "deputy": "subissue",
+            "issue": "issue",
+            "subissue": "subissue",
             "spec": "spec",
             "project": "project-chat",
             "specialist": "specialist",
@@ -716,7 +769,7 @@ class OpenHandsProvider:
             key: value
             for key, value in parent_tags.items()
             if key in {
-                "project", "evextask", "evexissue", "evexsourcerepository",
+                "project", "evextask", "evexissue", "evexparentissue", "evexsourcerepository",
                 "evexsourcebranch", "evexrepository", "evexbranch",
             }
         }
@@ -763,6 +816,12 @@ class OpenHandsProvider:
                 },
             },
             "autotitle": False,
+            "title": _specialist_title(
+                parent_role,
+                parent_tags,
+                str(mission["agentType"]),
+                str(mission["description"]),
+            ),
             "max_iterations": 300,
         }
         created = False
@@ -799,11 +858,6 @@ class OpenHandsProvider:
                     "value": capability_ref,
                 }}},
             )
-        self._request(
-            "PATCH",
-            f"/api/conversations/{specialist_id}",
-            {"title": str(mission["description"])},
-        )
         return {
             "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{specialist_id}",
             "provider": "openhands",
@@ -870,7 +924,7 @@ class OpenHandsProvider:
         prompt_identity = (
             "EVEX_SPEC_CHAT\n"
             f"Issue: https://github.com/{issue_ref.replace('#', '/issues/')}\n"
-            f"Issue Main: {parent_id}\n"
+            f"Issue Conversation: {parent_id}\n"
         )
         prompt: str | None = None
         created = False
@@ -903,6 +957,7 @@ class OpenHandsProvider:
                 "worktree": False,
                 "tags": tags,
                 "autotitle": False,
+                "title": f"#{issue_number} · Spezifikation",
                 "max_iterations": 300,
                 "secrets": {
                     "EVEX_AGENT_INSTANCE_ID": {
@@ -930,11 +985,6 @@ class OpenHandsProvider:
                     raise create_error
                 created = create_error.status != 409
                 prompt = None
-            self._request(
-                "PATCH",
-                f"/api/conversations/{spec_chat_id}",
-                {"title": f"#{issue_number} · Spec"},
-            )
             existing = None
 
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")
@@ -1069,7 +1119,7 @@ class OpenHandsProvider:
     ) -> dict[str, str]:
         return {
             "project": "evex-u",
-            "evexrole": "role-child",
+            "evexrole": "spec",
             "evexdeliveryrole": "spec",
             "evexskills": _SPEC_SKILL,
             "evexagentprofile": profile_id,
@@ -1220,6 +1270,8 @@ class OpenHandsProvider:
             raise ProviderError("OpenHands Spec prompt identity is invalid")
         return (
             "EVEX_SPEC_CHAT\n"
+            "Du bist Eve. Antworte in jeder menschenlesbaren Ausgabe auf Deutsch, freundlich, "
+            "motivierend und nicht-technisch; dauerhafte Artefakte bleiben auf Englisch.\n"
             "Your task now: run the interactive Spec Chat for the Issue identified below. "
             + activation
             + " Never load skills from the source checkout or search it for skill-support "
@@ -1235,7 +1287,7 @@ class OpenHandsProvider:
             raise ProviderError("OpenHands Spec prompt identity is invalid")
         expected_identity = tuple(
             line for line in expected_lines
-            if line.startswith("Issue: ") or line.startswith("Issue Main: ")
+            if line.startswith("Issue: ") or line.startswith("Issue Conversation: ")
         )
         if len(expected_identity) != 2:
             raise ProviderError("OpenHands Spec prompt identity is invalid")
@@ -1276,7 +1328,7 @@ class OpenHandsProvider:
             tags.get("evexsourcerepository") != _WORKSPACE_REPOSITORY
             or tags.get("evexsourcebranch") != "main"
         ):
-            raise ProviderError("Issue Main checkout authority does not match Spec request")
+            raise ProviderError("Issue Conversation checkout authority does not match Spec request")
         workspace = parent.get("workspace")
         working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
         expected = (
@@ -1286,7 +1338,7 @@ class OpenHandsProvider:
         )
         path = Path(working_dir) if isinstance(working_dir, str) else None
         if path != expected or path.is_symlink():
-            raise ProviderError("Issue Main checkout path does not match authority")
+            raise ProviderError("Issue Conversation checkout path does not match authority")
         head = self._validate_existing_checkout(
             expected,
             {
@@ -1443,7 +1495,7 @@ class OpenHandsProvider:
         sender_id: uuid.UUID,
         target_id: uuid.UUID,
         role: str,
-        owning_main_id: uuid.UUID | None,
+        owning_issue_id: uuid.UUID | None,
         project_id: str | None = None,
     ) -> bool:
         target = self._request("GET", f"/api/conversations/{target_id}")
@@ -1458,7 +1510,7 @@ class OpenHandsProvider:
             and target.get("parent_conversation_id") == str(sender_id)
         ):
             return True
-        if role in {"deputy", "spec", "specialist"}:
+        if role in {"subissue", "spec", "specialist"}:
             # The signed capability is the relationship authority. This read
             # proves only that the exact Discussion still exists; mutable
             # presentation tags cannot revoke or redirect its durable binding.
@@ -1466,10 +1518,10 @@ class OpenHandsProvider:
                 target[key] for key in ("id", "conversation_id") if key in target
             ]
             return (
-                target_id == owning_main_id
+                target_id == owning_issue_id
                 and all(identity == str(target_id) for identity in identities)
             )
-        if role == "project" or (role == "main" and "evexProjectAdmission" in target):
+        if role == "project" or (role == "issue" and "evexProjectAdmission" in target):
             # Read BOTH exact objects for every Project send; no cache or tag fallback.
             sender = self._request("GET", f"/api/conversations/{sender_id}")
             sender_admission = self._project_admission(sender, sender_id)
@@ -1480,17 +1532,17 @@ class OpenHandsProvider:
                     return False
             else:
                 project, parent = target_admission, sender_admission
-                if sender_id != owning_main_id:
+                if sender_id != owning_issue_id:
                     return False
             return (
-                project["role"] == "project" and parent["role"] == "parent-main"
+                project["role"] == "project" and parent["role"] == "issue"
                 and project["project"] == parent["project"]
             )
         if target_identity is None:
             target_identity, target_tags, target_role = self._identity(target)
         if target_identity != target_id:
             return False
-        if role != "main":
+        if role != "issue":
             return False
         sender_identity, sender_tags, sender_role = self._identity(
             self._request("GET", f"/api/conversations/{sender_id}")
@@ -1528,7 +1580,7 @@ class OpenHandsProvider:
             or set(admission) != {"schemaVersion", "conversationId", "role", "lifecycle", "project", "root"}
             or type(admission["schemaVersion"]) is not int or admission["schemaVersion"] != 1
             or admission["conversationId"] != str(conversation_id)
-            or admission["role"] not in ("project", "parent-main")
+            or admission["role"] not in ("project", "issue")
             or admission["lifecycle"] != "eligible"
         ):
             raise error
@@ -1548,10 +1600,10 @@ class OpenHandsProvider:
                 raise error
         elif (
             not isinstance(root, dict)
-            or set(root) != {"id", "repository", "number", "parentMainId", "accountableProjectId", "accountablePmId", "pmAssigned", "membershipProjectId", "state", "projectChatAccess"}
+            or set(root) != {"id", "repository", "number", "issueConversationId", "accountableProjectId", "accountablePmId", "pmAssigned", "membershipProjectId", "state", "projectChatAccess"}
             or not valid_native_id(root["id"]) or root["repository"] != _WORKSPACE_REPOSITORY
             or type(root["number"]) is not int or root["number"] <= 0
-            or root["parentMainId"] != str(conversation_id)
+            or root["issueConversationId"] != str(conversation_id)
             or root["accountableProjectId"] != project["id"]
             or root["membershipProjectId"] != project["id"]
             or root["accountablePmId"] != project["accountablePmId"]

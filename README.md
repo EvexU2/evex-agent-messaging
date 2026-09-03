@@ -13,9 +13,9 @@ start_specialist(missionKey, prompt, agentType, description, skills?)
 send_message(targetId, messageKey, message)
 ```
 
-Only Parent Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
-Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Parent
-Discussion, validates the Parent's clean `main` checkout, and derives one independent isolated Spec
+Only Issue Main may call `create_spec_chat`. It deterministically creates or reuses the Issue's one
+Spec Chat, derives the Workspace repository and `spec/issue-<number>` branch from the verified Issue
+Discussion, validates the Issue Main's clean `main` checkout, and derives one independent isolated Spec
 checkout from its observed head. The caller supplies no repository, branch, or SHA. Messaging needs no
 GitHub credential, public-egress rule, or shared mirror for this operation. New chats bind the
 OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently selected supported
@@ -27,7 +27,7 @@ untouched and fail closed without metadata migration, event delivery, or model s
 operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
 task-control, or Conversation-search surface.
 
-Parent Main, direct Child Main, and interactive Spec Chat retain their byte-identical `evx2_`
+Issue Main, direct Subissue Main, and interactive Spec Chat retain their byte-identical `evx2_`
 transport-bound HMAC Bearer capabilities. A Specialist receives the same capability format,
 bound to its exact Conversation and immediate Owner. It may return to that Owner and send to a direct
 Specialist child whose live admission binds that child to it. Existing role
@@ -47,9 +47,10 @@ The nominated Project Chat uses a distinct send-only `evx3_` capability. Messagi
 signer. Its payload is `version 3 | sender UUID (16 bytes) | send-only action (2) | Project ID byte
 length (uint16, big-endian) | Project ID | HMAC-SHA256`. The Project capability has no owning Main or
 task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 bytes; no node-ID prefix
-is inferred. Existing `evx2_` bytes, Gateway issuance, and ordinary Delivery routes are unchanged.
+is inferred. Existing `evx2_` bytes and public Messaging operations are unchanged; Messaging now
+mints the same capability bytes while admitting a Main through its private Gateway operation.
 
-Both Project→root Parent and root Parent→Project sends read both exact authenticated
+Both Project→root Issue and root Issue→Project sends read both exact authenticated
 `GET /api/conversations/{canonicalUuid}` objects on every call. Only the host-computed
 `evexProjectAdmission` projection supplies Project authority, never tags, caller-selected roles,
 token viewers, cached facts, or generic finished-turn status. All nested projection keys and types
@@ -73,12 +74,12 @@ evexProjectAdmission = {
 }
 ```
 
-`root` is null only for Project; Parent requires the root object. The host's projection attests its
+`root` is null only for Project; the Issue requires the root object. The host's projection attests its
 verified role, original attributable PM-event provenance and fresh native GitHub facts. Messaging
-cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Parent UUID, root
+cross-checks sender/endpoint identities, nominated Chat, Project, same PM, exact Issue UUID, root
 accountability, native membership and PM assignment. Both endpoints must be eligible, open, uniquely
 accountable and accessible. Missing/malformed/stale, closed, terminal, denied, ambiguous, foreign,
-Child/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
+Subissue/Spec or peer bindings produce zero event writes. There is no fallback while the host producer
 is absent. A successful event is still only a wake: recipients must revalidate current facts and
 original decision authority before acting.
 

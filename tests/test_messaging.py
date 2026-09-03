@@ -285,7 +285,7 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(provider.calls[0][0], "create-spec")
         self.assertEqual(provider.calls[0][1][:2], (self.parent, expected))
         self.assertEqual(len(provider.calls[0][1]), 3)
-        with self.assertRaisesRegex(CapabilityError, "Parent Main"):
+        with self.assertRaisesRegex(CapabilityError, "Issue Main"):
             service.create_spec_chat(self.child_token())
 
     def test_wrong_target_and_self_target_fail_closed(self):

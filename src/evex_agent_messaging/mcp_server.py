@@ -29,7 +29,7 @@ def _unique_object(pairs):
 
 TOOLS = [{
     "name": "create_spec_chat",
-    "description": "Create or reuse the one interactive Spec Chat owned by this Parent Main.",
+    "description": "Create or reuse the one interactive Spec Chat owned by this Issue Main.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,

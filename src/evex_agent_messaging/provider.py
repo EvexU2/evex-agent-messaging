@@ -26,7 +26,7 @@ from .delivery import MainDeliveryRequest, WORKSPACE_REPOSITORY
 # Exact Conversation responses include growing usage statistics, not only identity tags.
 # Keep a finite transport budget independent of the much smaller outgoing message limit.
 _MAX_RESPONSE_BYTES = 1024 * 1024
-_DISCUSSION_ROLES = {"parent-main", "child-main", "spec", "project-chat", "specialist"}
+_DISCUSSION_ROLES = {"issue", "subissue", "spec", "project-chat", "specialist"}
 _CHECKOUT_LOCKS = tuple(threading.RLock() for _ in range(64))
 _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
@@ -567,14 +567,14 @@ class OpenHandsProvider:
         issue_ref = parent_tags.get("evexissue")
         if (
             parent_identity != parent_id
-            or parent_role != "parent-main"
+            or parent_role != "issue"
             or not isinstance(issue_ref, str)
             or "#" not in issue_ref
         ):
-            raise ProviderError("Parent Main identity is invalid")
+            raise ProviderError("Issue Main identity is invalid")
         issue_repository, issue_number = issue_ref.rsplit("#", 1)
         if issue_repository != _WORKSPACE_REPOSITORY or not issue_number.isdigit():
-            raise ProviderError("Parent Main Issue identity is invalid")
+            raise ProviderError("Issue Main Issue identity is invalid")
         branch = f"spec/issue-{issue_number}"
         parent_checkout, parent_head = self._validated_parent_checkout(
             parent_value, parent_tags, issue_number
@@ -610,8 +610,8 @@ class OpenHandsProvider:
         parent = self._request("GET", f"/api/conversations/{parent_id}")
         identity, parent_tags, parent_role = self._identity(parent)
         expected_parent_role = {
-            "main": "parent-main",
-            "deputy": "child-main",
+            "main": "issue",
+            "deputy": "subissue",
             "spec": "spec",
             "project": "project-chat",
             "specialist": "specialist",
@@ -789,7 +789,7 @@ class OpenHandsProvider:
         prompt_identity = (
             "EVEX_SPEC_CHAT\n"
             f"Issue: https://github.com/{issue_ref.replace('#', '/issues/')}\n"
-            f"Parent Main: {parent_id}\n"
+            f"Issue Main: {parent_id}\n"
         )
         prompt: str | None = None
         created = False
@@ -1154,7 +1154,7 @@ class OpenHandsProvider:
             raise ProviderError("OpenHands Spec prompt identity is invalid")
         expected_identity = tuple(
             line for line in expected_lines
-            if line.startswith("Issue: ") or line.startswith("Parent Main: ")
+            if line.startswith("Issue: ") or line.startswith("Issue Main: ")
         )
         if len(expected_identity) != 2:
             raise ProviderError("OpenHands Spec prompt identity is invalid")
@@ -1195,7 +1195,7 @@ class OpenHandsProvider:
             tags.get("evexsourcerepository") != _WORKSPACE_REPOSITORY
             or tags.get("evexsourcebranch") != "main"
         ):
-            raise ProviderError("Parent Main checkout authority does not match Spec request")
+            raise ProviderError("Issue Main checkout authority does not match Spec request")
         workspace = parent.get("workspace")
         working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
         expected = (
@@ -1205,7 +1205,7 @@ class OpenHandsProvider:
         )
         path = Path(working_dir) if isinstance(working_dir, str) else None
         if path != expected or path.is_symlink():
-            raise ProviderError("Parent Main checkout path does not match authority")
+            raise ProviderError("Issue Main checkout path does not match authority")
         head = self._validate_existing_checkout(
             expected,
             {
@@ -1414,11 +1414,11 @@ class OpenHandsProvider:
         sender_identity, sender_tags, sender_role = self._identity(
             self._request("GET", f"/api/conversations/{sender_id}")
         )
-        if sender_identity != sender_id or sender_role != "parent-main":
+        if sender_identity != sender_id or sender_role != "issue":
             return False
         same_parent_issue = target_tags.get("evexparentissue") == sender_tags.get("evexissue")
         explicit_parent = target_tags.get("evexparent") == str(sender_id)
-        return (target_role == "child-main" and same_parent_issue) or (
+        return (target_role == "subissue" and same_parent_issue) or (
             target_role == "spec" and (same_parent_issue or explicit_parent)
         )
 

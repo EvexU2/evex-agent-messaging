@@ -182,7 +182,7 @@ class MessagingService:
             capability.role != "main"
             or capability.sender_id != capability.owning_main_id
         ):
-            raise CapabilityError("only a Parent Main may create the Spec Chat")
+            raise CapabilityError("only an Issue Main may create the Spec Chat")
         spec_chat_id = deterministic_spec_chat_id(capability.sender_id)
         spec_capability = capability_token(
             self._secret,

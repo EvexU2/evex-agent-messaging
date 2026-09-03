@@ -145,7 +145,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_create_spec_chat_reuses_exact_parent_issue_and_fixed_role(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -249,7 +249,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_start_specialist_creates_one_direct_message_bound_conversation(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexrole="main",
             evextask="issue-40",
             evexissue="EvexU2/evex-u-workspace#40",
@@ -364,7 +364,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_reused_spec_chat_receives_the_current_durable_capability(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -419,7 +419,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_repeated_reuse_accepts_legacy_initial_prompt_without_event_posts(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -436,7 +436,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 "text": (
                     "EVEX_SPEC_CHAT\n"
                     "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-                    f"Parent Main: {self.parent}\n"
+                    f"Issue Main: {self.parent}\n"
                     "Your task now: run the interactive Spec Chat for this Issue using the "
                     "admitted EVEX Spec skills. Start by reading the current Issue and living "
                     "Specification."
@@ -489,7 +489,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_create_spec_chat_reconciles_an_ambiguous_create_response(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -553,7 +553,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             with self.subTest(label=label):
                 parent = discussion(
                     self.parent,
-                    "parent-main",
+                    "issue",
                     evexissue="EvexU2/evex-u-workspace#40",
                     evexsourcerepository="EvexU2/evex-u-workspace",
                     evexsourcebranch="main",
@@ -567,7 +567,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 identity = (
                     "EVEX_SPEC_CHAT\n"
                     "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-                    f"Parent Main: {self.parent}\n"
+                    f"Issue Main: {self.parent}\n"
                 )
                 prompt_event = {
                     "kind": "MessageEvent",
@@ -622,7 +622,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_create_spec_chat_reconciles_an_ambiguous_initial_prompt(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -642,7 +642,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "for skill-support documents. After loading the skill, read the current Issue and only "
             "the repository files required by the EVEX skills.\n"
             "Issue: https://github.com/EvexU2/evex-u-workspace/issues/40\n"
-            f"Parent Main: {self.parent}\n"
+            f"Issue Main: {self.parent}\n"
         )
         prompt_event = {
             "kind": "MessageEvent",
@@ -690,7 +690,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_native_openhands_profile_uses_the_same_spec_contract(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -753,7 +753,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_unsupported_profile_fails_before_conversation_creation(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -791,7 +791,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -824,7 +824,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_legacy_spec_chat_is_not_reused_or_mutated(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -859,7 +859,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_new_spec_profile_binding_is_verified_on_reuse(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -895,7 +895,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 parent = discussion(
                     self.parent,
-                    "parent-main",
+                    "issue",
                     evexissue="EvexU2/evex-u-workspace#40",
                     evexsourcerepository="EvexU2/evex-u-workspace",
                     evexsourcebranch="main",
@@ -927,7 +927,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_current_agent_config_marker_is_verified_before_spec_reuse(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -979,7 +979,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_current_agent_config_marker_rejects_wrong_messaging_binding(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -1021,7 +1021,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_previous_valid_v2_spec_admission_is_not_reused(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -1068,7 +1068,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_current_spec_without_admission_is_not_migrated_or_reused(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -1119,7 +1119,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             with self.subTest(marker=marker):
                 parent = discussion(
                     self.parent,
-                    "parent-main",
+                    "issue",
                     evexissue="EvexU2/evex-u-workspace#40",
                     evexsourcerepository="EvexU2/evex-u-workspace",
                     evexsourcebranch="main",
@@ -1158,7 +1158,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_partial_new_spec_metadata_cannot_downgrade_to_legacy(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="main",
@@ -1292,7 +1292,7 @@ class OpenHandsProviderTest(unittest.TestCase):
     def test_parent_checkout_identity_mismatch_fails_before_spec_mutation(self):
         parent = discussion(
             self.parent,
-            "parent-main",
+            "issue",
             evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace",
             evexsourcebranch="develop",
@@ -1301,7 +1301,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "working_dir": "/tmp/issue-40-source/evex-u-workspace"
         }
         provider, transport = self.provider([parent])
-        with self.assertRaisesRegex(ProviderError, "Parent Main checkout authority"):
+        with self.assertRaisesRegex(ProviderError, "Issue Main checkout authority"):
             provider.create_spec_chat(self.parent, self.spec, "evx1_spec")
 
         self.assertEqual(len(transport.calls), 1)
@@ -1358,8 +1358,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         )
 
     def test_parent_can_target_only_direct_child_or_linked_spec(self):
-        parent = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40")
-        child = discussion(self.child, "child-main", evexparentissue="EvexU2/evex-u-workspace#40")
+        parent = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#40")
+        child = discussion(self.child, "subissue", evexparentissue="EvexU2/evex-u-workspace#40")
         provider, transport = self.provider([child, parent])
         self.assertTrue(provider.target_allowed(self.parent, self.child, "main", self.parent))
         self.assertEqual(len(transport.calls), 2)
@@ -1369,8 +1369,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertTrue(provider.target_allowed(self.parent, self.spec, "main", self.parent))
 
     def test_foreign_or_unrelated_target_is_rejected_without_search(self):
-        parent = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40")
-        child = discussion(self.child, "child-main", evexparentissue="EvexU2/evex-u-workspace#99")
+        parent = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#40")
+        child = discussion(self.child, "subissue", evexparentissue="EvexU2/evex-u-workspace#99")
         provider, transport = self.provider([child, parent])
         self.assertFalse(provider.target_allowed(self.parent, self.child, "main", self.parent))
         self.assertFalse(any("search" in path for _, path, _ in transport.calls))
@@ -1466,8 +1466,9 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def conversation(self, role):
         identity = self.chat if role == "project" else self.parent
+        admission_role = "parent-main" if role == "issue" else role
         return {"id": str(identity), "evexProjectAdmission": {
-            "schemaVersion": 1, "conversationId": str(identity), "role": role,
+            "schemaVersion": 1, "conversationId": str(identity), "role": admission_role,
             "lifecycle": "eligible", "project": copy.deepcopy(self.project),
             "root": None if role == "project" else copy.deepcopy(self.root),
         }}
@@ -1482,11 +1483,11 @@ class ProjectAdmissionTest(unittest.TestCase):
                 if direction == "project" else main_capability_token(self.secret, self.parent))
 
     def test_project_both_directions_read_exact_endpoints_and_preserve_envelope(self):
-        for direction in ("project", "parent-main"):
+        for direction in ("project", "issue"):
             sender = self.chat if direction == "project" else self.parent
             target = self.parent if direction == "project" else self.chat
             sender_value = self.conversation(direction)
-            target_value = self.conversation("parent-main" if direction == "project" else "project")
+            target_value = self.conversation("issue" if direction == "project" else "project")
             # No tags, user-selected role, generic finished-turn state, or cached facts are used.
             sender_value["status"] = target_value["status"] = "finished"
             service, transport = self.service([target_value, sender_value, {}] * 2)
@@ -1505,10 +1506,10 @@ class ProjectAdmissionTest(unittest.TestCase):
             self.assertEqual(envelope, {**self.message, "messageKey": "later-fact", "senderId": str(sender)})
 
     def test_project_message_key_credential_review_regression(self):
-        for direction in ("project", "parent-main"):
+        for direction in ("project", "issue"):
             for key in ("private-service-key", "reference_private-service-key"):
                 with self.subTest(direction=direction, key=key):
-                    opposite = "parent-main" if direction == "project" else "project"
+                    opposite = "issue" if direction == "project" else "project"
                     service, transport = self.service([
                         self.conversation(opposite), self.conversation(direction), {},
                     ])
@@ -1525,7 +1526,7 @@ class ProjectAdmissionTest(unittest.TestCase):
             (("unexpected",), "extra"), (("conversationId",), str(uuid.uuid4())),
             (("conversationId",), "not-a-uuid"), (("conversationId",), str(self.chat).upper()),
             (("lifecycle",), "terminal"), (("lifecycle",), []),
-            (("role",), "child-main"), (("role",), "spec"), (("role",), []),
+            (("role",), "subissue"), (("role",), "spec"), (("role",), []),
             (("project",), None), (("project", "extra"), True),
             (("project", "id"), "foreign-project"), (("project", "id"), ""),
             (("project", "id"), "x" * 257), (("project", "id"), "with space"),
@@ -1545,12 +1546,12 @@ class ProjectAdmissionTest(unittest.TestCase):
             (("root", "membershipProjectId"), "foreign-project"),
             (("root", "state"), "terminal"), (("root", "projectChatAccess"), "denied"),
         ]
-        for direction in ("project", "parent-main"):
-            for damaged_role in ("project", "parent-main"):
-                cases = mutations + (root_mutations if damaged_role == "parent-main" else [(("root",), self.root)])
+        for direction in ("project", "issue"):
+            for damaged_role in ("project", "issue"):
+                cases = mutations + (root_mutations if damaged_role == "issue" else [(("root",), self.root)])
                 for path, value in cases:
                     with self.subTest(direction=direction, damaged=damaged_role, path=path, value=value):
-                        values = {role: self.conversation(role) for role in ("project", "parent-main")}
+                        values = {role: self.conversation(role) for role in ("project", "issue")}
                         damaged = values[damaged_role]
                         if not path:
                             del damaged["evexProjectAdmission"]
@@ -1559,14 +1560,14 @@ class ProjectAdmissionTest(unittest.TestCase):
                             for part in path[:-1]:
                                 obj = obj[part]
                             obj[path[-1]] = value
-                        opposite = "parent-main" if direction == "project" else "project"
+                        opposite = "issue" if direction == "project" else "project"
                         service, transport = self.service([values[opposite], values[direction]])
                         with self.assertRaises((CapabilityError, ProviderError)):
                             service.send_message(self.token(direction), self.parent if direction == "project" else self.chat, "denied", self.message)
                         self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
 
     def test_project_projection_missing_fields_are_not_defaulted(self):
-        for role in ("project", "parent-main"):
+        for role in ("project", "issue"):
             original = self.conversation(role)
             for section in (None, "project", "root"):
                 obj = original["evexProjectAdmission"] if section is None else original["evexProjectAdmission"][section]
@@ -1585,23 +1586,23 @@ class ProjectAdmissionTest(unittest.TestCase):
         revoked = self.conversation("project")
         revoked["evexProjectAdmission"]["project"]["subjectAccess"] = "denied"
         service, transport = self.service([
-            self.conversation("parent-main"), self.conversation("project"), {},
-            self.conversation("parent-main"), revoked,
+            self.conversation("issue"), self.conversation("project"), {},
+            self.conversation("issue"), revoked,
         ])
         service.send_message(self.token("project"), self.parent, "same-key", self.message)
         with self.assertRaises((CapabilityError, ProviderError)):
             service.send_message(self.token("project"), self.parent, "same-key", self.message)
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST", "GET", "GET"])
         service, transport = self.service([
-            self.conversation("parent-main"), self.conversation("project"), ProviderError("unknown outcome"),
+            self.conversation("issue"), self.conversation("project"), ProviderError("unknown outcome"),
         ])
         with self.assertRaises(ProviderError):
             service.send_message(self.token("project"), self.parent, "uncertain", self.message)
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
 
     def test_project_token_binding_outer_identity_and_peer_routes_are_denied(self):
-        for direction in ("project", "parent-main"):
-            opposite = "parent-main" if direction == "project" else "project"
+        for direction in ("project", "issue"):
+            opposite = "issue" if direction == "project" else "project"
             for variant in ("sender-id", "target-id", "outer-alias", "peer"):
                 sender, target = self.conversation(direction), self.conversation(opposite)
                 if variant == "sender-id":
@@ -1616,30 +1617,30 @@ class ProjectAdmissionTest(unittest.TestCase):
                 with self.subTest(direction=direction, variant=variant), self.assertRaises((CapabilityError, ProviderError)):
                     service.send_message(self.token(direction), self.parent if direction == "project" else self.chat, "denied", self.message)
                 self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
-        service, transport = self.service([self.conversation("parent-main"), self.conversation("project")])
+        service, transport = self.service([self.conversation("issue"), self.conversation("project")])
         with self.assertRaises((CapabilityError, ProviderError)):
             service.send_message(project_capability_token(self.secret, self.chat, "other-project"), self.parent, "denied", self.message)
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
 
     def test_project_projection_cannot_fall_back_to_delivery_tags(self):
         target = self.conversation("project")
-        target["tags"] = discussion(self.chat, "child-main", evexparentissue="EvexU2/evex-u-workspace#42")["tags"]
-        parent = self.conversation("parent-main")
-        parent["tags"] = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#42")["tags"]
+        target["tags"] = discussion(self.chat, "subissue", evexparentissue="EvexU2/evex-u-workspace#42")["tags"]
+        parent = self.conversation("issue")
+        parent["tags"] = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#42")["tags"]
         target["evexProjectAdmission"]["project"]["state"] = "closed"
         service, transport = self.service([target, parent])
         with self.assertRaises(ProviderError):
-            service.send_message(self.token("parent-main"), self.chat, "denied", self.message)
+            service.send_message(self.token("issue"), self.chat, "denied", self.message)
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
 
     def test_project_admitted_parent_keeps_ordinary_child_and_spec_routes(self):
-        parent = self.conversation("parent-main")
-        parent["tags"] = discussion(self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#42")["tags"]
-        for role in ("child-main", "spec"):
+        parent = self.conversation("issue")
+        parent["tags"] = discussion(self.parent, "issue", evexissue="EvexU2/evex-u-workspace#42")["tags"]
+        for role in ("subissue", "spec"):
             target_id = uuid.uuid4()
             target = discussion(target_id, role, evexparentissue="EvexU2/evex-u-workspace#42")
             service, transport = self.service([target, parent, {}])
-            result = service.send_message(self.token("parent-main"), target_id, "ordinary", self.message)
+            result = service.send_message(self.token("issue"), target_id, "ordinary", self.message)
             self.assertTrue(result["accepted"])
             self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
             service, transport = self.service([parent, {}])
@@ -1650,7 +1651,7 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def test_specialist_message_is_bound_to_its_exact_owning_discussion(self):
         specialist = uuid.uuid4()
-        parent = self.conversation("parent-main")
+        parent = self.conversation("issue")
         service, transport = self.service([parent, {}])
 
         self.assertTrue(
@@ -1673,7 +1674,7 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def test_project_tags_cannot_supply_missing_projection(self):
         fake_chat = discussion(self.chat, "project", evexproject=self.project_id, evexpm="native-pm-node-id")
-        service, transport = self.service([self.conversation("parent-main"), fake_chat])
+        service, transport = self.service([self.conversation("issue"), fake_chat])
         with self.assertRaises((CapabilityError, ProviderError)):
             service.send_message(self.token("project"), self.parent, "denied", self.message)
         self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
@@ -1713,7 +1714,7 @@ class ProjectAdmissionTest(unittest.TestCase):
             self.assertEqual(transport.calls, [])
 
     def test_project_private_provision_requires_nominated_eligible_host_project(self):
-        values = [discussion(self.chat, "project"), self.conversation("parent-main")]
+        values = [discussion(self.chat, "project"), self.conversation("issue")]
         for path, replacement in (("nominatedChatId", str(uuid.uuid4())), ("subjectAccess", "denied"),
                                   ("state", "closed"), ("accountability", "ambiguous")):
             value = self.conversation("project")
@@ -1784,7 +1785,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
         }
 
     def parent_bytes(self, size, **overrides):
-        value = discussion(self.parent, "parent-main")
+        value = discussion(self.parent, "issue")
         value["stats"] = {"per_turn": "private-statistics" + "x" * 66000}
         value.update(overrides)
         raw = json.dumps(value).encode()
@@ -1870,7 +1871,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
 
     def test_mutable_target_tags_do_not_revoke_signed_parent_binding(self):
         for tags in (
-            {"project": "foreign", "evexdeliveryrole": "parent-main"},
+            {"project": "foreign", "evexdeliveryrole": "issue"},
             {"project": "evex-u", "evexdeliveryrole": "spec"},
             {},
         ):

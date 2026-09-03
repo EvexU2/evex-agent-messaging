@@ -20,7 +20,7 @@ TASK_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _HEADER = struct.Struct(">B16s16sBBH")
 _PROJECT_HEADER = struct.Struct(">B16sBH")
 _SIGNATURE_BYTES = 32
-_ROLE_IDS = {"main": 1, "deputy": 2, "spec": 3, "specialist": 4}
+_ROLE_IDS = {"issue": 1, "subissue": 2, "spec": 3, "specialist": 4}
 _ROLES = {value: key for key, value in _ROLE_IDS.items()}
 _SEND_MESSAGE_BIT = 2
 _CREATE_SPEC_CHAT_BIT = 1
@@ -32,7 +32,7 @@ class CapabilityError(ValueError):
 
 @dataclass(frozen=True)
 class Capability:
-    owning_main_id: uuid.UUID
+    owning_issue_id: uuid.UUID
     sender_id: uuid.UUID
     task_key: str
     role: str
@@ -59,10 +59,10 @@ def project_capability_token(secret: bytes, sender_id: uuid.UUID, project_id: st
     return PROJECT_REFERENCE_PREFIX + _b64(payload + signature)
 
 
-def deterministic_spec_chat_id(owning_main_id: uuid.UUID) -> uuid.UUID:
-    if not isinstance(owning_main_id, uuid.UUID):
+def deterministic_spec_chat_id(owning_issue_id: uuid.UUID) -> uuid.UUID:
+    if not isinstance(owning_issue_id, uuid.UUID):
         raise CapabilityError("invalid owning Main")
-    return uuid.uuid5(SPEC_CHAT_NAMESPACE, f"{owning_main_id}:spec")
+    return uuid.uuid5(SPEC_CHAT_NAMESPACE, f"{owning_issue_id}:spec")
 
 
 def _b64(value: bytes) -> str:
@@ -76,26 +76,26 @@ def _unb64(value: str) -> bytes:
 def capability_token(
     secret: bytes,
     *,
-    owning_main_id: uuid.UUID,
+    owning_issue_id: uuid.UUID,
     sender_id: uuid.UUID,
     task_key: str,
     role: str,
 ) -> str:
     if (
         not secret
-        or not isinstance(owning_main_id, uuid.UUID)
+        or not isinstance(owning_issue_id, uuid.UUID)
         or not isinstance(sender_id, uuid.UUID)
         or not TASK_KEY_RE.fullmatch(task_key)
         or role not in _ROLE_IDS
-        or (role == "main" and owning_main_id != sender_id)
-        or (role in {"deputy", "spec", "specialist"} and owning_main_id == sender_id)
+        or (role == "issue" and owning_issue_id != sender_id)
+        or (role in {"subissue", "spec", "specialist"} and owning_issue_id == sender_id)
     ):
         raise CapabilityError("invalid capability inputs")
     task = task_key.encode()
-    actions = _SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "main" else 0)
+    actions = _SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "issue" else 0)
     payload = _HEADER.pack(
         2,
-        owning_main_id.bytes,
+        owning_issue_id.bytes,
         sender_id.bytes,
         _ROLE_IDS[role],
         actions,
@@ -105,16 +105,16 @@ def capability_token(
     return REFERENCE_PREFIX + _b64(payload + signature)
 
 
-def main_capability_token(
+def issue_capability_token(
     secret: bytes,
-    main_id: uuid.UUID,
+    issue_id: uuid.UUID,
 ) -> str:
     return capability_token(
         secret,
-        owning_main_id=main_id,
-        sender_id=main_id,
+        owning_issue_id=issue_id,
+        sender_id=issue_id,
         task_key="root",
-        role="main",
+        role="issue",
     )
 
 
@@ -158,7 +158,7 @@ def inspect_capability(token: str, secret: bytes) -> Capability | ProjectCapabil
         if (
             version != 2
             or actions
-            != (_SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "main" else 0))
+            != (_SEND_MESSAGE_BIT | (_CREATE_SPEC_CHAT_BIT if role == "issue" else 0))
             or len(task.encode()) != task_length
             or not TASK_KEY_RE.fullmatch(task)
         ):
@@ -169,7 +169,7 @@ def inspect_capability(token: str, secret: bytes) -> Capability | ProjectCapabil
             task,
             role,
         )
-        if (role == "main") != (capability.owning_main_id == capability.sender_id):
+        if (role == "issue") != (capability.owning_issue_id == capability.sender_id):
             raise error
         return capability
     except (KeyError, TypeError, ValueError, UnicodeError, struct.error) as exc:

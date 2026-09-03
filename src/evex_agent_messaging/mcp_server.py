@@ -28,7 +28,7 @@ def _unique_object(pairs):
 
 TOOLS = [{
     "name": "create_spec_chat",
-    "description": "Create or reuse the one interactive Spec Chat owned by this Parent Main.",
+    "description": "Create or reuse the one interactive Spec Chat owned by this Issue Conversation.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
@@ -50,8 +50,8 @@ TOOLS = [{
             "agentType": {
                 "type": "string",
                 "enum": [
-                    "plan-author", "plan-reviewer", "project-reviewer", "qa",
-                    "repair", "reviewer", "spec-reviewer", "writer",
+                    "plan", "plan-review", "project-review", "qa",
+                    "code-review", "spec-review", "writer",
                 ],
             },
             "description": {"type": "string", "minLength": 1, "maxLength": 120},

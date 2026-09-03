@@ -165,7 +165,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             ProviderError("missing", status=404),
             profiles(),
             {},
-            {},
             created,
             {},
             {"items": []},
@@ -214,11 +213,8 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertNotIn("EVEX_REASONING_EFFORT", create[2]["secrets"])
         self.assertNotIn("mcp_config", create[2])
         self.assertNotIn("evexmodel", create[2]["tags"])
-        title_patch = next(
-            call for call in transport.calls
-            if call[:2] == ("PATCH", f"/api/conversations/{self.spec}")
-        )
-        self.assertEqual(title_patch[2], {"title": "#40 · Spezifikation"})
+        self.assertEqual(create[2]["title"], "#40 · Spezifikation")
+        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
         descriptor = {
             "conversation_id": str(self.spec),
             "parent_conversation_id": "",
@@ -352,11 +348,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
             capability,
         )
-        title_patch = next(
-            call for call in transport.calls
-            if call[:2] == ("PATCH", f"/api/conversations/{self.spec}")
-        )
-        self.assertEqual(title_patch[2], {"title": "#40 · Plan · Draft plan"})
+        self.assertEqual(create[2]["title"], "#40 · Plan · Draft plan")
+        self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
 
         reused_provider, reused_transport = self.provider([parent, created, {}])
         reused = reused_provider.start_specialist(
@@ -385,6 +378,17 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(
             _specialist_title("project-chat", {}, "project-review", "Dokumente schneller finden"),
             "Projekt · Review · Dokumente schneller finden",
+        )
+
+    def test_specialist_description_is_compact_and_cannot_inject_title_delimiters(self):
+        self.assertEqual(
+            MessagingService._bounded_text(
+                "  Duration\nfix · focused  ",
+                "description",
+                60,
+                collapse_whitespace=True,
+            ),
+            "Duration fix - focused",
         )
 
     def test_specialist_can_message_its_direct_specialist_child(self):
@@ -552,7 +556,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             profiles(),
             ProviderError("connection closed"),
             created,
-            {},
             created,
             {"items": []},
             profiles(),
@@ -628,7 +631,6 @@ class OpenHandsProviderTest(unittest.TestCase):
                     profiles(),
                     create_error,
                     reconciled,
-                    {},
                     reconciled,
                 ]
                 if not expected_created:
@@ -657,6 +659,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                     )
 
                 self.assertEqual(result["created"], expected_created)
+                self.assertFalse(any(call[0] == "PATCH" for call in transport.calls))
                 event_posts = [
                     call for call in transport.calls
                     if call[:2] == (
@@ -754,7 +757,6 @@ class OpenHandsProviderTest(unittest.TestCase):
             parent,
             ProviderError("missing", status=404),
             profiles("openai-production", "openhands"),
-            {},
             {},
             created,
             {},

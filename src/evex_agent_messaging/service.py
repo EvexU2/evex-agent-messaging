@@ -174,7 +174,9 @@ class MessagingService:
         if not isinstance(mission_key, str) or TASK_KEY_RE.fullmatch(mission_key) is None:
             raise CapabilityError("missionKey is invalid")
         normalized_prompt = self._bounded_text(prompt, "prompt", 32_768)
-        normalized_description = self._bounded_text(description, "description", 120)
+        normalized_description = self._bounded_text(
+            description, "description", 60, collapse_whitespace=True
+        )
         skill_names = self._skill_names(skills)
         role_skill = _SPECIALIST_SKILLS[agent_type]
         if role_skill not in skill_names:
@@ -232,10 +234,18 @@ class MessagingService:
         return {**result, "conversationId": str(specialist_id)}
 
     @staticmethod
-    def _bounded_text(value: object, label: str, maximum: int) -> str:
+    def _bounded_text(
+        value: object,
+        label: str,
+        maximum: int,
+        *,
+        collapse_whitespace: bool = False,
+    ) -> str:
         if not isinstance(value, str) or not value.strip():
             raise CapabilityError(f"{label} is required")
         normalized = value.strip()
+        if collapse_whitespace:
+            normalized = " ".join(normalized.replace("·", "-").split())
         if len(normalized) > maximum:
             raise CapabilityError(f"{label} exceeds {maximum} characters")
         return normalized

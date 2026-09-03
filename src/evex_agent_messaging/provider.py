@@ -314,6 +314,12 @@ class OpenHandsProvider:
                 },
             },
             "autotitle": False,
+            "title": _specialist_title(
+                parent_role,
+                parent_tags,
+                str(mission["agentType"]),
+                str(mission["description"]),
+            ),
             "max_iterations": 300,
         }
         created = False
@@ -349,17 +355,6 @@ class OpenHandsProvider:
                     "kind": "StaticSecret",
                     "value": capability_ref,
                 }}},
-            )
-        if created:
-            self._request(
-                "PATCH",
-                f"/api/conversations/{specialist_id}",
-                {"title": _specialist_title(
-                    parent_role,
-                    parent_tags,
-                    str(mission["agentType"]),
-                    str(mission["description"]),
-                )},
             )
         return {
             "conversationUrl": f"{self.public_url.rstrip('/')}/conversations/{specialist_id}",
@@ -460,6 +455,7 @@ class OpenHandsProvider:
                 "worktree": False,
                 "tags": tags,
                 "autotitle": False,
+                "title": f"#{issue_number} · Spezifikation",
                 "max_iterations": 300,
                 "secrets": {
                     "EVEX_AGENT_INSTANCE_ID": {
@@ -487,11 +483,6 @@ class OpenHandsProvider:
                     raise create_error
                 created = create_error.status != 409
                 prompt = None
-            self._request(
-                "PATCH",
-                f"/api/conversations/{spec_chat_id}",
-                {"title": f"#{issue_number} · Spezifikation"},
-            )
             existing = None
 
         verified = self._request("GET", f"/api/conversations/{spec_chat_id}")

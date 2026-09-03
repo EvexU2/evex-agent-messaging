@@ -36,6 +36,7 @@ _MAX_EVIDENCE_ITEMS = 100
 _MAX_EVIDENCE_ITEM_BYTES = 2_000
 _MAX_ARTIFACT_BYTES = 64_000
 _MAX_TERMINAL_MESSAGE_BYTES = 80_000
+SPECIALIST_DESCRIPTION_MAX_LENGTH = 120
 _SPECIALIST_REASONING = {"spec-review": "high"}
 _SPECIALIST_SKILLS = {
     "plan": "evex-delivery-planning",
@@ -215,7 +216,10 @@ class MessagingService:
             raise CapabilityError("missionKey is invalid")
         normalized_prompt = self._bounded_text(prompt, "prompt", 32_768)
         normalized_description = self._bounded_text(
-            description, "description", 60, collapse_whitespace=True
+            description,
+            "description",
+            SPECIALIST_DESCRIPTION_MAX_LENGTH,
+            collapse_whitespace=True,
         )
         skill_names = self._skill_names(skills)
         role_skill = _SPECIALIST_SKILLS[agent_type]
@@ -281,13 +285,15 @@ class MessagingService:
         *,
         collapse_whitespace: bool = False,
     ) -> str:
-        if not isinstance(value, str) or not value.strip():
+        if not isinstance(value, str):
+            raise CapabilityError(f"{label} is required")
+        if len(value) > maximum:
+            raise CapabilityError(f"{label} exceeds {maximum} characters")
+        if not value.strip():
             raise CapabilityError(f"{label} is required")
         normalized = value.strip()
         if collapse_whitespace:
             normalized = " ".join(normalized.replace("·", "-").split())
-        if len(normalized) > maximum:
-            raise CapabilityError(f"{label} exceeds {maximum} characters")
         return normalized
 
     @staticmethod

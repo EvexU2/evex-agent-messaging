@@ -106,6 +106,50 @@ class MessagingServiceTest(unittest.TestCase):
         self.assertEqual(delegated.role, "specialist")
         self.assertEqual(delegated.owning_issue_id, self.parent)
 
+    def test_specialist_description_uses_the_published_120_character_limit(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        service.start_specialist(
+            self.main_token(),
+            mission_key="plan-long-description",
+            prompt="Draft the bounded plan.",
+            agent_type="plan",
+            description="x" * 120,
+            skills=["evex-delivery-planning"],
+        )
+
+        self.assertEqual(provider.calls[0][1][3]["description"], "x" * 120)
+        service.start_specialist(
+            self.main_token(),
+            mission_key="plan-normalized-description",
+            prompt="Draft the bounded plan.",
+            agent_type="plan",
+            description="x" + " " * 119,
+            skills=["evex-delivery-planning"],
+        )
+        self.assertEqual(provider.calls[1][1][3]["description"], "x")
+
+        with self.assertRaisesRegex(CapabilityError, "description exceeds 120 characters"):
+            service.start_specialist(
+                self.main_token(),
+                mission_key="plan-too-long-description",
+                prompt="Draft the bounded plan.",
+                agent_type="plan",
+                description="x" * 121,
+                skills=["evex-delivery-planning"],
+            )
+        with self.assertRaisesRegex(CapabilityError, "description exceeds 120 characters"):
+            service.start_specialist(
+                self.main_token(),
+                mission_key="plan-collapsible-description",
+                prompt="Draft the bounded plan.",
+                agent_type="plan",
+                description="x" + " " * 120,
+                skills=["evex-delivery-planning"],
+            )
+        self.assertEqual(len(provider.calls), 2)
+
     def test_specialist_starts_and_messages_one_direct_child_specialist(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)

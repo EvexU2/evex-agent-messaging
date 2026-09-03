@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .provider import OpenHandsProvider, ProviderError
 from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
 from .delivery import DeliveryContractError, MAX_DELIVERY_BYTES
-from .service import MessagingService
+from .service import MessagingService, SPECIALIST_DESCRIPTION_MAX_LENGTH
 
 
 _CAPABILITY_PREFIXES = (REFERENCE_PREFIX, PROJECT_REFERENCE_PREFIX)
@@ -55,7 +55,11 @@ TOOLS = [{
                     "code-review", "spec-review", "writer",
                 ],
             },
-            "description": {"type": "string", "minLength": 1, "maxLength": 120},
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SPECIALIST_DESCRIPTION_MAX_LENGTH,
+            },
             "skills": {
                 "type": "array",
                 "maxItems": 32,

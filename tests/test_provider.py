@@ -75,6 +75,7 @@ class FakeTransport:
 def discussion(conversation_id, role, **tags):
     return {
         "id": str(conversation_id),
+        "execution_status": "finished",
         "tags": {
             "project": "evex-u",
             "evexdeliveryrole": role,
@@ -1477,15 +1478,22 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertFalse(any("search" in path for _, path, _ in transport.calls))
 
     def test_send_message_projects_visible_summary_and_hidden_canonical_evidence(self):
-        provider, transport = self.provider([{}])
+        provider, transport = self.provider([
+            {"execution_status": "finished"},
+            {},
+        ])
         message = {
             "humanSummary": "Review passed; no action is needed.",
             "aiEvidence": {"outcome": "passed", "evidence": ["tests: PASS"], "findings": [], "nextBoundary": "merge"},
         }
         result = provider.send_message(self.parent, self.child, "result-1", message)
         self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
-        self.assertEqual(len(transport.calls), 1)
-        method, path, body = transport.calls[0]
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(
+            transport.calls[0][:2],
+            ("GET", f"/api/conversations/{self.child}"),
+        )
+        method, path, body = transport.calls[1]
         self.assertEqual((method, path), ("POST", f"/api/conversations/{self.child}/events"))
         projection = body["content"][0]["text"]
         self.assertTrue(projection.startswith(message["humanSummary"] + "\n<!-- evex-agent-message:v1 "))
@@ -1493,8 +1501,32 @@ class OpenHandsProviderTest(unittest.TestCase):
         envelope = json.loads(projection.removeprefix(message["humanSummary"] + "\n<!-- evex-agent-message:v1 ").removesuffix(" -->"))
         self.assertEqual(envelope, {"aiEvidence": message["aiEvidence"], "humanSummary": message["humanSummary"], "messageKey": "result-1", "senderId": str(self.parent)})
 
+    def test_send_message_rejects_running_target_without_posting_event(self):
+        provider, transport = self.provider([{"execution_status": "running"}])
+        message = {
+            "humanSummary": "Writer result is ready.",
+            "aiEvidence": {
+                "outcome": "PASS",
+                "evidence": [],
+                "findings": [],
+                "nextBoundary": "review",
+            },
+        }
+
+        with self.assertRaisesRegex(ProviderError, "busy") as raised:
+            provider.send_message(self.parent, self.child, "writer-result", message)
+
+        self.assertEqual(raised.exception.reason, "target_busy")
+        self.assertEqual(
+            transport.calls,
+            [("GET", f"/api/conversations/{self.child}", None)],
+        )
+
     def test_send_message_safely_escapes_machine_markers_in_terminal_artifact(self):
-        provider, transport = self.provider([{}, {}])
+        provider, transport = self.provider([
+            {"execution_status": "finished"},
+            {},
+        ])
         message = {
             "humanSummary": "Plan ready.",
             "aiEvidence": {
@@ -1568,7 +1600,7 @@ class ProjectAdmissionTest(unittest.TestCase):
     def conversation(self, role):
         identity = self.chat if role == "project" else self.parent
         admission_role = role
-        return {"id": str(identity), "tags": {
+        return {"id": str(identity), "execution_status": "finished", "tags": {
             "evexenvironment": "dev:lars",
             "evexintakelabel": "agent:dev:ready:lars",
         }, "evexProjectAdmission": {
@@ -1592,15 +1624,20 @@ class ProjectAdmissionTest(unittest.TestCase):
             target = self.parent if direction == "project" else self.chat
             sender_value = self.conversation(direction)
             target_value = self.conversation("issue" if direction == "project" else "project")
-            # No tags, user-selected role, generic finished-turn state, or cached facts are used.
-            sender_value["status"] = target_value["status"] = "finished"
-            service, transport = self.service([target_value, sender_value, {}] * 2)
+            # Only authenticated Project facts authorize; execution status only gates the wake.
+            service, transport = self.service([
+                target_value,
+                sender_value,
+                {"execution_status": "finished"},
+                {},
+            ] * 2)
             for key in ("first-fact", "later-fact"):
                 with self.subTest(direction=direction, key=key):
                     self.assertEqual(service.send_message(self.token(direction), target, key, self.message),
                                      {"accepted": True, "messageKey": key})
             self.assertEqual([(method, path) for method, path, _ in transport.calls], [
                 ("GET", f"/api/conversations/{target}"), ("GET", f"/api/conversations/{sender}"),
+                ("GET", f"/api/conversations/{target}"),
                 ("POST", f"/api/conversations/{target}/events"),
             ] * 2)
             body = transport.calls[-1][2]
@@ -1714,19 +1751,21 @@ class ProjectAdmissionTest(unittest.TestCase):
         revoked = self.conversation("project")
         revoked["evexProjectAdmission"]["project"]["subjectAccess"] = "denied"
         service, transport = self.service([
-            self.conversation("issue"), self.conversation("project"), {},
+            self.conversation("issue"), self.conversation("project"),
+            {"execution_status": "finished"}, {},
             self.conversation("issue"), revoked,
         ])
         service.send_message(self.token("project"), self.parent, "same-key", self.message)
         with self.assertRaises((CapabilityError, ProviderError)):
             service.send_message(self.token("project"), self.parent, "same-key", self.message)
-        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST", "GET", "GET"])
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "GET", "POST", "GET", "GET"])
         service, transport = self.service([
-            self.conversation("issue"), self.conversation("project"), ProviderError("unknown outcome"),
+            self.conversation("issue"), self.conversation("project"),
+            {"execution_status": "finished"}, ProviderError("unknown outcome"),
         ])
         with self.assertRaises(ProviderError):
             service.send_message(self.token("project"), self.parent, "uncertain", self.message)
-        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "GET", "POST"])
 
     def test_project_token_binding_outer_identity_and_peer_routes_are_denied(self):
         for direction in ("project", "issue"):
@@ -1767,20 +1806,26 @@ class ProjectAdmissionTest(unittest.TestCase):
         for role in ("subissue", "spec"):
             target_id = uuid.uuid4()
             target = discussion(target_id, role, evexparentissue="EvexU2/evex-u-workspace#42")
-            service, transport = self.service([target, parent, {}])
+            service, transport = self.service([
+                target, parent, {"execution_status": "finished"}, {},
+            ])
             result = service.send_message(self.token("issue"), target_id, "ordinary", self.message)
             self.assertTrue(result["accepted"])
-            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
-            service, transport = self.service([parent, {}])
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "GET", "POST"])
+            service, transport = self.service([
+                parent, {"execution_status": "finished"}, {},
+            ])
             token = capability_token(self.secret, owning_issue_id=self.parent, sender_id=target_id,
                                      role="spec" if role == "spec" else "subissue", task_key="issue-42")
             self.assertTrue(service.send_message(token, self.parent, "ordinary", self.message)["accepted"])
-            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "POST"])
+            self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "POST"])
 
     def test_specialist_message_is_bound_to_its_exact_owning_discussion(self):
         specialist = uuid.uuid4()
         parent = self.conversation("issue")
-        service, transport = self.service([parent, {}])
+        service, transport = self.service([
+            parent, {"execution_status": "finished"}, {},
+        ])
 
         self.assertTrue(
             service.send_message(
@@ -1797,7 +1842,7 @@ class ProjectAdmissionTest(unittest.TestCase):
             )["accepted"]
         )
         self.assertEqual(
-            [method for method, _, _ in transport.calls], ["GET", "POST"]
+            [method for method, _, _ in transport.calls], ["GET", "GET", "POST"]
         )
 
     def test_project_tags_cannot_supply_missing_projection(self):
@@ -1940,32 +1985,28 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 return super().read(size)
 
         response = Response(raw)
-        sender = io.BytesIO(json.dumps(discussion(
-            self.child,
-            "child-main",
-            evexparentissue="EvexU2/evex-u-workspace#927",
-            evexparent=str(self.parent),
-        )).encode())
+        recheck = Response(raw)
         with patch(
             "urllib.request.urlopen",
-            side_effect=[response, sender, io.BytesIO(b"{}")],
+            side_effect=[response, recheck, io.BytesIO(b"{}")],
         ) as http:
             result = self.server.handle(self.request, capability_ref=self.capability)
         return result, http.call_args_list, response.read_limit
 
-    def test_long_running_parent_and_exact_limit_allow_one_authorized_event(self):
+    def test_large_wakeable_parent_and_exact_limit_allow_one_authorized_event(self):
         for size in (69143, self.LIMIT):
             with self.subTest(size=size):
                 result, calls, read_limit = self.send(self.parent_bytes(size))
                 self.assertEqual(result["result"]["structuredContent"], {
                     "accepted": True, "messageKey": "final-review",
                 })
-                self.assertEqual([call.args[0].method for call in calls], ["GET", "POST"])
+                self.assertEqual([call.args[0].method for call in calls], ["GET", "GET", "POST"])
                 self.assertEqual(calls[0].args[0].full_url, f"http://openhands/api/conversations/{self.parent}")
-                self.assertEqual(calls[1].args[0].full_url, f"http://openhands/api/conversations/{self.parent}/events")
-                self.assertTrue(json.loads(calls[1].args[0].data)["run"])
+                self.assertEqual(calls[1].args[0].full_url, f"http://openhands/api/conversations/{self.parent}")
+                self.assertEqual(calls[2].args[0].full_url, f"http://openhands/api/conversations/{self.parent}/events")
+                self.assertTrue(json.loads(calls[2].args[0].data)["run"])
                 self.assertEqual(read_limit, self.LIMIT + 1)
-                self.assertEqual([call.kwargs["timeout"] for call in calls], [5.0, 5.0])
+                self.assertEqual([call.kwargs["timeout"] for call in calls], [5.0, 5.0, 5.0])
 
     def test_over_limit_fails_before_parsing_or_event_post(self):
         with patch("evex_agent_messaging.provider.json.loads", wraps=json.loads) as parse:
@@ -2018,10 +2059,11 @@ class ConversationResponseBudgetTest(unittest.TestCase):
 
         result, calls, _ = self.send(json.dumps(parent).encode())
 
-        self.assertEqual(result["result"]["structuredContent"], {
-            "accepted": True, "messageKey": "final-review",
+        self.assertEqual(result["error"], {
+            "code": -32000,
+            "message": "Message target is busy; retry the same messageKey",
         })
-        self.assertEqual([call.args[0].method for call in calls], ["GET", "POST"])
+        self.assertEqual([call.args[0].method for call in calls], ["GET", "GET"])
 
     def test_mutable_target_tags_do_not_revoke_signed_parent_binding(self):
         for tags in (
@@ -2039,7 +2081,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                     "accepted": True, "messageKey": "final-review",
                 })
                 self.assertEqual(
-                    [call.args[0].method for call in calls], ["GET", "POST"]
+                    [call.args[0].method for call in calls], ["GET", "GET", "POST"]
                 )
 
 

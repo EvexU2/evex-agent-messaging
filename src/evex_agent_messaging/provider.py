@@ -1731,23 +1731,45 @@ class OpenHandsProvider:
             or self.api_key in json.dumps(message, ensure_ascii=False)
         ):
             raise ProviderError("message contains a configured credential")
-        envelope = json.dumps(
-            {
-                "aiEvidence": message["aiEvidence"],
-                "humanSummary": message["humanSummary"],
-                "messageKey": message_key,
-                "senderId": str(sender_id),
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        envelope = envelope.replace("<", "\\u003c").replace(">", "\\u003e")
-        projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
-        self._request(
-            "POST",
-            f"/api/conversations/{target_id}/events",
-            {"role": "user", "content": [{"type": "text", "text": projection}], "run": True},
-        )
+        lock = _DELIVERY_LOCKS[target_id.int % len(_DELIVERY_LOCKS)]
+        if not lock.acquire(timeout=min(self.timeout, 1.0)):
+            raise ProviderError(
+                "Message target is busy; retry the same messageKey",
+                reason="target_busy",
+            )
+        try:
+            current = self._request("GET", f"/api/conversations/{target_id}")
+            status = current.get("execution_status")
+            if status not in _WAKEABLE_EXECUTION_STATUSES:
+                raise ProviderError(
+                    "Message target is busy; retry the same messageKey"
+                    if status == "running"
+                    else "Message target is not wakeable",
+                    reason=(
+                        "target_busy"
+                        if status == "running"
+                        else "target_not_wakeable"
+                    ),
+                )
+            envelope = json.dumps(
+                {
+                    "aiEvidence": message["aiEvidence"],
+                    "humanSummary": message["humanSummary"],
+                    "messageKey": message_key,
+                    "senderId": str(sender_id),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            envelope = envelope.replace("<", "\\u003c").replace(">", "\\u003e")
+            projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
+            self._request(
+                "POST",
+                f"/api/conversations/{target_id}/events",
+                {"role": "user", "content": [{"type": "text", "text": projection}], "run": True},
+            )
+        finally:
+            lock.release()
         return {"accepted": True, "messageKey": message_key}

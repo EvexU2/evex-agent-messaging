@@ -15,6 +15,12 @@
 - Use the standard-library implementation unless a dependency is strictly necessary.
 - Run `python3 -m unittest discover -s tests -p 'test_*.py' -q` before handoff.
 
+## Change Naming
+
+Follow the canonical EVEX change-naming contract from the admitted Agent Skills bundle for commits
+and PR titles. Repository-wide changes use `messaging`; use a narrower
+established scope only when it names the single responsibility that owns the outcome.
+
 ## EVEX-only skill policy — hard stop
 
 Use only `evex-*` skills. Before any work, identify the required EVEX skill. If no matching EVEX skill exists, or any non-EVEX skill would be needed: **FULL STOP. Do nothing further. Ask a human for direction.** Never substitute, read, invoke, copy, or delegate to a non-EVEX skill.

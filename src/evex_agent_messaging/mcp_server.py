@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import ipaddress
 import os
+import re
 import sys
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 
 from .provider import OpenHandsProvider, ProviderError
 from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
@@ -404,6 +407,64 @@ def _bearer_credential(value: str | None) -> str | None:
     return token if token and not any(character.isspace() for character in token) else None
 
 
+def is_local_or_ambiguous_host(host: str) -> bool:
+    try:
+        normalized = host.encode("idna").decode("ascii").lower().rstrip(".")
+    except UnicodeError:
+        return True
+    if normalized == "localhost" or normalized.endswith(".localhost"):
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return all(re.fullmatch(r"[0-9]+|0x[0-9a-f]+", part) for part in normalized.split("."))
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback or address.is_unspecified
+
+
+def is_non_global_literal(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host.encode("idna").decode("ascii").lower().rstrip("."))
+    except (UnicodeError, ValueError):
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return not address.is_global
+
+
+def validate_openhands_url(value: str, *, public: bool, production: bool) -> None:
+    name = "OPENHANDS_PUBLIC_URL" if public else "OPENHANDS_URL"
+    try:
+        parsed = urlsplit(value)
+        valid = (
+            value.startswith(("http://", "https://"))
+            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in value)
+            and parsed.scheme in {"http", "https"}
+            and bool(parsed.hostname)
+            and "%" not in parsed.hostname
+            and "\\" not in value
+            and not parsed.netloc.endswith(":")
+            and parsed.username is None
+            and parsed.password is None
+            and (parsed.port is None or 1 <= parsed.port <= 65535)
+            and parsed.path.rstrip("/") == ("/canvas" if public else "")
+            and "?" not in value
+            and "#" not in value
+            and (not production or (
+                not is_local_or_ambiguous_host(parsed.hostname)
+                and (not public or (
+                    parsed.scheme == "https"
+                    and not is_non_global_literal(parsed.hostname)
+                ))
+            ))
+        )
+    except ValueError:
+        valid = False
+    if not valid:
+        raise SystemExit(f"{name} is invalid")
+
+
 def main() -> int:
     secret = os.environ.get("EVEX_MESSAGING_SECRET", "")
     base_url = os.environ.get("OPENHANDS_URL", "")
@@ -424,19 +485,37 @@ def main() -> int:
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
-    server = McpServer(MessagingService(
-        OpenHandsProvider(
+    production = os.environ.get("EVEX_ENVIRONMENT_ID") == "production"
+    validate_openhands_url(base_url, public=False, production=production)
+    validate_openhands_url(public_url, public=True, production=production)
+    transport = os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio")
+    if transport not in {"http", "stdio"}:
+        raise SystemExit("EVEX_MESSAGING_TRANSPORT must be http or stdio")
+    host = os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0")
+    if not host or any(char.isspace() or char in "/?#@" or ord(char) < 32 or ord(char) == 127 for char in host):
+        raise SystemExit("EVEX_MESSAGING_HOST is invalid")
+    port = os.environ.get("EVEX_MESSAGING_PORT", "3101")
+    if not port.isascii() or not port.isdigit() or len(port) > 5 or not 1 <= int(port) <= 65535:
+        raise SystemExit("EVEX_MESSAGING_PORT must be an integer from 1 to 65535")
+    try:
+        provider = OpenHandsProvider(
             base_url,
             api_key,
+            environment_id=os.environ.get("EVEX_ENVIRONMENT_ID", ""),
+            intake_label=os.environ.get("EVEX_INTAKE_LABEL", ""),
             public_url=public_url,
             admission_key=admission_key.encode(),
             messaging_secret=secret.encode(),
-        ),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    server = McpServer(MessagingService(
+        provider,
         secret.encode(),
         delivery_secret=delivery_secret.encode(),
     ))
-    if os.environ.get("EVEX_MESSAGING_TRANSPORT", "stdio") == "http":
-        serve_http(server, os.environ.get("EVEX_MESSAGING_HOST", "0.0.0.0"), int(os.environ.get("EVEX_MESSAGING_PORT", "3101")))
+    if transport == "http":
+        serve_http(server, host, int(port))
     else:
         serve(server)
     return 0

@@ -36,6 +36,8 @@ def request(
     return {
         "schemaVersion": "evex.agent-delivery/1",
         "target": {
+            "environmentId": "dev:lars",
+            "intakeLabel": "agent:dev:ready:lars",
             "conversationId": str(CONVERSATION_ID),
             "issueRepository": repository,
             "issueNumber": 42,
@@ -87,6 +89,8 @@ class DeliveryContractTests(unittest.TestCase):
     def test_valid_issue_request_is_typed(self) -> None:
         value = MainDeliveryRequest.parse(request())
 
+        self.assertEqual(value.target.environment_id, "dev:lars")
+        self.assertEqual(value.target.intake_label, "agent:dev:ready:lars")
         self.assertEqual(value.target.conversation_id, CONVERSATION_ID)
         self.assertEqual(value.target.delivery_role, "issue")
         self.assertEqual(value.target.source.repository, "EvexU2/evex-u-workspace")
@@ -110,6 +114,13 @@ class DeliveryContractTests(unittest.TestCase):
 
         with self.assertRaises(DeliveryContractError):
             MainDeliveryRequest.parse(value)
+
+    def test_missing_environment_authority_fails_closed(self) -> None:
+        for key in ("environmentId", "intakeLabel"):
+            value = request()
+            del value["target"][key]
+            with self.subTest(key=key), self.assertRaises(DeliveryContractError):
+                MainDeliveryRequest.parse(value)
 
     def test_recovery_requires_create_permission(self) -> None:
         with self.assertRaises(DeliveryContractError):

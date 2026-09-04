@@ -23,6 +23,7 @@ _EVENT_FIELDS = {
     "payloadDigest", "observedAt",
 }
 _TARGET_FIELDS = {
+    "environmentId", "intakeLabel",
     "conversationId", "issueRepository", "issueNumber", "issueTitle",
     "deliveryRole", "parentIssue", "allowCreate", "recoveryMode", "source",
 }
@@ -40,6 +41,8 @@ class DeliverySource:
 
 @dataclass(frozen=True)
 class DeliveryTarget:
+    environment_id: str
+    intake_label: str
     conversation_id: uuid.UUID
     issue_repository: str
     issue_number: int
@@ -80,6 +83,8 @@ class MainDeliveryRequest:
             raise error
 
         repository = raw_target["issueRepository"]
+        environment_id = raw_target["environmentId"]
+        intake_label = raw_target["intakeLabel"]
         number = raw_target["issueNumber"]
         title = raw_target["issueTitle"]
         role = raw_target["deliveryRole"]
@@ -88,6 +93,11 @@ class MainDeliveryRequest:
         recovery_mode = raw_target["recoveryMode"]
         source = raw_target["source"]
         if (
+            not isinstance(environment_id, str) or not environment_id
+            or len(environment_id.encode()) > 64
+            or not isinstance(intake_label, str) or not intake_label
+            or len(intake_label.encode()) > 128
+            or
             not isinstance(repository, str) or _REPOSITORY.fullmatch(repository) is None
             or type(number) is not int or number < 1
             or not isinstance(title, str) or not title.strip() or len(title.encode()) > 1024
@@ -127,6 +137,8 @@ class MainDeliveryRequest:
         cls._validate_event(raw_event, error)
         return cls(
             DeliveryTarget(
+                environment_id=environment_id,
+                intake_label=intake_label,
                 conversation_id=conversation_id,
                 issue_repository=repository,
                 issue_number=number,

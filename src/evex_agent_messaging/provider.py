@@ -125,6 +125,8 @@ class _DeliveryResponse:
 class OpenHandsProvider:
     base_url: str
     api_key: str
+    environment_id: str
+    intake_label: str
     timeout: float = 5.0
     transport: Callable[[str, str, dict | None], dict] | None = None
     public_url: str = ""
@@ -134,6 +136,34 @@ class OpenHandsProvider:
     delivery_budget: float = 5.0
     clock: Callable[[], float] = time.monotonic
     sleeper: Callable[[float], None] = time.sleep
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.environment_id, str) or not isinstance(self.intake_label, str):
+            raise ValueError("EVEX_ENVIRONMENT_ID and EVEX_INTAKE_LABEL are required")
+        if self.environment_id == "production":
+            expected = "agent:ready"
+        elif re.fullmatch(r"dev:[a-z0-9][a-z0-9-]{0,33}", self.environment_id):
+            expected = f"agent:dev:ready:{self.environment_id.removeprefix('dev:')}"
+        else:
+            raise ValueError("EVEX_ENVIRONMENT_ID is invalid")
+        if self.intake_label != expected:
+            raise ValueError("EVEX_INTAKE_LABEL does not match EVEX_ENVIRONMENT_ID")
+
+    @staticmethod
+    def _unique_object(pairs: list[tuple[str, Any]]) -> dict:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ProviderError("OpenHands returned duplicate response fields")
+            value[key] = item
+        return value
+
+    def _validate_environment(self, tags: object) -> None:
+        if not isinstance(tags, dict) or (
+            tags.get("evexenvironment") != self.environment_id
+            or tags.get("evexintakelabel") != self.intake_label
+        ):
+            raise ProviderError("OpenHands Discussion environment does not match deployment")
 
     def _request(
         self,
@@ -164,7 +194,7 @@ class OpenHandsProvider:
         if len(raw) > _MAX_RESPONSE_BYTES:
             raise ProviderError("OpenHands response exceeds bounded byte budget")
         try:
-            value = json.loads(raw) if raw else {}
+            value = json.loads(raw, object_pairs_hook=self._unique_object) if raw else {}
         except json.JSONDecodeError as exc:
             raise ProviderError("OpenHands returned an invalid response") from exc
         if not isinstance(value, dict):
@@ -192,6 +222,13 @@ class OpenHandsProvider:
     def deliver_main(self, request: MainDeliveryRequest) -> dict[str, Any]:
         """Create or wake one exact Main; OpenHands remains private to this adapter."""
         target = request.target
+        if (
+            target.environment_id != self.environment_id
+            or target.intake_label != self.intake_label
+        ):
+            raise ProviderError(
+                "Delivery environment mismatch", reason="target_identity_mismatch"
+            )
         lock = _DELIVERY_LOCKS[target.conversation_id.int % len(_DELIVERY_LOCKS)]
         if not lock.acquire(timeout=min(self.delivery_budget, 1.0)):
             raise ProviderError(
@@ -465,8 +502,7 @@ class OpenHandsProvider:
             role="subissue",
         )
 
-    @staticmethod
-    def _main_tags(request: MainDeliveryRequest) -> dict[str, str]:
+    def _main_tags(self, request: MainDeliveryRequest) -> dict[str, str]:
         target = request.target
         skill = (
             "evex-delivery-issue"
@@ -482,6 +518,8 @@ class OpenHandsProvider:
             "evexissue": f"{target.issue_repository}#{target.issue_number}",
             "evexsourcerepository": target.source.repository,
             "evexsourcebranch": target.source.branch,
+            "evexenvironment": self.environment_id,
+            "evexintakelabel": self.intake_label,
         }
         if target.delivery_role == "subissue":
             tags["evexparentissue"] = (
@@ -504,6 +542,12 @@ class OpenHandsProvider:
     ) -> dict[str, dict[str, str]]:
         target = request.target
         return {
+            "EVEX_ENVIRONMENT_ID": {
+                "kind": "StaticSecret", "value": self.environment_id,
+            },
+            "EVEX_INTAKE_LABEL": {
+                "kind": "StaticSecret", "value": self.intake_label,
+            },
             "EVEX_AGENT_MESSAGING_CAPABILITY": {
                 "kind": "StaticSecret", "value": capability_ref,
             },
@@ -665,6 +709,7 @@ class OpenHandsProvider:
 
     def project_binding(self, conversation_id: uuid.UUID) -> str:
         value = self._request("GET", f"/api/conversations/{conversation_id}")
+        self._validate_environment(value.get("tags"))
         admission = self._project_admission(value, conversation_id)
         if admission["role"] != "project":
             raise ProviderError("Project capability admission is unavailable or invalid")
@@ -700,6 +745,7 @@ class OpenHandsProvider:
     ) -> dict[str, Any]:
         parent_value = self._request("GET", f"/api/conversations/{parent_id}")
         parent_identity, parent_tags, parent_role = self._identity(parent_value)
+        self._validate_environment(parent_tags)
         issue_ref = parent_tags.get("evexissue")
         if (
             parent_identity != parent_id
@@ -772,7 +818,8 @@ class OpenHandsProvider:
             for key, value in parent_tags.items()
             if key in {
                 "project", "evextask", "evexissue", "evexparentissue", "evexsourcerepository",
-                "evexsourcebranch", "evexrepository", "evexbranch",
+                "evexsourcebranch", "evexrepository", "evexbranch", "evexenvironment",
+                "evexintakelabel",
             }
         }
         tags.update({
@@ -814,6 +861,14 @@ class OpenHandsProvider:
             },
             "tags": tags,
             "secrets": {
+                "EVEX_ENVIRONMENT_ID": {
+                    "kind": "StaticSecret",
+                    "value": self.environment_id,
+                },
+                "EVEX_INTAKE_LABEL": {
+                    "kind": "StaticSecret",
+                    "value": self.intake_label,
+                },
                 "EVEX_DELIVERY_ADMISSION": {
                     "kind": "StaticSecret",
                     "value": self._admission_token(descriptor),
@@ -964,6 +1019,14 @@ class OpenHandsProvider:
                 "autotitle": False,
                 "max_iterations": 300,
                 "secrets": {
+                    "EVEX_ENVIRONMENT_ID": {
+                        "kind": "StaticSecret",
+                        "value": self.environment_id,
+                    },
+                    "EVEX_INTAKE_LABEL": {
+                        "kind": "StaticSecret",
+                        "value": self.intake_label,
+                    },
                     "EVEX_AGENT_INSTANCE_ID": {
                         "kind": "StaticSecret",
                         "value": str(spec_chat_id),
@@ -1124,8 +1187,8 @@ class OpenHandsProvider:
                 "OpenHands delivery admission capability is unavailable"
             )
 
-    @staticmethod
     def _spec_tags(
+        self,
         parent_id: uuid.UUID,
         issue_ref: str,
         issue_number: str,
@@ -1144,6 +1207,8 @@ class OpenHandsProvider:
             "evexrepository": checkout["repository"],
             "evexbranch": checkout["branch"],
             "evexreasoning": _SPEC_REASONING,
+            "evexenvironment": self.environment_id,
+            "evexintakelabel": self.intake_label,
         }
 
     def _validate_existing_spec(
@@ -1158,6 +1223,7 @@ class OpenHandsProvider:
         capability_ref: str,
     ) -> None:
         identity, tags, role = self._identity(value)
+        self._validate_environment(tags)
         workspace = value.get("workspace")
         working_dir = workspace.get("working_dir") if isinstance(workspace, dict) else None
         try:
@@ -1524,11 +1590,13 @@ class OpenHandsProvider:
             and target_tags.get("evexparent") == str(sender_id)
             and target.get("parent_conversation_id") == str(sender_id)
         ):
+            self._validate_environment(target_tags)
             return True
         if role in {"subissue", "spec", "specialist"}:
             # The signed capability is the relationship authority. This read
-            # proves only that the exact Discussion still exists; mutable
-            # presentation tags cannot revoke or redirect its durable binding.
+            # proves the exact Discussion still exists in this deployment;
+            # presentation tags cannot redirect its durable owner binding.
+            self._validate_environment(target.get("tags"))
             identities = [
                 target[key] for key in ("id", "conversation_id") if key in target
             ]
@@ -1539,6 +1607,8 @@ class OpenHandsProvider:
         if role == "project" or (role == "issue" and "evexProjectAdmission" in target):
             # Read BOTH exact objects for every Project send; no cache or tag fallback.
             sender = self._request("GET", f"/api/conversations/{sender_id}")
+            self._validate_environment(target.get("tags"))
+            self._validate_environment(sender.get("tags"))
             sender_admission = self._project_admission(sender, sender_id)
             target_admission = self._project_admission(target, target_id)
             if role == "project":
@@ -1555,6 +1625,7 @@ class OpenHandsProvider:
             )
         if target_identity is None:
             target_identity, target_tags, target_role = self._identity(target)
+        self._validate_environment(target_tags)
         if target_identity != target_id:
             return False
         if role != "issue":
@@ -1562,6 +1633,7 @@ class OpenHandsProvider:
         sender_identity, sender_tags, sender_role = self._identity(
             self._request("GET", f"/api/conversations/{sender_id}")
         )
+        self._validate_environment(sender_tags)
         if sender_identity != sender_id or sender_role != "issue":
             return False
         same_parent_issue = target_tags.get("evexparentissue") == sender_tags.get("evexissue")

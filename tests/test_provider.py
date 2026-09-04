@@ -42,6 +42,15 @@ def canonical_profile_id(value):
     }.get(value, value)
 
 
+def configured_provider(*args, **kwargs):
+    return OpenHandsProvider(
+        *args,
+        environment_id="dev:lars",
+        intake_label="agent:dev:ready:lars",
+        **kwargs,
+    )
+
+
 class FakeTransport:
     def __init__(self, responses, *, server_capabilities=None):
         self.responses, self.calls = list(responses), []
@@ -66,7 +75,13 @@ class FakeTransport:
 def discussion(conversation_id, role, **tags):
     return {
         "id": str(conversation_id),
-        "tags": {"project": "evex-u", "evexdeliveryrole": role, **tags},
+        "tags": {
+            "project": "evex-u",
+            "evexdeliveryrole": role,
+            "evexenvironment": "dev:lars",
+            "evexintakelabel": "agent:dev:ready:lars",
+            **tags,
+        },
     }
 
 
@@ -138,7 +153,7 @@ class OpenHandsProviderTest(unittest.TestCase):
         transport = FakeTransport(
             responses, server_capabilities=server_capabilities
         )
-        return OpenHandsProvider(
+        return configured_provider(
             "http://openhands",
             "key",
             transport=transport,
@@ -290,6 +305,8 @@ class OpenHandsProviderTest(unittest.TestCase):
             "evexissue": "EvexU2/evex-u-workspace#40",
             "evexsourcerepository": "EvexU2/evex-agent-skills",
             "evexsourcebranch": "main",
+            "evexenvironment": "dev:lars",
+            "evexintakelabel": "agent:dev:ready:lars",
             "evexrole": "plan",
             "evexdeliveryrole": "specialist",
             "evexagenttype": "plan",
@@ -349,6 +366,11 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(create[2]["initial_message"]["content"][0]["text"], mission["prompt"])
         self.assertTrue(create[2]["initial_message"]["run"])
         self.assertEqual(create[2]["secrets"]["EVEX_DELIVERY_ADMISSION"]["value"], token)
+        self.assertEqual(create[2]["secrets"]["EVEX_ENVIRONMENT_ID"]["value"], "dev:lars")
+        self.assertEqual(
+            create[2]["secrets"]["EVEX_INTAKE_LABEL"]["value"],
+            "agent:dev:ready:lars",
+        )
         self.assertEqual(
             create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
             capability,
@@ -955,7 +977,6 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_new_spec_requires_server_owned_messaging_admission_before_mutation(self):
         for marker in (
-            "",
             "v1:gateway:" + "a" * 64,
             "v1:messaging:bad",
             "v1:messaging:" + "a" * 64,
@@ -1266,7 +1287,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            provider = OpenHandsProvider(
+            provider = configured_provider(
                 "http://openhands",
                 "key",
                 public_url="http://openhands.local/canvas",
@@ -1326,7 +1347,7 @@ class OpenHandsProviderTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
             ).stdout.strip()
-            provider = OpenHandsProvider(
+            provider = configured_provider(
                 "http://openhands",
                 "key",
                 public_url="http://openhands.local/canvas",
@@ -1382,10 +1403,22 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_child_spec_and_specialist_return_only_to_their_signed_owner(self):
         for role in ("subissue", "spec", "specialist"):
-            provider, transport = self.provider([{"id": str(self.parent), "tags": {}}])
+            provider, transport = self.provider([{
+                "id": str(self.parent),
+                "tags": {
+                    "evexenvironment": "dev:lars",
+                    "evexintakelabel": "agent:dev:ready:lars",
+                },
+            }])
             self.assertTrue(provider.target_allowed(self.child, self.parent, role, self.parent))
             self.assertEqual(transport.calls[0][1], f"/api/conversations/{self.parent}")
-        provider, transport = self.provider([{"id": str(self.child)}])
+        provider, transport = self.provider([{
+            "id": str(self.child),
+            "tags": {
+                "evexenvironment": "dev:lars",
+                "evexintakelabel": "agent:dev:ready:lars",
+            },
+        }])
         self.assertFalse(provider.target_allowed(self.child, self.child, "subissue", self.parent))
         self.assertEqual(len(transport.calls), 1)
 
@@ -1485,7 +1518,7 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_configured_credential_is_rejected_before_provider_mutation(self):
         transport = FakeTransport([])
-        provider = OpenHandsProvider(
+        provider = configured_provider(
             "http://openhands", "configured-secret", transport=transport,
         )
 
@@ -1535,7 +1568,10 @@ class ProjectAdmissionTest(unittest.TestCase):
     def conversation(self, role):
         identity = self.chat if role == "project" else self.parent
         admission_role = role
-        return {"id": str(identity), "evexProjectAdmission": {
+        return {"id": str(identity), "tags": {
+            "evexenvironment": "dev:lars",
+            "evexintakelabel": "agent:dev:ready:lars",
+        }, "evexProjectAdmission": {
             "schemaVersion": 1, "conversationId": str(identity), "role": admission_role,
             "lifecycle": "eligible", "project": copy.deepcopy(self.project),
             "root": None if role == "project" else copy.deepcopy(self.root),
@@ -1543,7 +1579,7 @@ class ProjectAdmissionTest(unittest.TestCase):
 
     def service(self, responses):
         transport = FakeTransport(responses)
-        provider = OpenHandsProvider("http://openhands", "private-service-key", transport=transport)
+        provider = configured_provider("http://openhands", "private-service-key", transport=transport)
         return MessagingService(provider, self.secret), transport
 
     def token(self, direction):
@@ -1572,6 +1608,30 @@ class ProjectAdmissionTest(unittest.TestCase):
             projected = body["content"][0]["text"]
             envelope = json.loads(projected.split("<!-- evex-agent-message:v1 ", 1)[1].removesuffix(" -->"))
             self.assertEqual(envelope, {**self.message, "messageKey": "later-fact", "senderId": str(sender)})
+
+    def test_project_both_directions_reject_missing_or_foreign_peer_environment(self):
+        for direction in ("project", "parent-main"):
+            opposite = "parent-main" if direction == "project" else "project"
+            target_id = self.parent if direction == "project" else self.chat
+            for bad_side in ("sender", "target"):
+                for bad_tags in ({}, {
+                    "evexenvironment": "dev:else",
+                    "evexintakelabel": "agent:dev:ready:else",
+                }):
+                    with self.subTest(
+                        direction=direction, bad_side=bad_side, bad_tags=bad_tags,
+                    ):
+                        sender = self.conversation(direction)
+                        target = self.conversation(opposite)
+                        (sender if bad_side == "sender" else target)["tags"] = bad_tags
+                        service, transport = self.service([target, sender])
+                        with self.assertRaisesRegex(ProviderError, "environment"):
+                            service.send_message(
+                                self.token(direction), target_id, "denied", self.message,
+                            )
+                        self.assertEqual(
+                            [method for method, _, _ in transport.calls], ["GET", "GET"]
+                        )
 
     def test_project_message_key_credential_review_regression(self):
         for direction in ("project", "issue"):
@@ -1770,6 +1830,19 @@ class ProjectAdmissionTest(unittest.TestCase):
         self.assertNotIn("evx3_", json.dumps(results))
         self.assertNotIn("mcp", json.dumps(results).lower())
 
+    def test_project_private_provision_rejects_untagged_context_before_secret_write(self):
+        project = self.conversation("project")
+        project["tags"] = {}
+        service, transport = self.service([project])
+
+        with self.assertRaisesRegex(ProviderError, "environment"):
+            service.provision_project_capability({
+                "schemaVersion": 1,
+                "conversationId": str(self.chat),
+            })
+
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET"])
+
     def test_project_private_provision_schema_denial_before_provider_calls(self):
         request = {"schemaVersion": 1, "conversationId": str(self.chat)}
         for invalid in (None, [], {}, {**request, "extra": True}, {**request, "schemaVersion": True},
@@ -1840,7 +1913,7 @@ class ConversationResponseBudgetTest(unittest.TestCase):
             b"test-secret", owning_issue_id=self.parent, sender_id=self.child,
             task_key="issue-927", role="subissue",
         )
-        self.provider = OpenHandsProvider("http://openhands", "test-api-key")
+        self.provider = configured_provider("http://openhands", "test-api-key")
         self.server = McpServer(MessagingService(self.provider, b"test-secret"))
         self.request = {
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -1867,7 +1940,16 @@ class ConversationResponseBudgetTest(unittest.TestCase):
                 return super().read(size)
 
         response = Response(raw)
-        with patch("urllib.request.urlopen", side_effect=[response, io.BytesIO(b"{}")]) as http:
+        sender = io.BytesIO(json.dumps(discussion(
+            self.child,
+            "child-main",
+            evexparentissue="EvexU2/evex-u-workspace#927",
+            evexparent=str(self.parent),
+        )).encode())
+        with patch(
+            "urllib.request.urlopen",
+            side_effect=[response, sender, io.BytesIO(b"{}")],
+        ) as http:
             result = self.server.handle(self.request, capability_ref=self.capability)
         return result, http.call_args_list, response.read_limit
 
@@ -1926,6 +2008,10 @@ class ConversationResponseBudgetTest(unittest.TestCase):
 
     def test_transitional_parent_without_projected_identity_uses_signed_binding(self):
         parent = {
+            "tags": {
+                "evexenvironment": "dev:lars",
+                "evexintakelabel": "agent:dev:ready:lars",
+            },
             "execution_status": "running",
             "stats": {"per_turn": "private-statistics" + "x" * 66000},
         }
@@ -1941,10 +2027,14 @@ class ConversationResponseBudgetTest(unittest.TestCase):
         for tags in (
             {"project": "foreign", "evexdeliveryrole": "issue"},
             {"project": "evex-u", "evexdeliveryrole": "spec"},
-            {},
+            {"presentation": "mutable"},
         ):
             with self.subTest(tags=tags):
-                result, calls, _ = self.send(self.parent_bytes(69143, tags=tags))
+                result, calls, _ = self.send(self.parent_bytes(69143, tags={
+                    **tags,
+                    "evexenvironment": "dev:lars",
+                    "evexintakelabel": "agent:dev:ready:lars",
+                }))
                 self.assertEqual(result["result"]["structuredContent"], {
                     "accepted": True, "messageKey": "final-review",
                 })

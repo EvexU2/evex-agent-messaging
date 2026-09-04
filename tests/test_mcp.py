@@ -395,6 +395,8 @@ class DeliveryPrivateHttpTest(unittest.TestCase):
         return {
             "schemaVersion": "evex.agent-delivery/1",
             "target": {
+                "environmentId": "dev:lars",
+                "intakeLabel": "agent:dev:ready:lars",
                 "conversationId": self.conversation_id,
                 "issueRepository": "EvexU2/evex-u-workspace",
                 "issueNumber": 42,
@@ -541,9 +543,14 @@ class ProjectPrivateHttpTest(unittest.TestCase):
         self.assertEqual(self.service.calls, [("provision", request)])
 
     def test_project_private_http_real_service_uses_existing_exact_authenticated_host_paths(self):
-        self.server._service = MessagingService(OpenHandsProvider("http://openhands", "private-service-key"), b"signing-secret")
+        self.server._service = MessagingService(OpenHandsProvider(
+            "http://openhands", "private-service-key", "dev:lars", "agent:dev:ready:lars",
+        ), b"signing-secret")
         request = {"schemaVersion": 1, "conversationId": self.conversation_id}
-        admitted = {"id": self.conversation_id, "evexProjectAdmission": {**request,
+        admitted = {"id": self.conversation_id, "tags": {
+            "evexenvironment": "dev:lars",
+            "evexintakelabel": "agent:dev:ready:lars",
+        }, "evexProjectAdmission": {**request,
             "role": "project", "lifecycle": "eligible", "root": None,
             "project": {"id": "native-project-id", "accountablePmId": "native-user-id",
                         "nominatedChatId": self.conversation_id, "state": "open",
@@ -573,7 +580,9 @@ class ProjectPrivateHttpTest(unittest.TestCase):
         self.assertNotIn(secret["value"], body)
 
     def test_project_private_http_real_service_rejects_extra_schema_before_host(self):
-        self.server._service = MessagingService(OpenHandsProvider("http://openhands", "private-service-key"), b"signing-secret")
+        self.server._service = MessagingService(OpenHandsProvider(
+            "http://openhands", "private-service-key", "dev:lars", "agent:dev:ready:lars",
+        ), b"signing-secret")
         for request in ({"schemaVersion": 1, "conversationId": self.conversation_id, "role": "project"},
                         {"schemaVersion": True, "conversationId": self.conversation_id}, [], {}):
             with patch("urllib.request.urlopen") as host:

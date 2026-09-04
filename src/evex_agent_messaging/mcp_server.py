@@ -65,6 +65,14 @@ TOOLS = [{
                     "put Mission detail in prompt."
                 ),
             },
+            "reasoning": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": (
+                    "Use low only for a fully proven bounded Plan or Plan Review; "
+                    "when omitted, Spec Review uses high and other Specialists use medium."
+                ),
+            },
             "skills": {
                 "type": "array",
                 "maxItems": 32,
@@ -178,6 +186,7 @@ class McpServer:
                     prompt=arguments["prompt"],
                     agent_type=arguments["agentType"],
                     description=arguments["description"],
+                    reasoning=arguments.get("reasoning"),
                     skills=arguments.get("skills", []),
                 )
             else:

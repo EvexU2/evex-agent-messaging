@@ -9,7 +9,7 @@ The MCP exposes exactly:
 
 ```text
 create_spec_chat()
-start_specialist(missionKey, prompt, agentType, description, skills?)
+start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?)
 send_message(targetId, messageKey, message)
 ```
 

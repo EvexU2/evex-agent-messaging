@@ -150,6 +150,41 @@ class MessagingServiceTest(unittest.TestCase):
             )
         self.assertEqual(len(provider.calls), 2)
 
+    def test_low_reasoning_is_bounded_to_plan_roles(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        service.start_specialist(
+            self.main_token(), mission_key="bounded-plan", prompt="Plan.",
+            agent_type="plan", description="Plan", reasoning="low", skills=[],
+        )
+        self.assertEqual(provider.calls[0][1][3]["reasoning"], "low")
+
+        service.start_specialist(
+            self.main_token(), mission_key="default-plan", prompt="Plan.",
+            agent_type="plan", description="Plan", skills=[],
+        )
+        self.assertEqual(provider.calls[1][1][3]["reasoning"], "medium")
+
+        service.start_specialist(
+            self.child_token(role="spec"), mission_key="default-spec-review",
+            prompt="Review.", agent_type="spec-review", description="Review", skills=[],
+        )
+        self.assertEqual(provider.calls[2][1][3]["reasoning"], "high")
+
+        with self.assertRaisesRegex(CapabilityError, "limited to Plan"):
+            service.start_specialist(
+                self.main_token(), mission_key="low-code-review", prompt="Review.",
+                agent_type="code-review", description="Review", reasoning="low", skills=[],
+            )
+
+        with self.assertRaisesRegex(CapabilityError, "Spec Review requires high"):
+            service.start_specialist(
+                self.child_token(role="spec"),
+                mission_key="medium-spec-review", prompt="Review.",
+                agent_type="spec-review", description="Review", reasoning="medium", skills=[],
+            )
+
     def test_specialist_starts_and_messages_one_direct_child_specialist(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)

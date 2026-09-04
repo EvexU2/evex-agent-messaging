@@ -207,6 +207,7 @@ class MessagingService:
         agent_type: str,
         description: str,
         skills: object,
+        reasoning: object = None,
     ) -> dict[str, Any]:
         parent = inspect_capability(token, self._secret)
         role = parent.role
@@ -236,14 +237,21 @@ class MessagingService:
             f"{parent.sender_id}\0{mission_key}".encode()
         ).hexdigest()
         prompt_digest = hashlib.sha256(normalized_prompt.encode()).hexdigest()
-        reasoning = _SPECIALIST_REASONING.get(agent_type, "medium")
+        default_reasoning = _SPECIALIST_REASONING.get(agent_type, "medium")
+        selected_reasoning = default_reasoning if reasoning is None else reasoning
+        if selected_reasoning not in {"low", "medium", "high"}:
+            raise CapabilityError("reasoning is invalid")
+        if selected_reasoning == "low" and agent_type not in {"plan", "plan-review"}:
+            raise CapabilityError("low reasoning is limited to Plan and Plan Review")
+        if agent_type == "spec-review" and selected_reasoning != "high":
+            raise CapabilityError("Spec Review requires high reasoning")
         descriptor_digest = hashlib.sha256(
             json.dumps(
                 {
                     "agentType": agent_type,
                     "description": normalized_description,
                     "prompt": normalized_prompt,
-                    "reasoning": reasoning,
+                    "reasoning": selected_reasoning,
                     "skills": skill_names,
                 },
                 ensure_ascii=False,
@@ -270,7 +278,7 @@ class MessagingService:
                 "agentType": agent_type,
                 "description": normalized_description,
                 "skills": skill_names,
-                "reasoning": reasoning,
+                "reasoning": selected_reasoning,
                 "descriptorDigest": descriptor_digest,
                 "parentRole": role,
             },

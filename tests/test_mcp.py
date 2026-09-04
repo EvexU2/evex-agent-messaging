@@ -95,6 +95,21 @@ class McpServerTest(unittest.TestCase):
         self.assertNotIn(
             "repair", TOOLS[1]["inputSchema"]["properties"]["agentType"]["enum"]
         )
+        self.assertEqual(
+            TOOLS[1]["inputSchema"]["properties"]["reasoning"]["enum"],
+            ["low", "medium", "high"],
+        )
+        self.assertNotIn(
+            "default", TOOLS[1]["inputSchema"]["properties"]["reasoning"]
+        )
+        self.assertIn(
+            "fully proven bounded Plan",
+            TOOLS[1]["inputSchema"]["properties"]["reasoning"]["description"],
+        )
+        self.assertIn(
+            "Spec Review uses high",
+            TOOLS[1]["inputSchema"]["properties"]["reasoning"]["description"],
+        )
         self.assertEqual(TOOLS[2]["inputSchema"]["required"], ["targetId", "messageKey", "message"])
 
         message_schema = TOOLS[2]["inputSchema"]["properties"]["message"]
@@ -135,6 +150,7 @@ class McpServerTest(unittest.TestCase):
                     "prompt": "Draft the bounded plan.",
                     "agentType": "plan",
                     "description": "Draft plan",
+                    "reasoning": "low",
                     "skills": ["evex-delivery-planning"],
                 },
             },
@@ -145,6 +161,7 @@ class McpServerTest(unittest.TestCase):
             "specialist-id",
         )
         self.assertEqual(self.service.calls[0][0], "start-specialist")
+        self.assertEqual(self.service.calls[0][2]["reasoning"], "low")
 
     def test_create_spec_chat_uses_transport_bound_parent_capability(self):
         response = self.server.handle({

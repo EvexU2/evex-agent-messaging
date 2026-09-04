@@ -31,6 +31,8 @@ def delivery_request(
     return MainDeliveryRequest.parse({
         "schemaVersion": "evex.agent-delivery/1",
         "target": {
+            "environmentId": "dev:lars",
+            "intakeLabel": "agent:dev:ready:lars",
             "conversationId": str(CONVERSATION_ID),
             "issueRepository": repository,
             "issueNumber": 297 if subissue else 1067,
@@ -125,6 +127,22 @@ class MainDeliveryProviderTests(unittest.TestCase):
             "reason": "target_missing_not_intake_authorized",
         })
         self.assertEqual(len(transport.calls), 1)
+
+    def test_mismatched_environment_fails_before_provider_transport(self) -> None:
+        value = delivery_request()
+        value = MainDeliveryRequest(
+            target=value.target.__class__(
+                **{**value.target.__dict__, "environment_id": "production", "intake_label": "agent:ready"}
+            ),
+            event=value.event,
+        )
+        provider, transport = self.provider([])
+
+        with self.assertRaises(ProviderError) as caught:
+            provider.deliver_main(value)
+
+        self.assertEqual(caught.exception.reason, "target_identity_mismatch")
+        self.assertEqual(transport.calls, [])
 
     def test_existing_target_is_verified_and_woken_without_bootstrap(self) -> None:
         request = delivery_request()

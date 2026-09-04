@@ -423,6 +423,16 @@ def is_local_or_ambiguous_host(host: str) -> bool:
     return address.is_loopback or address.is_unspecified
 
 
+def is_non_global_literal(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host.encode("idna").decode("ascii").lower().rstrip("."))
+    except (UnicodeError, ValueError):
+        return False
+    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return not address.is_global
+
+
 def validate_openhands_url(value: str, *, public: bool, production: bool) -> None:
     name = "OPENHANDS_PUBLIC_URL" if public else "OPENHANDS_URL"
     try:
@@ -443,7 +453,10 @@ def validate_openhands_url(value: str, *, public: bool, production: bool) -> Non
             and "#" not in value
             and (not production or (
                 not is_local_or_ambiguous_host(parsed.hostname)
-                and (not public or parsed.scheme == "https")
+                and (not public or (
+                    parsed.scheme == "https"
+                    and not is_non_global_literal(parsed.hostname)
+                ))
             ))
         )
     except ValueError:

@@ -222,6 +222,13 @@ class OpenHandsProvider:
     def deliver_main(self, request: MainDeliveryRequest) -> dict[str, Any]:
         """Create or wake one exact Main; OpenHands remains private to this adapter."""
         target = request.target
+        if (
+            target.environment_id != self.environment_id
+            or target.intake_label != self.intake_label
+        ):
+            raise ProviderError(
+                "Delivery environment mismatch", reason="target_identity_mismatch"
+            )
         lock = _DELIVERY_LOCKS[target.conversation_id.int % len(_DELIVERY_LOCKS)]
         if not lock.acquire(timeout=min(self.delivery_budget, 1.0)):
             raise ProviderError(

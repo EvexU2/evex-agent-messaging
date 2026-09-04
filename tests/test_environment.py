@@ -119,6 +119,8 @@ class StandaloneConfigurationTest(unittest.TestCase):
                 ("OPENHANDS_URL", f"http://{host}:8000"),
                 ("OPENHANDS_PUBLIC_URL", f"https://{host}/canvas"),
             ))
+        for host in ("10.0.0.1", "169.254.169.254", "[fc00::1]"):
+            cases.append(("OPENHANDS_PUBLIC_URL", f"https://{host}/canvas"))
         for name, value in cases:
             with self.subTest(name=name, value=value):
                 config = self.config()

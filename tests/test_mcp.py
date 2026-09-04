@@ -395,6 +395,8 @@ class DeliveryPrivateHttpTest(unittest.TestCase):
         return {
             "schemaVersion": "evex.agent-delivery/1",
             "target": {
+                "environmentId": "dev:lars",
+                "intakeLabel": "agent:dev:ready:lars",
                 "conversationId": self.conversation_id,
                 "issueRepository": "EvexU2/evex-u-workspace",
                 "issueNumber": 42,

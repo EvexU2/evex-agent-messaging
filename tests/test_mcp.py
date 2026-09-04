@@ -84,6 +84,14 @@ class McpServerTest(unittest.TestCase):
             TOOLS[1]["inputSchema"]["properties"]["description"]["maxLength"],
             256,
         )
+        self.assertEqual(
+            TOOLS[1]["inputSchema"]["properties"]["prompt"]["maxLength"],
+            131072,
+        )
+        self.assertIn(
+            "forwarded result artifact",
+            TOOLS[1]["inputSchema"]["properties"]["prompt"]["description"],
+        )
         self.assertIn(
             "short chat-title outcome label",
             TOOLS[1]["inputSchema"]["properties"]["description"]["description"],

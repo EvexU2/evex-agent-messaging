@@ -37,6 +37,7 @@ _MAX_EVIDENCE_ITEM_BYTES = 2_000
 _MAX_ARTIFACT_BYTES = 64_000
 _MAX_TERMINAL_MESSAGE_BYTES = 80_000
 SPECIALIST_DESCRIPTION_MAX_LENGTH = 256
+SPECIALIST_PROMPT_MAX_LENGTH = 131_072
 _SPECIALIST_REASONING = {"spec-review": "high"}
 _SPECIALIST_SKILLS = {
     "plan": "evex-delivery-planning",
@@ -215,7 +216,9 @@ class MessagingService:
             raise CapabilityError(f"{role} may not start {agent_type} Specialists")
         if not isinstance(mission_key, str) or TASK_KEY_RE.fullmatch(mission_key) is None:
             raise CapabilityError("missionKey is invalid")
-        normalized_prompt = self._bounded_text(prompt, "prompt", 32_768)
+        normalized_prompt = self._bounded_text(
+            prompt, "prompt", SPECIALIST_PROMPT_MAX_LENGTH,
+        )
         normalized_description = self._bounded_text(
             description,
             "description",

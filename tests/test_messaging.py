@@ -150,6 +150,35 @@ class MessagingServiceTest(unittest.TestCase):
             )
         self.assertEqual(len(provider.calls), 2)
 
+    def test_specialist_prompt_fits_maximum_artifact_and_mission_envelope(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+        prompt = "Mission envelope\n\n" + ("a" * 64_000) + ("\n" + "g" * 64_000)
+
+        service.start_specialist(
+            self.main_token(),
+            mission_key="plan-review-largest-artifact",
+            prompt=prompt,
+            agent_type="plan-review",
+            description="Review complete plan",
+            skills=["evex-delivery-planning"],
+        )
+
+        self.assertEqual(provider.calls[0][1][3]["prompt"], prompt)
+        exact_limit = "x" * 131_072
+        service.start_specialist(
+            self.main_token(), mission_key="plan-review-exact-prompt-limit",
+            prompt=exact_limit, agent_type="plan-review",
+            description="Review exact limit", skills=["evex-delivery-planning"],
+        )
+        with self.assertRaisesRegex(CapabilityError, "prompt exceeds 131072 characters"):
+            service.start_specialist(
+                self.main_token(), mission_key="plan-review-oversized-prompt",
+                prompt=exact_limit + "x", agent_type="plan-review",
+                description="Reject oversized prompt", skills=["evex-delivery-planning"],
+            )
+        self.assertEqual(len(provider.calls), 2)
+
     def test_low_reasoning_is_bounded_to_plan_roles(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)

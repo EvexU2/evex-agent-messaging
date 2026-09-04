@@ -156,9 +156,12 @@ Durable artifacts remain English. Messaging adds no locale authority tag or tran
 Existing Conversations keep their original launch instructions and titles; this change does not
 migrate, retitle, or replace them.
 
-The provider then posts one bounded user event and returns `accepted: true` only after OpenHands accepts
-that request. `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are
-allowed. The receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
+The provider then verifies the target is wakeable immediately before mutation, posts one bounded user
+event, and returns `accepted: true` only after OpenHands accepts that request. A message aimed at an
+active target fails before posting and tells the sender to retry the same `messageKey`; this prevents
+OpenHands from storing a callback behind an already-running turn without scheduling its successor.
+`messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are allowed. The
+receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
 resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state. A coordinator

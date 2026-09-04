@@ -11,7 +11,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .provider import OpenHandsProvider, ProviderError
 from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
 from .delivery import DeliveryContractError, MAX_DELIVERY_BYTES
-from .service import MessagingService, SPECIALIST_DESCRIPTION_MAX_LENGTH
+from .service import (
+    MessagingService,
+    SPECIALIST_DESCRIPTION_MAX_LENGTH,
+    SPECIALIST_PROMPT_MAX_LENGTH,
+)
 
 
 _CAPABILITY_PREFIXES = (REFERENCE_PREFIX, PROJECT_REFERENCE_PREFIX)
@@ -47,7 +51,15 @@ TOOLS = [{
         "required": ["missionKey", "prompt", "agentType", "description"],
         "properties": {
             "missionKey": {"type": "string", "minLength": 1, "maxLength": 128},
-            "prompt": {"type": "string", "minLength": 1, "maxLength": 32768},
+            "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SPECIALIST_PROMPT_MAX_LENGTH,
+                "description": (
+                    f"Complete Mission prompt, including any forwarded result artifact, up to "
+                    f"{SPECIALIST_PROMPT_MAX_LENGTH} characters."
+                ),
+            },
             "agentType": {
                 "type": "string",
                 "enum": [

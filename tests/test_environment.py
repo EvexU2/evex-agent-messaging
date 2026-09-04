@@ -61,6 +61,7 @@ class StandaloneConfigurationTest(unittest.TestCase):
             "EVEX_MESSAGING_SECRET": "secret", "OPENHANDS_URL": "http://openhands:8000",
             "OPENHANDS_API_KEY": "key", "OPENHANDS_PUBLIC_URL": "https://example.test/canvas",
             "EVEX_DELIVERY_ADMISSION_KEY": "a" * 32,
+            "EVEX_GATEWAY_DELIVERY_SECRET": "g" * 32,
         }
 
     def test_invalid_configuration_never_serves_or_exposes_value(self):
@@ -169,10 +170,12 @@ class DiscussionEnvironmentTest(unittest.TestCase):
     def setUp(self):
         self.parent, self.spec, self.child = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
         self.parent_value = discussion(
-            self.parent, "parent-main", evexissue="EvexU2/evex-u-workspace#40",
+            self.parent, "issue", evexissue="EvexU2/evex-u-workspace#40",
             evexsourcerepository="EvexU2/evex-u-workspace", evexsourcebranch="main",
         )
-        self.existing = spec_discussion(self.spec, self.parent, legacy=True)
+        self.existing = spec_discussion(
+            self.spec, self.parent, capability_ref="evx2_capability",
+        )
 
     @staticmethod
     def bad_contexts():
@@ -206,16 +209,19 @@ class DiscussionEnvironmentTest(unittest.TestCase):
     def test_existing_spec_context_rejection_precedes_model_secrets_checkout_and_events(self):
         for context in self.bad_contexts():
             with self.subTest(context=context):
-                transport = FakeTransport([self.parent_value, self.with_context(self.existing, context)])
+                invalid = self.with_context(self.existing, context)
+                transport = FakeTransport([self.parent_value, invalid, invalid])
                 provider = configured_provider("http://openhands", "key", transport=transport, workspace_root="/tmp")
                 with patch.object(provider, "_validated_parent_checkout", return_value=(Path("/tmp/source"), "a" * 40)), patch.object(provider, "_ensure_checkout") as checkout:
                     with self.assertRaises(ProviderError):
                         provider.create_spec_chat(self.parent, self.spec, "evx2_capability")
                     checkout.assert_not_called()
-                self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+                self.assertEqual(
+                    [method for method, _, _ in transport.calls], ["GET", "GET", "GET"]
+                )
 
     def test_existing_spec_checkout_failure_precedes_model_and_secret_mutations(self):
-        transport = FakeTransport([self.parent_value, self.existing])
+        transport = FakeTransport([self.parent_value, self.existing, self.existing])
         provider = configured_provider(
             "http://openhands", "key", transport=transport, workspace_root="/tmp",
             admission_key=b"admission-key" * 4,
@@ -225,20 +231,6 @@ class DiscussionEnvironmentTest(unittest.TestCase):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_capability")
         self.assertTrue(all(method == "GET" for method, _, _ in transport.calls))
 
-    def test_sender_role_and_parent_relationship_are_current_authority(self):
-        for role, actual_role, parent_issue in (
-            ("deputy", "spec", "EvexU2/evex-u-workspace#40"),
-            ("deputy", "child-main", "EvexU2/evex-u-workspace#99"),
-            ("spec", "child-main", "EvexU2/evex-u-workspace#40"),
-            ("spec", "spec", "EvexU2/evex-u-workspace#99"),
-        ):
-            with self.subTest(role=role, actual_role=actual_role, parent_issue=parent_issue):
-                sender = discussion(self.child, actual_role, evexparentissue=parent_issue)
-                transport = FakeTransport([self.parent_value, sender])
-                provider = configured_provider("http://openhands", "key", transport=transport)
-                self.assertFalse(provider.target_allowed(self.child, self.parent, role, self.parent))
-                self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
-
     def test_existing_foreign_spec_after_create_conflict_gets_no_further_mutation(self):
         foreign = self.with_context(self.existing, {
             "evexenvironment": "dev:else", "evexintakelabel": "agent:dev:ready:else",
@@ -247,7 +239,7 @@ class DiscussionEnvironmentTest(unittest.TestCase):
             self.parent_value, ProviderError("missing", status=404),
             {"active_agent_profile_id": "44444444-4444-4444-8444-444444444444", "profiles": [
                 {"id": "44444444-4444-4444-8444-444444444444", "agent_kind": "acp"},
-            ]}, ProviderError("conflict", status=409), foreign,
+            ]}, ProviderError("conflict", status=409), foreign, foreign,
         ])
         provider = configured_provider(
             "http://openhands", "key", transport=transport, workspace_root="/tmp",
@@ -258,24 +250,29 @@ class DiscussionEnvironmentTest(unittest.TestCase):
                 provider.create_spec_chat(self.parent, self.spec, "evx2_capability")
         self.assertEqual([(method, path) for method, path, _ in transport.calls if method != "GET"], [("POST", "/api/conversations")])
 
-    def test_each_message_role_validates_sender_and_target_before_event_post(self):
-        child = discussion(self.child, "child-main", evexparentissue="EvexU2/evex-u-workspace#40")
+    def test_each_message_path_validates_current_environment_before_event_post(self):
+        child = discussion(self.child, "subissue", evexparentissue="EvexU2/evex-u-workspace#40")
         message = {"humanSummary": "Review passed", "aiEvidence": {
             "outcome": "PASS", "evidence": [], "findings": [], "nextBoundary": "review",
         }}
-        for role, sender, target in (
-            ("main", self.parent_value, child),
-            ("deputy", child, self.parent_value),
-            ("spec", self.existing, self.parent_value),
-        ):
-            for bad_side in ("sender", "target"):
+        cases = (
+            ("issue", self.parent_value, child, ("sender", "target")),
+            ("subissue", child, self.parent_value, ("target",)),
+            ("spec", self.existing, self.parent_value, ("target",)),
+        )
+        for role, sender, target, bad_sides in cases:
+            for bad_side in bad_sides:
                 for context in self.bad_contexts():
                     with self.subTest(role=role, bad_side=bad_side, context=context):
                         sender_value = self.with_context(sender, context) if bad_side == "sender" else sender
                         target_value = self.with_context(target, context) if bad_side == "target" else target
-                        transport = FakeTransport([target_value, sender_value])
+                        responses = [target_value, sender_value] if role == "issue" else [target_value]
+                        transport = FakeTransport(responses)
                         provider = configured_provider("http://openhands", "key", transport=transport)
-                        token = capability_token(b"secret", owning_main_id=self.parent, sender_id=uuid.UUID(sender["id"]), task_key="issue-40", role=role)
+                        token = capability_token(
+                            b"secret", owning_issue_id=self.parent,
+                            sender_id=uuid.UUID(sender["id"]), task_key="issue-40", role=role,
+                        )
                         service = MessagingService(provider, b"secret")
                         with self.assertRaises(ProviderError):
                             service.send_message(token, uuid.UUID(target["id"]), "result", message)

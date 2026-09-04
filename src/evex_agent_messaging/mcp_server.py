@@ -1,4 +1,4 @@
-"""Minimal MCP server exposing one authenticated message operation."""
+"""Minimal MCP server exposing direct Conversation creation and messaging."""
 
 from __future__ import annotations
 
@@ -11,9 +11,14 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-from .provider import OpenHandsProvider
-from .capability import PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
-from .service import MessagingService
+from .provider import OpenHandsProvider, ProviderError
+from .capability import CapabilityError, PROJECT_REFERENCE_PREFIX, REFERENCE_PREFIX
+from .delivery import DeliveryContractError, MAX_DELIVERY_BYTES
+from .service import (
+    MessagingService,
+    SPECIALIST_DESCRIPTION_MAX_LENGTH,
+    SPECIALIST_PROMPT_MAX_LENGTH,
+)
 
 
 _CAPABILITY_PREFIXES = (REFERENCE_PREFIX, PROJECT_REFERENCE_PREFIX)
@@ -31,15 +36,69 @@ def _unique_object(pairs):
 
 TOOLS = [{
     "name": "create_spec_chat",
-    "description": "Create or reuse the one interactive Spec Chat owned by this Parent Main.",
+    "description": "Create or reuse the one interactive Spec Chat owned by this Issue Conversation.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
         "properties": {},
     },
 }, {
+    "name": "start_specialist",
+    "description": (
+        "Create or reuse one bounded Specialist Conversation owned by this exact sender. "
+        "After creation, communicate only with send_message."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["missionKey", "prompt", "agentType", "description"],
+        "properties": {
+            "missionKey": {"type": "string", "minLength": 1, "maxLength": 128},
+            "prompt": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SPECIALIST_PROMPT_MAX_LENGTH,
+                "description": (
+                    f"Complete Mission prompt, including any forwarded result artifact, up to "
+                    f"{SPECIALIST_PROMPT_MAX_LENGTH} characters."
+                ),
+            },
+            "agentType": {
+                "type": "string",
+                "enum": [
+                    "plan", "plan-review", "project-review", "qa",
+                    "code-review", "spec-review", "writer",
+                ],
+            },
+            "description": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": SPECIALIST_DESCRIPTION_MAX_LENGTH,
+                "description": (
+                    f"Use a short chat-title outcome label of at most "
+                    f"{SPECIALIST_DESCRIPTION_MAX_LENGTH} characters; "
+                    "put Mission detail in prompt."
+                ),
+            },
+            "reasoning": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+                "description": (
+                    "Use low only for a fully proven bounded Plan or Plan Review; "
+                    "when omitted, Spec Review uses high and other Specialists use medium."
+                ),
+            },
+            "skills": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {"type": "string", "minLength": 1, "maxLength": 64},
+                "default": [],
+            },
+        },
+    },
+}, {
     "name": "send_message",
-    "description": "Send one bounded structured message to one exact known durable Discussion target.",
+    "description": "Send one bounded structured message to one exact known allowed Conversation target.",
     "inputSchema": {
         "type": "object",
         "additionalProperties": False,
@@ -50,7 +109,9 @@ TOOLS = [{
             "message": {
                 "type": "object",
                 "description": (
-                    "Pass the structured message as a JSON object, never a JSON-encoded string."
+                    "Pass the structured message as a JSON object, never a JSON-encoded string. "
+                    "This same operation carries questions, findings, follow-ups, cancellation, "
+                    "and terminal Specialist results."
                 ),
                 "additionalProperties": False,
                 "required": ["humanSummary", "aiEvidence"],
@@ -66,6 +127,11 @@ TOOLS = [{
                             "evidence": {
                                 "type": "array",
                                 "maxItems": 100,
+                                "description": (
+                                    "Use compact stable references and short observations; "
+                                    "do not copy full artifact bodies. Every item must fit "
+                                    "within 2000 UTF-8 bytes."
+                                ),
                                 "items": {"type": "string", "minLength": 1, "maxLength": 2000},
                             },
                             "findings": {
@@ -74,6 +140,15 @@ TOOLS = [{
                                 "items": {"type": "string", "minLength": 1, "maxLength": 2000},
                             },
                             "nextBoundary": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            "artifact": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 64000,
+                                "description": (
+                                    "Optional complete result artifact when the receiver needs exact "
+                                    "content, for example a reviewed Plan."
+                                ),
+                            },
                         },
                     },
                 },
@@ -95,7 +170,7 @@ class McpServer:
             return self._result(request_id, {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "evex-agent-messaging", "version": "0.3.0"},
+                "serverInfo": {"name": "evex-agent-messaging", "version": "0.5.0"},
             })
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
@@ -107,7 +182,7 @@ class McpServer:
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be an object")
             name = params.get("name")
-            if name not in {"create_spec_chat", "send_message"}:
+            if name not in {"create_spec_chat", "start_specialist", "send_message"}:
                 return self._error(request_id, -32602, "unknown messaging tool")
             if not isinstance(capability_ref, str) or not capability_ref.startswith(_CAPABILITY_PREFIXES):
                 raise ValueError("transport capability is required")
@@ -119,6 +194,16 @@ class McpServer:
                         "create_spec_chat accepts no arguments",
                     )
                 value = self._service.create_spec_chat(capability_ref)
+            elif name == "start_specialist":
+                value = self._service.start_specialist(
+                    capability_ref,
+                    mission_key=arguments["missionKey"],
+                    prompt=arguments["prompt"],
+                    agent_type=arguments["agentType"],
+                    description=arguments["description"],
+                    reasoning=arguments.get("reasoning"),
+                    skills=arguments.get("skills", []),
+                )
             else:
                 if "message" not in arguments and "text" in arguments:
                     return self._error(
@@ -138,9 +223,16 @@ class McpServer:
                     arguments["messageKey"],
                     arguments["message"],
                 )
+        except CapabilityError as exc:
+            return self._error(request_id, -32602, str(exc))
         except (KeyError, TypeError, ValueError) as exc:
             return self._error(request_id, -32602, "invalid messaging request")
-        except Exception as exc:
+        except ProviderError as exc:
+            message = str(exc)
+            if exc.status is not None:
+                message = f"{message} (HTTP {exc.status})"
+            return self._error(request_id, -32000, message)
+        except Exception:
             return self._error(request_id, -32000, "messaging operation failed")
         return self._result(request_id, {
             "content": [{"type": "text", "text": json.dumps(value, sort_keys=True, separators=(",", ":"))}],
@@ -195,6 +287,9 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
             self.wfile.write(body)
 
         def do_POST(self):  # noqa: N802
+            if self.path == "/internal/agent-deliveries":
+                self._deliver_main()
+                return
             if self.path == "/internal/project-capability":
                 self._provision_project_capability()
                 return
@@ -240,6 +335,49 @@ def make_http_server(server: McpServer, host: str = "0.0.0.0", port: int = 3101)
                 status, result = 400, {"error": "invalid Project capability request"}
             except Exception:
                 status, result = 503, {"error": "Project capability operation failed"}
+            body = json.dumps(result, separators=(",", ":")).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def _deliver_main(self):
+            self.close_connection = True
+            credential = _bearer_credential(self.headers.get("Authorization"))
+            if not server._service.delivery_allowed(credential):
+                self._write_delivery_response(403, {"reason": "delivery_forbidden"})
+                return
+            try:
+                lengths = self.headers.get_all("Content-Length", [])
+                if (
+                    len(lengths) != 1
+                    or not lengths[0].isascii()
+                    or not lengths[0].isdigit()
+                    or not 0 < int(lengths[0]) <= MAX_DELIVERY_BYTES
+                    or self.headers.get("Transfer-Encoding") is not None
+                    or self.headers.get("Content-Type") != "application/json"
+                ):
+                    raise DeliveryContractError("invalid delivery request")
+                raw = self.rfile.read(int(lengths[0]))
+                if len(raw) != int(lengths[0]):
+                    raise DeliveryContractError("invalid delivery request")
+                request = json.loads(raw, object_pairs_hook=_unique_object)
+                result = server._service.deliver_main(credential, request)
+                status = 200
+            except (DeliveryContractError, json.JSONDecodeError, TypeError, ValueError):
+                status, result = 400, {"reason": "invalid_delivery_request"}
+            except PermissionError:
+                status, result = 403, {"reason": "delivery_forbidden"}
+            except ProviderError as exc:
+                reason = exc.reason or "runtime_unavailable"
+                status = 503 if reason == "runtime_unavailable" else 409
+                result = {"reason": reason}
+            except Exception:
+                status, result = 503, {"reason": "runtime_unavailable"}
+            self._write_delivery_response(status, result)
+
+        def _write_delivery_response(self, status: int, result: dict):
             body = json.dumps(result, separators=(",", ":")).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -319,13 +457,18 @@ def main() -> int:
     base_url = os.environ.get("OPENHANDS_URL", "")
     api_key = os.environ.get("OPENHANDS_API_KEY", "")
     admission_key = os.environ.get("EVEX_DELIVERY_ADMISSION_KEY", "").strip()
-    if not all(value.strip() for value in (secret, base_url, api_key, admission_key)):
+    delivery_secret = os.environ.get("EVEX_GATEWAY_DELIVERY_SECRET", "").strip()
+    if not all(value.strip() for value in (
+        secret, base_url, api_key, admission_key, delivery_secret,
+    )):
         raise SystemExit(
-            "EVEX_MESSAGING_SECRET, EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, "
-            "and OPENHANDS_API_KEY are required"
+            "EVEX_MESSAGING_SECRET, EVEX_GATEWAY_DELIVERY_SECRET, "
+            "EVEX_DELIVERY_ADMISSION_KEY, OPENHANDS_URL, and OPENHANDS_API_KEY are required"
         )
     if len(admission_key) < 32:
         raise SystemExit("EVEX_DELIVERY_ADMISSION_KEY must be at least 32 characters")
+    if len(delivery_secret) < 32:
+        raise SystemExit("EVEX_GATEWAY_DELIVERY_SECRET must be at least 32 characters")
     public_url = os.environ.get("OPENHANDS_PUBLIC_URL", "")
     if not public_url.strip():
         raise SystemExit("OPENHANDS_PUBLIC_URL is required")
@@ -349,12 +492,14 @@ def main() -> int:
             intake_label=os.environ.get("EVEX_INTAKE_LABEL", ""),
             public_url=public_url,
             admission_key=admission_key.encode(),
+            messaging_secret=secret.encode(),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
     server = McpServer(MessagingService(
         provider,
         secret.encode(),
+        delivery_secret=delivery_secret.encode(),
     ))
     if transport == "http":
         serve_http(server, host, int(port))

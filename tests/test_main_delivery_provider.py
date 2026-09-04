@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 import uuid
 
@@ -79,6 +80,10 @@ class FakeTransport:
 
 
 class MainDeliveryProviderTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.workspace = tempfile.TemporaryDirectory()
+        self.addCleanup(self.workspace.cleanup)
+
     def provider(self, responses: list[dict | Exception]) -> tuple[OpenHandsProvider, FakeTransport]:
         transport = FakeTransport(responses)
         provider = OpenHandsProvider(
@@ -88,12 +93,32 @@ class MainDeliveryProviderTests(unittest.TestCase):
             intake_label="agent:dev:ready:lars",
             transport=transport,
             public_url="http://openhands.local/canvas",
+            workspace_root=self.workspace.name,
             admission_key=b"a" * 32,
             messaging_secret=b"m" * 32,
             clock=lambda: 100.0,
             sleeper=lambda _delay: None,
         )
         return provider, transport
+
+    def test_new_main_prepares_shared_workspace_before_create(self) -> None:
+        request = delivery_request()
+        provider, transport = self.provider([])
+        created = self.identity(provider, request)
+        transport.responses = [
+            ProviderError("missing", status=404),
+            {"active_agent_profile_id": PROFILE_ID, "profiles": [
+                {"id": PROFILE_ID, "agent_kind": "acp"},
+            ]},
+            {},
+            {},
+            created,
+            {},
+        ]
+
+        provider.deliver_main(request)
+
+        self.assertTrue(Path(provider._main_workspace(request)["working_dir"]).is_dir())
 
     @staticmethod
     def identity(provider: OpenHandsProvider, request: MainDeliveryRequest) -> dict:

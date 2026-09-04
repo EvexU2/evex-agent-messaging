@@ -134,6 +134,8 @@ class MainDeliveryProviderTests(unittest.TestCase):
         self.assertEqual(result["outcome"], "woken")
         event = transport.calls[-1][2]["content"][0]["text"]
         self.assertIn("EVEX_GITHUB_EVENT", event)
+        self.assertIn("possibly invalidated fields", event)
+        self.assertIn("not already bound by a complete owner, mutation, or prior read", event)
         self.assertNotIn("Immediate task", event)
 
     def test_new_subissue_receives_profile_capability_title_and_bootstrap(self) -> None:
@@ -163,6 +165,9 @@ class MainDeliveryProviderTests(unittest.TestCase):
         self.assertEqual(patch["title"], "#1067 / #297 · skills · Subissue · Duration fix")
         event = transport.calls[-1][2]["content"][0]["text"]
         self.assertIn("Subissue Main", event)
+        self.assertIn("read the current Issue once", event)
+        self.assertIn("only for a named missing or invalidated fact", event)
+        self.assertNotIn("Issue and linked resources", event)
         self.assertNotIn("RECOVERY MODE", event)
 
     def test_issue_title_uses_canonical_root_grammar(self) -> None:

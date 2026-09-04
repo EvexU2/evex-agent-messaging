@@ -305,6 +305,7 @@ class OpenHandsProvider:
         if not capability_ref:
             raise ProviderError("Messaging capability is unavailable", reason="runtime_unavailable")
         workspace = self._main_workspace(request)
+        self._prepare_main_workspace(workspace["working_dir"])
         tags = {**self._main_tags(request), "evexagentprofile": profile_id}
         descriptor = self._admission_descriptor(
             target.conversation_id,
@@ -373,6 +374,24 @@ class OpenHandsProvider:
         verified = self._delivery_request("GET", path, None, deadline)
         self._verify_main_identity(request, verified, expected_profile_id=profile_id)
         return True, None
+
+    def _prepare_main_workspace(self, working_dir: str) -> None:
+        root = Path(self.workspace_root)
+        target = Path(working_dir)
+        if target.parent.parent != root or target.is_symlink():
+            raise ProviderError(
+                "Main workspace identity is invalid", reason="target_identity_mismatch"
+            )
+        try:
+            target.mkdir(mode=0o755, parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ProviderError(
+                "Main workspace preparation failed", reason="runtime_unavailable"
+            ) from exc
+        if target.is_symlink() or not target.is_dir():
+            raise ProviderError(
+                "Main workspace identity is invalid", reason="target_identity_mismatch"
+            )
 
     def _reconcile_missing_main_admission(
         self,

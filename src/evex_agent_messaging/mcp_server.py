@@ -59,6 +59,11 @@ TOOLS = [{
                 "type": "string",
                 "minLength": 1,
                 "maxLength": SPECIALIST_DESCRIPTION_MAX_LENGTH,
+                "description": (
+                    f"Use a short chat-title outcome label of at most "
+                    f"{SPECIALIST_DESCRIPTION_MAX_LENGTH} characters; "
+                    "put Mission detail in prompt."
+                ),
             },
             "skills": {
                 "type": "array",

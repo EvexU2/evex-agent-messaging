@@ -84,6 +84,14 @@ class McpServerTest(unittest.TestCase):
             TOOLS[1]["inputSchema"]["properties"]["description"]["maxLength"],
             256,
         )
+        self.assertIn(
+            "short chat-title outcome label",
+            TOOLS[1]["inputSchema"]["properties"]["description"]["description"],
+        )
+        self.assertIn(
+            "256 characters",
+            TOOLS[1]["inputSchema"]["properties"]["description"]["description"],
+        )
         self.assertNotIn(
             "repair", TOOLS[1]["inputSchema"]["properties"]["agentType"]["enum"]
         )

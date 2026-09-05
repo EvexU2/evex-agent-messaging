@@ -164,6 +164,8 @@ class OpenHandsProviderTest(unittest.TestCase):
 
     def test_usage_reports_current_native_tokens_and_standard_estimate(self):
         conversation = discussion(self.child, "specialist")
+        conversation["created_at"] = "2026-09-05T09:10:00Z"
+        conversation["updated_at"] = "2026-09-05T09:11:30Z"
         conversation["current_model_id"] = None
         conversation["agent"] = {"llm": {
             "model": "openai/gpt-5.6-sol",
@@ -205,6 +207,56 @@ class OpenHandsProviderTest(unittest.TestCase):
         self.assertEqual(result["cacheHitRate"], 0.9)
         self.assertAlmostEqual(result["officialApiEquivalentUsd"], 0.0301)
         self.assertTrue(result["final"])
+        self.assertEqual(result["startedAt"], "2026-09-05T09:10:00Z")
+        self.assertEqual(result["finishedAt"], "2026-09-05T09:11:30Z")
+        self.assertEqual(result["elapsedSeconds"], 90.0)
+
+    def test_usage_rejects_invalid_terminal_lifecycle_timing(self):
+        conversation = discussion(self.child, "specialist")
+        conversation["created_at"] = "2026-09-05T09:11:30Z"
+        conversation["updated_at"] = "2026-09-05T09:10:00Z"
+        conversation["agent"] = {"llm": {
+            "model": "openai/gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        }}
+        conversation["stats"] = {
+            "usage_to_metrics": {
+                "default": {
+                    "accumulated_token_usage": {},
+                    "token_usages": [],
+                }
+            }
+        }
+        provider, _ = self.provider([conversation])
+
+        with self.assertRaisesRegex(ProviderError, "lifecycle timing is invalid"):
+            provider.usage(self.child)
+
+    def test_usage_keeps_active_lifecycle_timing_non_final(self):
+        conversation = discussion(self.child, "specialist")
+        conversation["execution_status"] = "running"
+        conversation["created_at"] = "2026-09-05T09:10:00Z"
+        conversation["updated_at"] = "2026-09-05T09:11:30Z"
+        conversation["agent"] = {"llm": {
+            "model": "openai/gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        }}
+        conversation["stats"] = {
+            "usage_to_metrics": {
+                "default": {
+                    "accumulated_token_usage": {},
+                    "token_usages": [],
+                }
+            }
+        }
+        provider, _ = self.provider([conversation])
+
+        result = provider.usage(self.child)
+
+        self.assertFalse(result["final"])
+        self.assertEqual(result["startedAt"], "2026-09-05T09:10:00Z")
+        self.assertIsNone(result["finishedAt"])
+        self.assertIsNone(result["elapsedSeconds"])
 
     def test_usage_relationship_is_downward_only(self):
         specialist = discussion(

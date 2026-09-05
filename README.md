@@ -167,7 +167,7 @@ receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
 resume, cancel, replacement, GitHub fallback, queue, poller, or persistent state. `get_usage` reads one
-cumulative stateless provider snapshot for the caller or one verified direct child; it creates no wake
+cumulative stateless provider usage, cost, and lifecycle-time snapshot for the caller or one verified direct child; it creates no wake
 and never changes Delivery authority. A coordinator
 or Mission-authorized Specialist creates a bounded direct Specialist with `start_specialist`. Creator
 and direct child then communicate bidirectionally with `send_message`; questions, findings,

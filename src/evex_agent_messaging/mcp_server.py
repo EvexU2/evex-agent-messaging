@@ -158,8 +158,8 @@ TOOLS = [{
 }, {
     "name": "get_usage",
     "description": (
-        "Read one cumulative provider usage and official Standard API-equivalent "
-        "cost snapshot for this Conversation or one verified direct child."
+        "Read one cumulative provider usage, cost, and lifecycle-time snapshot "
+        "for this Conversation or one verified direct child."
     ),
     "inputSchema": {
         "type": "object",

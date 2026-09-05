@@ -38,7 +38,7 @@ verifies the relationship and operator-matching environment context. It never se
 Conversations.
 
 Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
-usage statistics. This transport bound does not increase the 20,000-byte outgoing message budget;
+usage statistics. This transport bound does not increase the 12,000-byte outgoing message budget;
 over-limit responses still fail before parsing or dependent event delivery.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
 refresh lifecycle. Ordinary messages therefore post only the target event and never rewrite target
@@ -144,8 +144,11 @@ messages wake only a bounded processing turn. Closed Projects and terminal Deliv
 ineligible. The private provisioning request is internal wiring in the existing process.
 
 The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
-most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.
-The canonical compact JSON is at most 20,000 UTF-8 bytes. The provider visibly projects only the
+most 1,000 UTF-8 bytes and `aiEvidence` of
+`{outcome, revision?, evidence, findings, nextBoundary, artifact?, artifactDigest?}`.
+The canonical compact JSON is at most 12,000 UTF-8 bytes, or 40,000 only when carrying one bounded
+32,768-byte exact artifact with its matching SHA-256 digest. Send that exact artifact once; later
+messages carry its digest plus changed fields only. The provider visibly projects only the
 summary and places the canonical envelope in a versioned renderer-hidden machine block, preserving
 the exact evidence for the receiver without a legacy raw-text path. Malformed, oversized,
 credential-bearing, or unrenderable input fails before any provider mutation with a bounded

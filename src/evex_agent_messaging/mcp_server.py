@@ -124,37 +124,46 @@ TOOLS = [{
                 "additionalProperties": False,
                 "required": ["humanSummary", "aiEvidence"],
                 "properties": {
-                    "humanSummary": {"type": "string", "minLength": 1, "maxLength": 2000},
+                    "humanSummary": {"type": "string", "minLength": 1, "maxLength": 1000},
                     "aiEvidence": {
                         "type": "object",
                         "additionalProperties": False,
                         "required": ["outcome", "evidence", "findings", "nextBoundary"],
                         "properties": {
-                            "outcome": {"type": "string", "minLength": 1, "maxLength": 2000},
-                            "revision": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            "outcome": {"type": "string", "minLength": 1, "maxLength": 1000},
+                            "revision": {"type": "string", "minLength": 1, "maxLength": 1000},
                             "evidence": {
                                 "type": "array",
-                                "maxItems": 100,
+                                "maxItems": 20,
                                 "description": (
-                                    "Use compact stable references and short observations; "
+                                    "Use at most 20 compact stable references or short observations; "
                                     "do not copy full artifact bodies. Every item must fit "
-                                    "within 2000 UTF-8 bytes."
+                                    "within 1000 UTF-8 bytes."
                                 ),
-                                "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
                             },
                             "findings": {
                                 "type": "array",
-                                "maxItems": 100,
-                                "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+                                "maxItems": 20,
+                                "items": {"type": "string", "minLength": 1, "maxLength": 1000},
                             },
-                            "nextBoundary": {"type": "string", "minLength": 1, "maxLength": 2000},
+                            "nextBoundary": {"type": "string", "minLength": 1, "maxLength": 1000},
                             "artifact": {
                                 "type": "string",
                                 "minLength": 1,
-                                "maxLength": 64000,
+                                "maxLength": 32768,
                                 "description": (
-                                    "Optional complete result artifact when the receiver needs exact "
-                                    "content, for example a reviewed Plan."
+                                    "Optional complete result artifact, sent once when the receiver "
+                                    "needs exact content. Requires the matching artifactDigest."
+                                ),
+                            },
+                            "artifactDigest": {
+                                "type": "string",
+                                "pattern": "^[0-9a-f]{64}$",
+                                "maxLength": 64,
+                                "description": (
+                                    "SHA-256 of artifact bytes. After the first complete artifact, "
+                                    "send only this digest plus changed fields."
                                 ),
                             },
                         },

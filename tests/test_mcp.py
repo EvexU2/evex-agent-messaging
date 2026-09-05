@@ -93,7 +93,7 @@ class McpServerTest(unittest.TestCase):
         )
         self.assertEqual(
             TOOLS[1]["inputSchema"]["properties"]["prompt"]["maxLength"],
-            131072,
+            32768,
         )
         self.assertIn(
             "forwarded result artifact",
@@ -150,7 +150,10 @@ class McpServerTest(unittest.TestCase):
         self.assertFalse(evidence_schema["additionalProperties"])
         self.assertEqual(
             set(evidence_schema["properties"]),
-            {"outcome", "revision", "evidence", "findings", "nextBoundary", "artifact"},
+            {
+                "outcome", "revision", "evidence", "findings", "nextBoundary",
+                "artifact", "artifactDigest",
+            },
         )
         self.assertEqual(evidence_schema["properties"]["evidence"]["items"]["type"], "string")
         self.assertIn(
@@ -161,8 +164,13 @@ class McpServerTest(unittest.TestCase):
             "do not copy full artifact bodies",
             evidence_schema["properties"]["evidence"]["description"],
         )
-        self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
-        self.assertEqual(evidence_schema["properties"]["artifact"]["maxLength"], 64000)
+        self.assertEqual(evidence_schema["properties"]["evidence"]["maxItems"], 20)
+        self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 20)
+        self.assertEqual(evidence_schema["properties"]["artifact"]["maxLength"], 32768)
+        self.assertEqual(
+            evidence_schema["properties"]["artifactDigest"]["pattern"],
+            "^[0-9a-f]{64}$",
+        )
         self.assertEqual(
             TOOLS[3]["inputSchema"]["required"], ["targetId"]
         )

@@ -411,6 +411,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "description": "Draft plan",
             "skills": ["evex-delivery-planning"],
             "reasoning": "medium",
+            "runtime": False,
             "descriptorDigest": "c" * 64,
             "parentRole": "issue",
         }
@@ -431,6 +432,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             "evexdescription": "Draft plan",
             "evexagentprofile": ACP_PROFILE_ID,
             "evexreasoning": "medium",
+            "evexruntime": "false",
             "evexmission": "a" * 64,
             "evexprompt": "b" * 64,
             "evexmissionconfig": "c" * 64,
@@ -491,6 +493,7 @@ class OpenHandsProviderTest(unittest.TestCase):
             create[2]["secrets"]["EVEX_AGENT_MESSAGING_CAPABILITY"]["value"],
             capability,
         )
+        self.assertEqual(create[2]["tags"]["evexruntime"], "false")
         self.assertNotIn("title", create[2])
         self.assertEqual(
             next(call for call in transport.calls if call[0] == "PATCH"),

@@ -828,7 +828,7 @@ class OpenHandsProvider:
     ) -> dict[str, Any]:
         required = {
             "missionKey", "missionId", "prompt", "promptDigest", "agentType",
-            "description", "skills", "reasoning", "descriptorDigest", "parentRole",
+            "description", "skills", "reasoning", "runtime", "descriptorDigest", "parentRole",
         }
         if set(mission) != required:
             raise ProviderError("Specialist Mission is invalid")
@@ -874,6 +874,7 @@ class OpenHandsProvider:
             "evexdescription": str(mission["description"]),
             "evexagentprofile": profile_id,
             "evexreasoning": str(mission["reasoning"]),
+            "evexruntime": "true" if mission["runtime"] else "false",
             "evexmission": str(mission["missionId"]),
             "evexprompt": str(mission["promptDigest"]),
             "evexmissionconfig": str(mission["descriptorDigest"]),

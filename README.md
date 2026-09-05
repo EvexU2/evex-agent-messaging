@@ -9,7 +9,7 @@ The MCP exposes exactly:
 
 ```text
 create_spec_chat()
-start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?)
+start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?, runtime?)
 send_message(targetId, messageKey, message)
 get_usage(targetId)
 ```
@@ -173,6 +173,10 @@ or Mission-authorized Specialist creates a bounded direct Specialist with `start
 and direct child then communicate bidirectionally with `send_message`; questions, findings,
 follow-ups, releases, cancellation, and the child's terminal return all use that same operation.
 Siblings, unrelated peers, and transitive routes remain forbidden.
+
+`runtime` defaults to `false` and may be `true` only for Writer or QA Missions that explicitly require
+Environment or Browser evidence. Source-only work omits it, so unrelated roles never receive the large
+Runtime MCP schemas.
 
 Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
 observations never become caller authority or replay input; an existing deterministic Spec Chat and

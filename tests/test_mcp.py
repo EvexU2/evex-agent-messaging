@@ -114,6 +114,17 @@ class McpServerTest(unittest.TestCase):
             TOOLS[1]["inputSchema"]["properties"]["reasoning"]["enum"],
             ["low", "medium", "high"],
         )
+        self.assertEqual(
+            TOOLS[1]["inputSchema"]["properties"]["runtime"],
+            {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Expose Environment and Browser tools only when this Writer or QA Mission "
+                    "requires runtime evidence. Omit or use false for source-only work."
+                ),
+            },
+        )
         self.assertNotIn(
             "default", TOOLS[1]["inputSchema"]["properties"]["reasoning"]
         )

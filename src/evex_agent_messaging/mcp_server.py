@@ -88,6 +88,14 @@ TOOLS = [{
                     "when omitted, Spec Review uses high and other Specialists use medium."
                 ),
             },
+            "runtime": {
+                "type": "boolean",
+                "default": False,
+                "description": (
+                    "Expose Environment and Browser tools only when this Writer or QA Mission "
+                    "requires runtime evidence. Omit or use false for source-only work."
+                ),
+            },
             "skills": {
                 "type": "array",
                 "maxItems": 32,
@@ -218,6 +226,7 @@ class McpServer:
                     agent_type=arguments["agentType"],
                     description=arguments["description"],
                     reasoning=arguments.get("reasoning"),
+                    runtime=arguments.get("runtime", False),
                     skills=arguments.get("skills", []),
                 )
             elif name == "send_message":

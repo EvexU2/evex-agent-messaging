@@ -117,6 +117,28 @@ class MessagingServiceTest(unittest.TestCase):
         delegated = inspect_capability(call[1][2], self.secret)
         self.assertEqual(delegated.role, "specialist")
         self.assertEqual(delegated.owning_issue_id, self.parent)
+        self.assertFalse(call[1][3]["runtime"])
+
+    def test_runtime_tools_require_an_explicit_writer_or_qa_mission(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        service.start_specialist(
+            self.child_token(), mission_key="runtime-qa", prompt="Validate runtime.",
+            agent_type="qa", description="Validate runtime", skills=[], runtime=True,
+        )
+        self.assertTrue(provider.calls[0][1][3]["runtime"])
+
+        with self.assertRaisesRegex(CapabilityError, "limited to Writer and QA"):
+            service.start_specialist(
+                self.main_token(), mission_key="runtime-plan", prompt="Plan.",
+                agent_type="plan", description="Plan", skills=[], runtime=True,
+            )
+        with self.assertRaisesRegex(CapabilityError, "runtime is invalid"):
+            service.start_specialist(
+                self.child_token(), mission_key="invalid-runtime", prompt="Write.",
+                agent_type="writer", description="Write", skills=[], runtime="yes",
+            )
 
     def test_specialist_description_uses_the_published_256_character_limit(self):
         provider = FakeProvider()

@@ -220,6 +220,7 @@ class MessagingService:
         description: str,
         skills: object,
         reasoning: object = None,
+        runtime: object = False,
     ) -> dict[str, Any]:
         parent = inspect_capability(token, self._secret)
         role = parent.role
@@ -259,6 +260,10 @@ class MessagingService:
             raise CapabilityError("low reasoning is limited to Plan and Plan Review")
         if agent_type == "spec-review" and selected_reasoning != "high":
             raise CapabilityError("Spec Review requires high reasoning")
+        if not isinstance(runtime, bool):
+            raise CapabilityError("runtime is invalid")
+        if runtime and agent_type not in {"writer", "qa"}:
+            raise CapabilityError("runtime is limited to Writer and QA")
         descriptor_digest = hashlib.sha256(
             json.dumps(
                 {
@@ -266,6 +271,7 @@ class MessagingService:
                     "description": normalized_description,
                     "prompt": normalized_prompt,
                     "reasoning": selected_reasoning,
+                    "runtime": runtime,
                     "skills": skill_names,
                 },
                 ensure_ascii=False,
@@ -293,6 +299,7 @@ class MessagingService:
                 "description": normalized_description,
                 "skills": skill_names,
                 "reasoning": selected_reasoning,
+                "runtime": runtime,
                 "descriptorDigest": descriptor_digest,
                 "parentRole": role,
             },

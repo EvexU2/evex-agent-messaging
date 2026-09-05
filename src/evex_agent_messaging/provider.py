@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 import hashlib
 import http.client
 import hmac
@@ -1778,6 +1779,34 @@ class OpenHandsProvider:
             raise ProviderError(
                 "OpenHands usage reasoning tokens exceed output tokens"
             )
+        final = conversation.get("execution_status") in {"finished", "error", "stuck"}
+        started_at = conversation.get("created_at")
+        finished_at = conversation.get("updated_at") if final else None
+        elapsed_seconds: float | None = None
+        try:
+            started_value = (
+                started_at[:-1] + "+00:00"
+                if isinstance(started_at, str) and started_at.endswith("Z")
+                else started_at
+            )
+            started = datetime.fromisoformat(started_value)
+        except (TypeError, ValueError):
+            raise ProviderError("OpenHands lifecycle timing is invalid") from None
+        if started.tzinfo is None:
+            raise ProviderError("OpenHands lifecycle timing is invalid")
+        if final:
+            try:
+                finished_value = (
+                    finished_at[:-1] + "+00:00"
+                    if isinstance(finished_at, str) and finished_at.endswith("Z")
+                    else finished_at
+                )
+                finished = datetime.fromisoformat(finished_value)
+            except (TypeError, ValueError):
+                raise ProviderError("OpenHands lifecycle timing is invalid") from None
+            if finished.tzinfo is None or finished < started:
+                raise ProviderError("OpenHands lifecycle timing is invalid")
+            elapsed_seconds = round((finished - started).total_seconds(), 6)
         return {
             "conversationId": str(target_id),
             "model": model,
@@ -1789,8 +1818,10 @@ class OpenHandsProvider:
             ),
             "officialApiEquivalentUsd": round(estimate, 8),
             "longContextTurns": long_context_turns,
-            "final": conversation.get("execution_status")
-            in {"finished", "error", "stuck"},
+            "final": final,
+            "startedAt": started_at,
+            "finishedAt": finished_at,
+            "elapsedSeconds": elapsed_seconds,
             "pricing": {
                 "serviceTier": "standard",
                 "asOf": _PRICING_AS_OF,

@@ -24,16 +24,28 @@ from evex_agent_messaging import capability as capabilities  # noqa: E402
 
 
 class FakeProvider:
-    def __init__(self, allowed=True, ready=True):
+    def __init__(self, allowed=True, ready=True, usage_allowed=None):
         self.allowed, self.ready, self.calls = allowed, ready, []
+        self.usage_allowed = allowed if usage_allowed is None else usage_allowed
 
     def target_allowed(self, *args):
         self.calls.append(("allowed", args))
         return self.allowed
 
+    def usage_target_allowed(self, *args):
+        self.calls.append(("usage-allowed", args))
+        return self.usage_allowed
+
     def send_message(self, *args):
         self.calls.append(("send", args))
         return {"accepted": True, "messageKey": args[2]}
+
+    def usage(self, target_id):
+        self.calls.append(("usage", target_id))
+        return {
+            "conversationId": str(target_id),
+            "officialApiEquivalentUsd": 1.25,
+        }
 
     def create_spec_chat(self, *args):
         self.calls.append(("create-spec", args))
@@ -355,6 +367,33 @@ class MessagingServiceTest(unittest.TestCase):
         result = service.send_message(self.child_token(), self.parent, "result-1", self.message())
         self.assertEqual(result, {"accepted": True, "messageKey": "result-1"})
         self.assertEqual([call[0] for call in provider.calls], ["allowed", "send"])
+
+    def test_usage_allows_self_without_relationship_read(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        result = service.get_usage(self.child_token(), self.child)
+
+        self.assertEqual(result["officialApiEquivalentUsd"], 1.25)
+        self.assertEqual(provider.calls, [("usage", self.child)])
+
+    def test_usage_allows_only_a_verified_direct_relationship(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        result = service.get_usage(self.main_token(), self.child)
+
+        self.assertEqual(result["conversationId"], str(self.child))
+        self.assertEqual(
+            [call[0] for call in provider.calls], ["usage-allowed", "usage"]
+        )
+
+        denied = FakeProvider(allowed=True, usage_allowed=False)
+        with self.assertRaisesRegex(CapabilityError, "usage target is not allowed"):
+            MessagingService(denied, self.secret).get_usage(
+                self.main_token(), self.child
+            )
+        self.assertFalse(any(call[0] == "usage" for call in denied.calls))
 
     def test_parent_wake_uses_the_existing_spec_capability(self):
         provider = FakeProvider()

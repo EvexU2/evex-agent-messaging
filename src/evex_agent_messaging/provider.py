@@ -39,6 +39,29 @@ _CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v3"
 _MAIN_MAX_ITERATIONS = 500
 _WAKEABLE_EXECUTION_STATUSES = {"idle", "paused", "finished", "error", "stuck"}
 _DELIVERY_LOCKS = tuple(threading.Lock() for _ in range(64))
+_STANDARD_PRICES_PER_MILLION = {
+    "gpt-5.6-sol": {
+        "uncached_input": 4.0,
+        "cached_input": 0.4,
+        "cache_write": 5.0,
+        "output": 20.0,
+    },
+    "gpt-5.6-terra": {
+        "uncached_input": 2.0,
+        "cached_input": 0.2,
+        "cache_write": 2.5,
+        "output": 12.0,
+    },
+    "gpt-5.6-luna": {
+        "uncached_input": 0.2,
+        "cached_input": 0.02,
+        "cache_write": 0.25,
+        "output": 1.2,
+    },
+}
+_LONG_CONTEXT_INPUT_THRESHOLD = 272_000
+_PRICING_SOURCE = "https://developers.openai.com/api/docs/pricing"
+_PRICING_AS_OF = "2026-08-23"
 _AUTOMATION_NAMESPACE = uuid.UUID("d6179e10-dc5d-4168-a6f8-cd398d55d9e8")
 _SPECIALIST_TITLE_TYPES = {
     "plan": "Plan",
@@ -1656,6 +1679,184 @@ class OpenHandsProvider:
         if sender_identity != sender_id or sender_role != "issue":
             return False
         same_parent_issue = target_tags.get("evexparentissue") == sender_tags.get("evexissue")
+        explicit_parent = target_tags.get("evexparent") == str(sender_id)
+        return (target_role == "subissue" and same_parent_issue) or (
+            target_role == "spec" and (same_parent_issue or explicit_parent)
+        )
+
+    def usage(self, target_id: uuid.UUID) -> dict[str, Any]:
+        """Return one cumulative, stateless provider usage snapshot."""
+
+        conversation = self._request("GET", f"/api/conversations/{target_id}")
+        identities = [
+            conversation[key]
+            for key in ("id", "conversation_id")
+            if key in conversation
+        ]
+        if not identities or any(value != str(target_id) for value in identities):
+            raise ProviderError("OpenHands usage identity is invalid")
+        tags = conversation.get("tags")
+        model = tags.get("evexmodel") if isinstance(tags, dict) else None
+        model = model or conversation.get("current_model_id")
+        agent = conversation.get("agent")
+        llm = agent.get("llm") if isinstance(agent, dict) else None
+        if not model and isinstance(llm, dict):
+            model = llm.get("model_canonical_name") or llm.get("model")
+        if isinstance(model, str):
+            model = model.removeprefix("openai/")
+        reasoning_effort = (
+            tags.get("evexreasoning") if isinstance(tags, dict) else None
+        )
+        if model not in _STANDARD_PRICES_PER_MILLION:
+            raise ProviderError("OpenHands usage model is unsupported")
+        if not isinstance(reasoning_effort, str) or not reasoning_effort:
+            reasoning_effort = (
+                llm.get("reasoning_effort") if isinstance(llm, dict) else None
+            )
+        if not isinstance(reasoning_effort, str) or not reasoning_effort:
+            raise ProviderError("OpenHands usage reasoning effort is unavailable")
+        stats = conversation.get("stats")
+        usage_to_metrics = (
+            stats.get("usage_to_metrics") if isinstance(stats, dict) else None
+        )
+        if not isinstance(usage_to_metrics, dict) or not usage_to_metrics:
+            raise ProviderError("OpenHands usage statistics are unavailable")
+
+        def token(value: dict[str, Any], key: str) -> int:
+            raw = value.get(key, 0)
+            if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0:
+                raise ProviderError("OpenHands usage statistics are invalid")
+            return raw
+
+        tokens = {
+            "uncachedInput": 0,
+            "cachedInput": 0,
+            "cacheWrite": 0,
+            "output": 0,
+            "reasoning": 0,
+        }
+        prices = _STANDARD_PRICES_PER_MILLION[model]
+        estimate = 0.0
+        long_context_turns = 0
+        for metrics in usage_to_metrics.values():
+            accumulated = (
+                metrics.get("accumulated_token_usage")
+                if isinstance(metrics, dict)
+                else None
+            )
+            turns = metrics.get("token_usages") if isinstance(metrics, dict) else None
+            if not isinstance(accumulated, dict) or not isinstance(turns, list):
+                raise ProviderError("OpenHands usage statistics are invalid")
+            tokens["uncachedInput"] += token(accumulated, "prompt_tokens")
+            tokens["cachedInput"] += token(accumulated, "cache_read_tokens")
+            tokens["cacheWrite"] += token(accumulated, "cache_write_tokens")
+            tokens["output"] += token(accumulated, "completion_tokens")
+            tokens["reasoning"] += token(accumulated, "reasoning_tokens")
+            for turn in turns:
+                if not isinstance(turn, dict):
+                    raise ProviderError("OpenHands usage statistics are invalid")
+                uncached = token(turn, "prompt_tokens")
+                cached = token(turn, "cache_read_tokens")
+                cache_write = token(turn, "cache_write_tokens")
+                output = token(turn, "completion_tokens")
+                long_context = (
+                    uncached + cached + cache_write
+                    > _LONG_CONTEXT_INPUT_THRESHOLD
+                )
+                if long_context:
+                    long_context_turns += 1
+                input_multiplier = 2.0 if long_context else 1.0
+                output_multiplier = 1.5 if long_context else 1.0
+                estimate += (
+                    uncached * prices["uncached_input"] * input_multiplier
+                    + cached * prices["cached_input"] * input_multiplier
+                    + cache_write * prices["cache_write"] * input_multiplier
+                    + output * prices["output"] * output_multiplier
+                ) / 1_000_000
+        denominator = tokens["uncachedInput"] + tokens["cachedInput"]
+        if tokens["reasoning"] > tokens["output"]:
+            raise ProviderError(
+                "OpenHands usage reasoning tokens exceed output tokens"
+            )
+        return {
+            "conversationId": str(target_id),
+            "model": model,
+            "reasoningEffort": reasoning_effort,
+            "tokens": tokens,
+            "cacheHitRate": round(
+                tokens["cachedInput"] / denominator if denominator else 0.0,
+                6,
+            ),
+            "officialApiEquivalentUsd": round(estimate, 8),
+            "longContextTurns": long_context_turns,
+            "final": conversation.get("execution_status")
+            in {"finished", "error", "stuck"},
+            "pricing": {
+                "serviceTier": "standard",
+                "asOf": _PRICING_AS_OF,
+                "source": _PRICING_SOURCE,
+                "perMillionTokensUsd": prices,
+            },
+            "disclaimer": (
+                "Official Standard API-equivalent estimate; "
+                "not a subscription invoice."
+            ),
+        }
+
+    def usage_target_allowed(
+        self,
+        sender_id: uuid.UUID,
+        target_id: uuid.UUID,
+        role: str,
+        owning_issue_id: uuid.UUID | None,
+        project_id: str | None = None,
+    ) -> bool:
+        """Allow only downward direct relationships for aggregation."""
+
+        target = self._request("GET", f"/api/conversations/{target_id}")
+        self._validate_environment(target.get("tags"))
+        if role == "project":
+            sender = self._request("GET", f"/api/conversations/{sender_id}")
+            self._validate_environment(sender.get("tags"))
+            project = self._project_admission(sender, sender_id)
+            issue = self._project_admission(target, target_id)
+            return (
+                project_id == project["project"]["id"]
+                and project["role"] == "project"
+                and issue["role"] == "issue"
+                and project["project"] == issue["project"]
+            )
+        if role == "issue" and "evexProjectAdmission" in target:
+            return False
+        try:
+            target_identity, target_tags, target_role = self._identity(target)
+        except ProviderError:
+            return False
+        if (
+            target_identity == target_id
+            and target_role == "specialist"
+            and target_tags.get("evexparent") == str(sender_id)
+            and target.get("parent_conversation_id") == str(sender_id)
+        ):
+            return True
+        if role in {"subissue", "spec", "specialist"}:
+            return False
+        if role == "issue" and target_role not in {"subissue", "spec"}:
+            return False
+        sender = self._request("GET", f"/api/conversations/{sender_id}")
+        self._validate_environment(sender.get("tags"))
+        if role != "issue":
+            return False
+        sender_identity, sender_tags, sender_role = self._identity(sender)
+        if (
+            sender_identity != sender_id
+            or sender_role != "issue"
+            or sender_id != owning_issue_id
+        ):
+            return False
+        same_parent_issue = (
+            target_tags.get("evexparentissue") == sender_tags.get("evexissue")
+        )
         explicit_parent = target_tags.get("evexparent") == str(sender_id)
         return (target_role == "subissue" and same_parent_issue) or (
             target_role == "spec" and (same_parent_issue or explicit_parent)

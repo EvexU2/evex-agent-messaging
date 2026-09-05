@@ -9,7 +9,7 @@ The MCP exposes exactly:
 
 ```text
 create_spec_chat()
-start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?)
+start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?, runtime?)
 send_message(targetId, messageKey, message)
 get_usage(targetId)
 ```
@@ -23,7 +23,7 @@ OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently select
 Agent Profile (`acp` or native `openhands`); the profile, rather than Messaging, owns the model.
 Messaging never calls the ACP model-switch endpoint. It stages the canonical bootstrap without
 starting an ordinary turn. The Spec Chat proceeds from that bootstrap and uses no OpenHands Delivery
-Goal. Only freshly admitted `v3` Spec Chats are reusable. Retained earlier generations remain
+Goal. Only freshly admitted `v4` Spec Chats are reusable. Retained earlier generations remain
 untouched and fail closed without metadata migration, event delivery, or model switching. The
 operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
 task-control, or Conversation-search surface.
@@ -38,7 +38,7 @@ verifies the relationship and operator-matching environment context. It never se
 Conversations.
 
 Provider JSON responses are capped at 1 MiB because exact Conversation reads also include growing
-usage statistics. This transport bound does not increase the 20,000-byte outgoing message budget;
+usage statistics. This transport bound does not increase the 12,000-byte outgoing message budget;
 over-limit responses still fail before parsing or dependent event delivery.
 The signed capability remains valid for its Discussion lifetime; it has no independent expiry or
 refresh lifecycle. Ordinary messages therefore post only the target event and never rewrite target
@@ -144,8 +144,11 @@ messages wake only a bounded processing turn. Closed Projects and terminal Deliv
 ineligible. The private provisioning request is internal wiring in the existing process.
 
 The message is exactly `{humanSummary, aiEvidence}`: a non-empty plain-language `humanSummary` of at
-most 2,000 UTF-8 bytes and `aiEvidence` of `{outcome, revision?, evidence, findings, nextBoundary}`.
-The canonical compact JSON is at most 20,000 UTF-8 bytes. The provider visibly projects only the
+most 1,000 UTF-8 bytes and `aiEvidence` of
+`{outcome, revision?, evidence, findings, nextBoundary, artifact?, artifactDigest?}`.
+The canonical compact JSON is at most 12,000 UTF-8 bytes, or 40,000 only when carrying one bounded
+32,768-byte exact artifact with its matching SHA-256 digest. Send that exact artifact once; later
+messages carry its digest plus changed fields only. The provider visibly projects only the
 summary and places the canonical envelope in a versioned renderer-hidden machine block, preserving
 the exact evidence for the receiver without a legacy raw-text path. Malformed, oversized,
 credential-bearing, or unrenderable input fails before any provider mutation with a bounded
@@ -158,10 +161,11 @@ Durable artifacts remain English. Messaging adds no locale authority tag or tran
 Existing Conversations keep their original launch instructions and titles; this change does not
 migrate, retitle, or replace them.
 
-The provider then verifies the target is wakeable immediately before mutation, posts one bounded user
-event, and returns `accepted: true` only after OpenHands accepts that request. A message aimed at an
-active target fails before posting and tells the sender to retry the same `messageKey`; this prevents
-OpenHands from storing a callback behind an already-running turn without scheduling its successor.
+After the service has verified the authorized sender/target relationship, the provider posts one
+bounded user event with `run: true` directly. OpenHands atomically accepts and wakes the target or
+returns a conflict when it is active; Messaging performs no separate status pre-read. It returns
+`accepted: true` only after OpenHands accepts that request. A conflict tells the sender to retry the
+same `messageKey`.
 `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are allowed. The
 receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
@@ -173,6 +177,10 @@ or Mission-authorized Specialist creates a bounded direct Specialist with `start
 and direct child then communicate bidirectionally with `send_message`; questions, findings,
 follow-ups, releases, cancellation, and the child's terminal return all use that same operation.
 Siblings, unrelated peers, and transitive routes remain forbidden.
+
+`runtime` defaults to `false` and may be `true` only for Writer or QA Missions that explicitly require
+Environment or Browser evidence. Source-only work omits it, so unrelated roles never receive the large
+Runtime MCP schemas.
 
 Creation returns the observed Spec checkout repository, branch, and current head as evidence. Those
 observations never become caller authority or replay input; an existing deterministic Spec Chat and

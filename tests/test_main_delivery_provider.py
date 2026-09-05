@@ -364,7 +364,7 @@ class MainDeliveryProviderTests(unittest.TestCase):
         request = delivery_request()
         provider, transport = self.provider([])
         invalid = self.identity(provider, request)
-        invalid["tags"]["evexadmission"] = "v3:messaging:" + "0" * 64
+        invalid["tags"]["evexadmission"] = "v4:messaging:" + "0" * 64
         transport.responses = [
             ProviderError("missing", status=404),
             {"active_agent_profile_id": PROFILE_ID, "profiles": [

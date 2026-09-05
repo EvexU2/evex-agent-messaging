@@ -117,6 +117,28 @@ class MessagingServiceTest(unittest.TestCase):
         delegated = inspect_capability(call[1][2], self.secret)
         self.assertEqual(delegated.role, "specialist")
         self.assertEqual(delegated.owning_issue_id, self.parent)
+        self.assertFalse(call[1][3]["runtime"])
+
+    def test_runtime_tools_require_an_explicit_writer_or_qa_mission(self):
+        provider = FakeProvider()
+        service = MessagingService(provider, self.secret)
+
+        service.start_specialist(
+            self.child_token(), mission_key="runtime-qa", prompt="Validate runtime.",
+            agent_type="qa", description="Validate runtime", skills=[], runtime=True,
+        )
+        self.assertTrue(provider.calls[0][1][3]["runtime"])
+
+        with self.assertRaisesRegex(CapabilityError, "limited to Writer and QA"):
+            service.start_specialist(
+                self.main_token(), mission_key="runtime-plan", prompt="Plan.",
+                agent_type="plan", description="Plan", skills=[], runtime=True,
+            )
+        with self.assertRaisesRegex(CapabilityError, "runtime is invalid"):
+            service.start_specialist(
+                self.child_token(), mission_key="invalid-runtime", prompt="Write.",
+                agent_type="writer", description="Write", skills=[], runtime="yes",
+            )
 
     def test_specialist_description_uses_the_published_256_character_limit(self):
         provider = FakeProvider()
@@ -162,10 +184,10 @@ class MessagingServiceTest(unittest.TestCase):
             )
         self.assertEqual(len(provider.calls), 2)
 
-    def test_specialist_prompt_fits_maximum_artifact_and_mission_envelope(self):
+    def test_specialist_prompt_fits_bounded_artifact_and_mission_envelope(self):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
-        prompt = "Mission envelope\n\n" + ("a" * 64_000) + ("\n" + "g" * 64_000)
+        prompt = "Mission envelope\n\n" + ("a" * 16_000) + ("\n" + "g" * 16_000)
 
         service.start_specialist(
             self.main_token(),
@@ -177,13 +199,13 @@ class MessagingServiceTest(unittest.TestCase):
         )
 
         self.assertEqual(provider.calls[0][1][3]["prompt"], prompt)
-        exact_limit = "x" * 131_072
+        exact_limit = "x" * 32_768
         service.start_specialist(
             self.main_token(), mission_key="plan-review-exact-prompt-limit",
             prompt=exact_limit, agent_type="plan-review",
             description="Review exact limit", skills=["evex-delivery-planning"],
         )
-        with self.assertRaisesRegex(CapabilityError, "prompt exceeds 131072 characters"):
+        with self.assertRaisesRegex(CapabilityError, "prompt exceeds 32768 characters"):
             service.start_specialist(
                 self.main_token(), mission_key="plan-review-oversized-prompt",
                 prompt=exact_limit + "x", agent_type="plan-review",
@@ -453,11 +475,11 @@ class MessagingServiceTest(unittest.TestCase):
             ("ghp_abcdefgh", self.message()),
             ("key", "legacy raw text"),
             ("key", {"humanSummary": " ", "aiEvidence": self.message()["aiEvidence"]}),
-            ("key", {"humanSummary": "x" * 2001, "aiEvidence": self.message()["aiEvidence"]}),
+            ("key", {"humanSummary": "x" * 1001, "aiEvidence": self.message()["aiEvidence"]}),
             ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "ok"}}),
             ("key", self.message("Bearer credential-value")),
             ("key", self.message("unsafe <!-- marker")),
-            ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "passed", "evidence": ["x" * 2000] * 11, "findings": [], "nextBoundary": "review"}}),
+            ("key", {"humanSummary": "summary", "aiEvidence": {"outcome": "passed", "evidence": ["x"] * 21, "findings": [], "nextBoundary": "review"}}),
         )
         for key, message in invalid:
             with self.subTest(key=key, message=message), self.assertRaises(CapabilityError) as error:
@@ -481,10 +503,14 @@ class MessagingServiceTest(unittest.TestCase):
         provider = FakeProvider()
         service = MessagingService(provider, self.secret)
         message = self.message()
-        message["aiEvidence"]["artifact"] = (
+        artifact = (
             "<!-- evex-delivery-plan -->\nComplete reviewed plan\n"
             "<!-- evex-plan-slice:v1 id=one -->"
         )
+        message["aiEvidence"]["artifact"] = artifact
+        message["aiEvidence"]["artifactDigest"] = hashlib.sha256(
+            artifact.encode()
+        ).hexdigest()
 
         service.send_message(self.child_token(), self.parent, "result", message)
 
@@ -493,15 +519,27 @@ class MessagingServiceTest(unittest.TestCase):
     def test_oversized_evidence_item_names_the_exact_repairable_bound(self):
         service = MessagingService(FakeProvider(), self.secret)
         message = self.message()
-        message["aiEvidence"]["evidence"] = ["x" * 2001]
+        message["aiEvidence"]["evidence"] = ["x" * 1001]
 
         with self.assertRaisesRegex(
             CapabilityError,
-            r"aiEvidence\.evidence\[0\] exceeds 2000 UTF-8 bytes",
+            r"aiEvidence\.evidence\[0\] exceeds 1000 UTF-8 bytes",
         ):
             service.send_message(self.child_token(), self.parent, "result", message)
 
         self.assertEqual(service._provider.calls, [])
+
+    def test_artifact_requires_matching_digest(self):
+        service = MessagingService(FakeProvider(), self.secret)
+        message = self.message()
+        message["aiEvidence"]["artifact"] = "reviewed plan"
+
+        with self.assertRaisesRegex(CapabilityError, "requires artifactDigest"):
+            service.send_message(self.child_token(), self.parent, "result", message)
+
+        message["aiEvidence"]["artifactDigest"] = "0" * 64
+        with self.assertRaisesRegex(CapabilityError, "does not match artifact"):
+            service.send_message(self.child_token(), self.parent, "result", message)
 
     def test_readiness_is_provider_only_and_fail_closed(self):
         self.assertTrue(MessagingService(FakeProvider(), self.secret).readiness())

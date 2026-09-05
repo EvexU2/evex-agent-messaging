@@ -30,14 +30,14 @@ _CREDENTIAL = re.compile(
     re.IGNORECASE,
 )
 _MACHINE_DELIMITER = re.compile(r"<!--|-->")
-_MAX_MESSAGE_BYTES = 20_000
-_MAX_SUMMARY_BYTES = 2_000
-_MAX_EVIDENCE_ITEMS = 100
-_MAX_EVIDENCE_ITEM_BYTES = 2_000
-_MAX_ARTIFACT_BYTES = 64_000
-_MAX_TERMINAL_MESSAGE_BYTES = 80_000
+_MAX_MESSAGE_BYTES = 12_000
+_MAX_SUMMARY_BYTES = 1_000
+_MAX_EVIDENCE_ITEMS = 20
+_MAX_EVIDENCE_ITEM_BYTES = 1_000
+_MAX_ARTIFACT_BYTES = 32_768
+_MAX_TERMINAL_MESSAGE_BYTES = 40_000
 SPECIALIST_DESCRIPTION_MAX_LENGTH = 256
-SPECIALIST_PROMPT_MAX_LENGTH = 131_072
+SPECIALIST_PROMPT_MAX_LENGTH = 32_768
 _SPECIALIST_REASONING = {"spec-review": "high"}
 _SPECIALIST_SKILLS = {
     "plan": "evex-delivery-planning",
@@ -220,6 +220,7 @@ class MessagingService:
         description: str,
         skills: object,
         reasoning: object = None,
+        runtime: object = False,
     ) -> dict[str, Any]:
         parent = inspect_capability(token, self._secret)
         role = parent.role
@@ -259,6 +260,10 @@ class MessagingService:
             raise CapabilityError("low reasoning is limited to Plan and Plan Review")
         if agent_type == "spec-review" and selected_reasoning != "high":
             raise CapabilityError("Spec Review requires high reasoning")
+        if not isinstance(runtime, bool):
+            raise CapabilityError("runtime is invalid")
+        if runtime and agent_type not in {"writer", "qa"}:
+            raise CapabilityError("runtime is limited to Writer and QA")
         descriptor_digest = hashlib.sha256(
             json.dumps(
                 {
@@ -266,6 +271,7 @@ class MessagingService:
                     "description": normalized_description,
                     "prompt": normalized_prompt,
                     "reasoning": selected_reasoning,
+                    "runtime": runtime,
                     "skills": skill_names,
                 },
                 ensure_ascii=False,
@@ -293,6 +299,7 @@ class MessagingService:
                 "description": normalized_description,
                 "skills": skill_names,
                 "reasoning": selected_reasoning,
+                "runtime": runtime,
                 "descriptorDigest": descriptor_digest,
                 "parentRole": role,
             },
@@ -410,7 +417,7 @@ class MessagingService:
             or _CREDENTIAL.search(summary)
         ):
             raise CapabilityError("message summary is invalid")
-        if not isinstance(evidence, dict) or not {"outcome", "evidence", "findings", "nextBoundary"} <= set(evidence) or set(evidence) - {"outcome", "revision", "evidence", "findings", "nextBoundary", "artifact"}:
+        if not isinstance(evidence, dict) or not {"outcome", "evidence", "findings", "nextBoundary"} <= set(evidence) or set(evidence) - {"outcome", "revision", "evidence", "findings", "nextBoundary", "artifact", "artifactDigest"}:
             raise CapabilityError("message AI evidence is invalid")
         for key in ("outcome", "nextBoundary"):
             value = evidence.get(key)
@@ -420,6 +427,14 @@ class MessagingService:
             revision = evidence["revision"]
             if not isinstance(revision, str) or not revision.strip() or len(revision.encode()) > _MAX_EVIDENCE_ITEM_BYTES:
                 raise CapabilityError("message AI evidence is invalid")
+        artifact_digest = evidence.get("artifactDigest")
+        if artifact_digest is not None and (
+            not isinstance(artifact_digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", artifact_digest) is None
+        ):
+            raise CapabilityError(
+                "message aiEvidence.artifactDigest must be a lowercase SHA-256 digest"
+            )
         if "artifact" in evidence:
             artifact = evidence["artifact"]
             if not isinstance(artifact, str) or not artifact.strip():
@@ -427,6 +442,17 @@ class MessagingService:
             if len(artifact.encode()) > _MAX_ARTIFACT_BYTES:
                 raise CapabilityError(
                     f"message aiEvidence.artifact exceeds {_MAX_ARTIFACT_BYTES} UTF-8 bytes"
+                )
+            if artifact_digest is None:
+                raise CapabilityError(
+                    "message aiEvidence.artifact requires artifactDigest"
+                )
+            if not hmac.compare_digest(
+                artifact_digest,
+                hashlib.sha256(artifact.encode()).hexdigest(),
+            ):
+                raise CapabilityError(
+                    "message aiEvidence.artifactDigest does not match artifact"
                 )
         for key in ("evidence", "findings"):
             values = evidence.get(key)

@@ -100,6 +100,17 @@ class MessagingProvider(Protocol):
         message: dict[str, Any],
     ) -> dict[str, Any]: ...
 
+    def usage(self, target_id: uuid.UUID) -> dict[str, Any]: ...
+
+    def usage_target_allowed(
+        self,
+        sender_id: uuid.UUID,
+        target_id: uuid.UUID,
+        role: str,
+        owning_issue_id: uuid.UUID | None,
+        project_id: str | None = None,
+    ) -> bool: ...
+
     def readiness(self) -> bool: ...
 
 
@@ -357,6 +368,34 @@ class MessagingService:
             message_key,
             bounded_message,
         )
+
+    def get_usage(
+        self,
+        token: str,
+        target_id: uuid.UUID,
+    ) -> dict[str, Any]:
+        """Read own or one verified direct child's cumulative usage."""
+
+        capability = inspect_capability(token, self._secret)
+        if target_id != capability.sender_id:
+            if isinstance(capability, ProjectCapability):
+                allowed = self._provider.usage_target_allowed(
+                    capability.sender_id,
+                    target_id,
+                    capability.role,
+                    None,
+                    capability.project_id,
+                )
+            else:
+                allowed = self._provider.usage_target_allowed(
+                    capability.sender_id,
+                    target_id,
+                    capability.role,
+                    capability.owning_issue_id,
+                )
+            if not allowed:
+                raise CapabilityError("usage target is not allowed")
+        return self._provider.usage(target_id)
 
     @staticmethod
     def _validated_message(message: object) -> dict[str, Any]:

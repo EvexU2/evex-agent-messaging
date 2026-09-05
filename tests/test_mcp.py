@@ -35,6 +35,13 @@ class FakeService:
         self.calls.append(("start-specialist", args, kwargs))
         return {"created": True, "conversationId": "specialist-id", "status": "running"}
 
+    def get_usage(self, *args):
+        self.calls.append(("get-usage", args))
+        return {
+            "conversationId": str(args[1]),
+            "officialApiEquivalentUsd": 1.25,
+        }
+
     def readiness(self):
         return True
 
@@ -65,11 +72,11 @@ class McpServerTest(unittest.TestCase):
     def message():
         return {"humanSummary": "Delivery passed", "aiEvidence": {"outcome": "passed", "evidence": [], "findings": [], "nextBoundary": "review"}}
 
-    def test_lists_only_conversation_creation_and_message_tools(self):
+    def test_lists_conversation_and_stateless_usage_tools(self):
         response = self.server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
         self.assertEqual(
             [tool["name"] for tool in response["result"]["tools"]],
-            ["create_spec_chat", "start_specialist", "send_message"],
+            ["create_spec_chat", "start_specialist", "send_message", "get_usage"],
         )
         self.assertEqual(TOOLS[0]["inputSchema"], {
             "type": "object",
@@ -145,6 +152,40 @@ class McpServerTest(unittest.TestCase):
         )
         self.assertEqual(evidence_schema["properties"]["findings"]["maxItems"], 100)
         self.assertEqual(evidence_schema["properties"]["artifact"]["maxLength"], 64000)
+        self.assertEqual(
+            TOOLS[3]["inputSchema"]["required"], ["targetId"]
+        )
+
+    def test_get_usage_uses_transport_bound_capability(self):
+        target = uuid.uuid4()
+        response = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 7,
+            "method": "tools/call",
+            "params": {
+                "name": "get_usage",
+                "arguments": {"targetId": str(target)},
+            },
+        }, capability_ref="evx2_capability")
+
+        self.assertEqual(
+            response["result"]["structuredContent"]["officialApiEquivalentUsd"],
+            1.25,
+        )
+        self.assertEqual(
+            self.service.calls[-1],
+            ("get-usage", ("evx2_capability", target)),
+        )
+        denied = self.server.handle({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/call",
+            "params": {
+                "name": "get_usage",
+                "arguments": {"targetId": str(target), "extra": True},
+            },
+        }, capability_ref="evx2_capability")
+        self.assertEqual(denied["error"]["message"], "invalid messaging request")
 
     def test_start_specialist_uses_transport_bound_coordinator_capability(self):
         response = self.server.handle({
@@ -351,7 +392,7 @@ class McpServerTest(unittest.TestCase):
 
     def test_initialize_reports_new_contract_version(self):
         response = self.server.handle({"id": 1, "method": "initialize"})
-        self.assertEqual(response["result"]["serverInfo"]["version"], "0.5.0")
+        self.assertEqual(response["result"]["serverInfo"]["version"], "0.6.0")
 
     def test_bearer_capability_is_strict(self):
         self.assertEqual(bearer_capability("Bearer evx2_test"), "evx2_test")

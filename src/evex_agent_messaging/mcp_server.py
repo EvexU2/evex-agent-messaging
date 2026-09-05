@@ -155,6 +155,20 @@ TOOLS = [{
             },
         },
     },
+}, {
+    "name": "get_usage",
+    "description": (
+        "Read one cumulative provider usage and official Standard API-equivalent "
+        "cost snapshot for this Conversation or one verified direct child."
+    ),
+    "inputSchema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["targetId"],
+        "properties": {
+            "targetId": {"type": "string", "format": "uuid"},
+        },
+    },
 }]
 
 
@@ -170,7 +184,7 @@ class McpServer:
             return self._result(request_id, {
                 "protocolVersion": "2025-06-18",
                 "capabilities": {"tools": {}},
-                "serverInfo": {"name": "evex-agent-messaging", "version": "0.5.0"},
+                "serverInfo": {"name": "evex-agent-messaging", "version": "0.6.0"},
             })
         if method == "tools/list":
             return self._result(request_id, {"tools": TOOLS})
@@ -182,7 +196,9 @@ class McpServer:
             if not isinstance(arguments, dict):
                 raise TypeError("tool arguments must be an object")
             name = params.get("name")
-            if name not in {"create_spec_chat", "start_specialist", "send_message"}:
+            if name not in {
+                "create_spec_chat", "start_specialist", "send_message", "get_usage",
+            }:
                 return self._error(request_id, -32602, "unknown messaging tool")
             if not isinstance(capability_ref, str) or not capability_ref.startswith(_CAPABILITY_PREFIXES):
                 raise ValueError("transport capability is required")
@@ -204,7 +220,7 @@ class McpServer:
                     reasoning=arguments.get("reasoning"),
                     skills=arguments.get("skills", []),
                 )
-            else:
+            elif name == "send_message":
                 if "message" not in arguments and "text" in arguments:
                     return self._error(
                         request_id,
@@ -222,6 +238,13 @@ class McpServer:
                     uuid.UUID(arguments["targetId"]),
                     arguments["messageKey"],
                     arguments["message"],
+                )
+            else:
+                if set(arguments) != {"targetId"}:
+                    raise ValueError("get_usage accepts only targetId")
+                value = self._service.get_usage(
+                    capability_ref,
+                    uuid.UUID(arguments["targetId"]),
                 )
         except CapabilityError as exc:
             return self._error(request_id, -32602, str(exc))

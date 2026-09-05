@@ -162,6 +162,69 @@ class OpenHandsProviderTest(unittest.TestCase):
             admission_key=b"admission-key" * 4,
         ), transport
 
+    def test_usage_reports_current_native_tokens_and_standard_estimate(self):
+        conversation = discussion(self.child, "specialist")
+        conversation["current_model_id"] = None
+        conversation["agent"] = {"llm": {
+            "model": "openai/gpt-5.6-sol",
+            "reasoning_effort": "medium",
+        }}
+        conversation["stats"] = {
+            "usage_to_metrics": {
+                "default": {
+                    "accumulated_token_usage": {
+                        "prompt_tokens": 1000,
+                        "cache_read_tokens": 9000,
+                        "cache_write_tokens": 500,
+                        "completion_tokens": 1000,
+                        "reasoning_tokens": 250,
+                    },
+                    "token_usages": [{
+                        "prompt_tokens": 1000,
+                        "cache_read_tokens": 9000,
+                        "cache_write_tokens": 500,
+                        "completion_tokens": 1000,
+                        "reasoning_tokens": 250,
+                    }],
+                }
+            }
+        }
+        provider, _ = self.provider([conversation])
+
+        result = provider.usage(self.child)
+
+        self.assertEqual(result["model"], "gpt-5.6-sol")
+        self.assertEqual(result["reasoningEffort"], "medium")
+        self.assertEqual(result["tokens"], {
+            "uncachedInput": 1000,
+            "cachedInput": 9000,
+            "cacheWrite": 500,
+            "output": 1000,
+            "reasoning": 250,
+        })
+        self.assertEqual(result["cacheHitRate"], 0.9)
+        self.assertAlmostEqual(result["officialApiEquivalentUsd"], 0.0301)
+        self.assertTrue(result["final"])
+
+    def test_usage_relationship_is_downward_only(self):
+        specialist = discussion(
+            self.child,
+            "specialist",
+            evexparent=str(self.parent),
+        )
+        specialist["parent_conversation_id"] = str(self.parent)
+        provider, _ = self.provider([specialist])
+
+        self.assertTrue(provider.usage_target_allowed(
+            self.parent, self.child, "subissue", self.parent,
+        ))
+
+        parent = discussion(self.parent, "issue")
+        provider, _ = self.provider([parent])
+        self.assertFalse(provider.usage_target_allowed(
+            self.child, self.parent, "subissue", self.parent,
+        ))
+
     def test_create_spec_chat_reuses_exact_parent_issue_and_fixed_role(self):
         parent = discussion(
             self.parent,
@@ -1766,6 +1829,30 @@ class ProjectAdmissionTest(unittest.TestCase):
         with self.assertRaises(ProviderError):
             service.send_message(self.token("project"), self.parent, "uncertain", self.message)
         self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET", "GET", "POST"])
+
+    def test_usage_allows_project_to_issue_but_denies_issue_to_project(self):
+        service, transport = self.service([
+            self.conversation("issue"),
+            self.conversation("project"),
+        ])
+
+        self.assertTrue(service._provider.usage_target_allowed(
+            self.chat,
+            self.parent,
+            "project",
+            None,
+            self.project_id,
+        ))
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET", "GET"])
+
+        service, transport = self.service([self.conversation("project")])
+        self.assertFalse(service._provider.usage_target_allowed(
+            self.parent,
+            self.chat,
+            "issue",
+            self.parent,
+        ))
+        self.assertEqual([method for method, _, _ in transport.calls], ["GET"])
 
     def test_project_token_binding_outer_identity_and_peer_routes_are_denied(self):
         for direction in ("project", "issue"):

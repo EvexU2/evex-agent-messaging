@@ -11,6 +11,7 @@ The MCP exposes exactly:
 create_spec_chat()
 start_specialist(missionKey, prompt, agentType, description, reasoning?, skills?)
 send_message(targetId, messageKey, message)
+get_usage(targetId)
 ```
 
 Only the Issue Conversation may call `create_spec_chat`. It deterministically creates or reuses the root
@@ -45,8 +46,9 @@ secrets.
 
 ### Project admission (consumer implementation; host producer required)
 
-The nominated Project Chat uses a distinct send-only `evx3_` capability. Messaging remains the sole
-signer. Its payload is `version 3 | sender UUID (16 bytes) | send-only action (2) | Project ID byte
+The nominated Project Chat uses a distinct relationship-bound `evx3_` capability for direct messages
+and stateless usage reads. Messaging remains the sole
+signer. Its payload is `version 3 | sender UUID (16 bytes) | relationship action (2) | Project ID byte
 length (uint16, big-endian) | Project ID | HMAC-SHA256`. The Project capability has no owning Main or
 task key. Native node IDs are opaque, nonempty visible ASCII, bounded to 256 bytes; no node-ID prefix
 is inferred. Existing `evx2_` bytes and public Messaging operations are unchanged; Messaging now
@@ -134,7 +136,7 @@ PM provenance, persistence/no-refresh behavior, combined two-root Canary and exa
 proof remain required before rollout acceptance. No deployment, activation or live evaluation is
 part of this source change.
 
-Architecture impact: public MCP operations remain three; Messaging creates bounded durable Specialist Conversations but no
+Architecture impact: public MCP operations remain four; Messaging creates bounded durable Specialist Conversations but no
 checkout, service, workflow store, recovery transport or background loop. It admits one additional
 relationship class for the already-existing PM-nominated Chat. PM interaction creates/nominates that
 Chat in the host; the Project/PM owns its authority, it has no source Writer/checkout, and admitted
@@ -164,7 +166,9 @@ OpenHands from storing a callback behind an already-running turn without schedul
 receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 
 There is no generic Child creation, callback kind/generation, result lock, human-question relay,
-resume, cancel, replacement, usage, GitHub fallback, queue, poller, or persistent state. A coordinator
+resume, cancel, replacement, GitHub fallback, queue, poller, or persistent state. `get_usage` reads one
+cumulative stateless provider snapshot for the caller or one verified direct child; it creates no wake
+and never changes Delivery authority. A coordinator
 or Mission-authorized Specialist creates a bounded direct Specialist with `start_specialist`. Creator
 and direct child then communicate bidirectionally with `send_message`; questions, findings,
 follow-ups, releases, cancellation, and the child's terminal return all use that same operation.

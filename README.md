@@ -23,7 +23,7 @@ OpenHands-owned `spec` role, `evex-delivery-spec` skill and the currently select
 Agent Profile (`acp` or native `openhands`); the profile, rather than Messaging, owns the model.
 Messaging never calls the ACP model-switch endpoint. It stages the canonical bootstrap without
 starting an ordinary turn. The Spec Chat proceeds from that bootstrap and uses no OpenHands Delivery
-Goal. Only freshly admitted `v3` Spec Chats are reusable. Retained earlier generations remain
+Goal. Only freshly admitted `v4` Spec Chats are reusable. Retained earlier generations remain
 untouched and fail closed without metadata migration, event delivery, or model switching. The
 operation returns the stable ID and Canvas URL and has no generic role, Mission, callback,
 task-control, or Conversation-search surface.
@@ -161,10 +161,11 @@ Durable artifacts remain English. Messaging adds no locale authority tag or tran
 Existing Conversations keep their original launch instructions and titles; this change does not
 migrate, retitle, or replace them.
 
-The provider then verifies the target is wakeable immediately before mutation, posts one bounded user
-event, and returns `accepted: true` only after OpenHands accepts that request. A message aimed at an
-active target fails before posting and tells the sender to retry the same `messageKey`; this prevents
-OpenHands from storing a callback behind an already-running turn without scheduling its successor.
+After the service has verified the authorized sender/target relationship, the provider posts one
+bounded user event with `run: true` directly. OpenHands atomically accepts and wakes the target or
+returns a conflict when it is active; Messaging performs no separate status pre-read. It returns
+`accepted: true` only after OpenHands accepts that request. A conflict tells the sender to retry the
+same `messageKey`.
 `messageKey` is correlation data, not a lock or receipt. Multiple genuine messages are allowed. The
 receiver re-reads GitHub, Git, Spec, and runtime facts before acting.
 

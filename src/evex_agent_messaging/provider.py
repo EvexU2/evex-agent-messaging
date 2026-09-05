@@ -33,10 +33,11 @@ _SPEC_REASONING = "high"
 _SPEC_SKILL = "evex-delivery-spec"
 _SUPPORTED_AGENT_KINDS = {"acp", "openhands"}
 _WORKSPACE_REPOSITORY = "EvexU2/evex-u-workspace"
-_MESSAGING_ADMISSION = re.compile(r"v3:messaging:[0-9a-f]{64}")
+_MESSAGING_ADMISSION = re.compile(r"v4:messaging:[0-9a-f]{64}")
 _ADMISSION_CAPABILITY = "evex_delivery_admission_v1"
-_CURRENT_AGENT_CONFIG_MARKER_VERSION = "v3"
-_CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v3"
+_CURRENT_AGENT_CONFIG_MARKER_VERSION = "v4"
+_CURRENT_AGENT_CONFIG_MARKER_CONTEXT = "evex-agent-config:v4"
+_SERVER_RUNTIME_TAGS = {"evexadmission", "evexskillsgeneration"}
 _MAIN_MAX_ITERATIONS = 500
 _WAKEABLE_EXECUTION_STATUSES = {"idle", "paused", "finished", "error", "stuck"}
 _DELIVERY_LOCKS = tuple(threading.Lock() for _ in range(64))
@@ -630,7 +631,7 @@ class OpenHandsProvider:
                 str(key) for key in tags
                 if str(key).startswith("evex")
                 and key not in required
-                and key not in {"evexagentprofile", "evexadmission"}
+                and key not in {"evexagentprofile", *_SERVER_RUNTIME_TAGS}
             }
             if isinstance(tags, dict) else set()
         )
@@ -654,7 +655,11 @@ class OpenHandsProvider:
             or launched.get("agent_profile_id") != profile
         ):
             raise ProviderError("Main profile mismatch", reason="target_identity_mismatch")
-        unsigned_tags = {str(key): str(value) for key, value in tags.items() if key != "evexadmission"}
+        unsigned_tags = {
+            str(key): str(value)
+            for key, value in tags.items()
+            if key not in _SERVER_RUNTIME_TAGS
+        }
         marker = tags.get("evexadmission", "")
         capability_ref = self._main_delivery_capability(request)
         expected_marker = (
@@ -985,7 +990,9 @@ class OpenHandsProvider:
             if isinstance(actual_profile, dict)
             else None
         )
-        unsigned_tags = {key: item for key, item in tags.items() if key != "evexadmission"}
+        unsigned_tags = {
+            key: item for key, item in tags.items() if key not in _SERVER_RUNTIME_TAGS
+        }
         marker = tags.get("evexadmission", "")
         expected_marker = self._expected_admission_marker(
             specialist_id,
@@ -1296,7 +1303,7 @@ class OpenHandsProvider:
             for key in tags
             if str(key).startswith("evex")
             and key not in expected_tags
-            and key != "evexadmission"
+            and key not in _SERVER_RUNTIME_TAGS
         }
         if (
             identity != spec_chat_id
@@ -1320,7 +1327,7 @@ class OpenHandsProvider:
         unsigned_tags = {
             str(key): str(item)
             for key, item in tags.items()
-            if key != "evexadmission"
+            if key not in _SERVER_RUNTIME_TAGS
         }
         marker_match = _MESSAGING_ADMISSION.fullmatch(marker)
         expected_marker = (
@@ -1971,19 +1978,6 @@ class OpenHandsProvider:
                 reason="target_busy",
             )
         try:
-            current = self._request("GET", f"/api/conversations/{target_id}")
-            status = current.get("execution_status")
-            if status not in _WAKEABLE_EXECUTION_STATUSES:
-                raise ProviderError(
-                    "Message target is busy; retry the same messageKey"
-                    if status == "running"
-                    else "Message target is not wakeable",
-                    reason=(
-                        "target_busy"
-                        if status == "running"
-                        else "target_not_wakeable"
-                    ),
-                )
             envelope = json.dumps(
                 {
                     "aiEvidence": message["aiEvidence"],
@@ -1998,11 +1992,19 @@ class OpenHandsProvider:
             )
             envelope = envelope.replace("<", "\\u003c").replace(">", "\\u003e")
             projection = f'{message["humanSummary"]}\n<!-- evex-agent-message:v1 {envelope} -->'
-            self._request(
-                "POST",
-                f"/api/conversations/{target_id}/events",
-                {"role": "user", "content": [{"type": "text", "text": projection}], "run": True},
-            )
+            try:
+                self._request(
+                    "POST",
+                    f"/api/conversations/{target_id}/events",
+                    {"role": "user", "content": [{"type": "text", "text": projection}], "run": True},
+                )
+            except ProviderError as exc:
+                if exc.status == 409:
+                    raise ProviderError(
+                        "Message target is busy; retry the same messageKey",
+                        reason="target_busy",
+                    ) from exc
+                raise
         finally:
             lock.release()
         return {"accepted": True, "messageKey": message_key}
